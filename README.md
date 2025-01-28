@@ -1,6 +1,6 @@
 # Dotfiles for Sway(fx), Alacritty, LazyVim, waybar and wofi
 
-![alt text](https://github.com/floppyist/dotfiles/tree/main/screenshots/screenshot.png?raw=true)
+![Screenshot](https://github.com/floppyist/dotfiles/tree/main/screenshots/screenshot.png)
 
 ## Install
 
