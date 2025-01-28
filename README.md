@@ -18,8 +18,10 @@ Move .bashrc to ~
 
 > mv ~/.config/.bashrc ~
 
-Delete screenshots folder and README.md
+Delete git folder, screenshots folder and README.md
 
-> rm ~/.config/screenshots
+> rm -r ~/.config/.git
+
+> rm -r ~/.config/screenshots
 
 > rm ~/.config/README.md
