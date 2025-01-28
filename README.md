@@ -10,4 +10,8 @@ You will also need *Nerd Fonts* and *Noto Fonts*.
 
 > mv ./dotfiles/* ~/.config
 
+Move .bashrc to ~
+
+> mv ~/.config/.bashrc ~
+
 # Screenshots
