@@ -43,6 +43,14 @@ window#waybar.hidden {
     color: @text;
 }
 
+/* Litte hack to get rid of the hover effect */
+#workspaces button:hover {
+    box-shadow: inherit;
+    text-shadow: inherit;
+    background: transparent;
+    border: @mauve;
+}
+
 #workspaces button.focused {
     color: @mauve;
     text-shadow: 0 0 5px rgba(0,0,0,0.2);
