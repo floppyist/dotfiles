@@ -1,7 +1,7 @@
 # Dotfiles for Sway(fx), Alacritty, LazyVim, waybar and wofi
 
-<p>
-    <img src="screenshots/screenshot.png" width="220" />
+<p align="center">
+    <img src="screenshots/screenshot.png" />
 </p>
 
 ## Install
