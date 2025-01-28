@@ -1,0 +1,38 @@
+# Terminal
+bindsym $mod+Return exec $term
+
+# Close
+bindsym $mod+Shift+q kill
+
+# Launcher 
+bindsym $mod+d exec $menu
+
+# Floating
+floating_modifier $mod normal
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+space focus mode_toggle
+
+# Reload the configuration file
+bindsym $mod+Shift+c reload
+
+# Exit 
+bindsym $mod+Shift+e exec swaynag -t warning -m 'You pressed the exit shortcut. Do you really want to exit sway? This will end your Wayland session.' -B 'Yes, exit sway' 'swaymsg exit'
+
+# Move
+bindsym $mod+$left focus left
+bindsym $mod+$down focus down
+bindsym $mod+$up focus up
+bindsym $mod+$right focus right
+
+# Drag
+bindsym $mod+Shift+$left move left
+bindsym $mod+Shift+$down move down
+bindsym $mod+Shift+$up move up
+bindsym $mod+Shift+$right move right
+
+# Layout
+bindsym $mod+b splith
+bindsym $mod+v splitv
+
+# Fullscreen
+bindsym $mod+f fullscreen

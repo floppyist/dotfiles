@@ -1,0 +1,6 @@
+# Devices
+output eDP-1 scale 2
+
+# Wallpaper
+output * bg ~/images/wallpaper.png fill
+

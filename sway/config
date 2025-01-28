@@ -1,0 +1,50 @@
+# Autostart
+exec pipewire
+
+# Variables
+set $mod Mod1
+set $left h
+set $down j
+set $up k
+set $right l
+set $term alacritty
+set $menu wmenu
+
+# Hide titlebar for all windows
+default_border pixel 1
+default_floating_border pixel 1
+
+# Disable mouse hover on windows
+focus_follows_mouse no
+
+# Setup gaps between windows
+gaps inner 10
+
+# Setup bordersize
+default_border pixel 0
+
+# Disable smart borders
+smart_borders off
+
+# Setup font
+font pango:Ionicons 11, Poppins Regular 11
+
+# Setup cursor
+seat seat0 xcursor_theme Bibata-Modern-Ice 29
+
+# Setup app launcher
+set $menu wofi --conf ~/.config/wofi/config --style ~/.config/wofi/style.css --show run
+
+# SwayFX
+corner_radius 10
+blur off
+blur_xray off
+blur_passes 2
+blur_radius 5
+
+shadows on
+shadows_on_csd on
+shadow_blur_radius 20
+shadow_color #0000007F
+
+include /etc/sway/config.d/*

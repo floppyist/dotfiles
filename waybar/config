@@ -1,0 +1,70 @@
+{
+    "layer": "top",
+    "position": "top",
+    "spacing": 0,
+    "margin-left": 10,
+    "margin-right": 10,
+    "margin-top": 10,
+    "height": 34,
+    "modules-left": [
+        "sway/workspaces",
+	"sway/mode",
+    ],
+    "modules-center": [
+	"backlight",
+	"wireplumber",
+        "network",
+    ],
+    "modules-right": [
+        "tray",
+        "clock"
+    ],
+    "sway/workspaces": {
+        "format": "{icon}",
+        "format-icons": {
+            "default": "  ",
+            "2": "  ",
+            "3": "  ",
+            "4": " 󰎆 ",
+            "5": "  ",
+        },
+        "persistent_workspaces": {
+            "1": [],
+            "2": [],
+            "3": [],
+            "4": [],
+            "5": []
+        }
+    },
+    "tray": {
+        "spacing": 10
+    },
+    "clock": {
+        "format": "{:%H:%M}",
+    },
+    "network": {
+        "format-wifi" : "{icon}   {essid}",
+        "format-icons": ["󰤯","󰤟","󰤢","󰤥","󰤨"],
+        "format-ethernet": "󰀂",
+	"format-alt" : "󱛇",
+        "format-disconnected" : "󰖪",
+	"interval": 5,
+    },
+    "backlight": {
+	"format": "󰃠   {percent}%",
+	"on-scroll-down": "brightnessctl -c backlight set 5%-",
+	"on-scroll-up": "brightnessctl -c backlight set +5%",
+    },
+    "wireplumber": {
+        "format": "{icon}  {volume}%",
+        "format-bluetooth": "󰂰",
+	"spacing": 10,
+        "tooltip-format": "Volume : {volume}%",
+        "format-muted": "󰝟",
+        "format-icons": {
+            "headphone": "",
+            "default": ["󰕾"]
+        },
+        "scroll-step": 5
+    },
+}
