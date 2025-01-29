@@ -4,7 +4,7 @@
     <img src="screenshots/screenshot-1.png" />
 </p>
 
-## Install
+## Installation
 
 * Sway
 * SwayFX 
@@ -12,8 +12,9 @@
 * Wofi
 * Alacritty
 * LazyVim
-
-You will also need **Nerd Fonts** and **Noto Fonts** if you want to look sway like this.
+* Nerd Fonts
+* Noto Fonts
+* Pango Fonts
 
 ### Clone repository
 
@@ -24,8 +25,10 @@ git clone https://github.com/floppyist/dotfiles
 ### Install files
 
 ```console
-
 mv dotfiles/.bashrc ~
+```
+
+```console
 mv dotfiles/* ~/.config
 ```
 
@@ -33,12 +36,22 @@ mv dotfiles/* ~/.config
 
 ```console
 rm -r ~/.config/.git
+```
+
+```console
 rm -r ~/.config/screenshots
+```
+
+```console
 rm ~/.config/README.md
 ```
+
 ## Screenshots
 
 <p align="center">
     <img src="screenshots/screenshot-2.png" />
 </p>
 
+<p align="center">
+    <img src="screenshots/screenshot-3.png" />
+</p>
