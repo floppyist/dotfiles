@@ -1,27 +1,44 @@
-# Dotfiles for Sway(fx), Alacritty, LazyVim, waybar and wofi
+# Dotfiles for Sway(fx), Alacritty, LazyVim, Waybar and Wofi
 
 <p align="center">
-    <img src="screenshots/screenshot.png" />
+    <img src="screenshots/screenshot-1.png" />
 </p>
 
 ## Install
 
-Install *Sway*, *SwayFx*, *Alacritty*, *LazyVim*, *waybar* and *wofi* with your preferred package manager.
+* Sway
+* SwayFX 
+* Waybar
+* Wofi
+* Alacritty
+* LazyVim
 
-You will also need *Nerd Fonts* and *Noto Fonts*.
+You will also need **Nerd Fonts** and **Noto Fonts** if you want to look sway like this.
 
-> git clone https://github.com/floppyist/dotfiles
+### Clone repository
 
-> mv ./dotfiles/* ~/.config
+```console
+git clone https://github.com/floppyist/dotfiles
+```
 
-Move .bashrc to ~
+### Install files
 
-> mv ~/.config/.bashrc ~
+```console
 
-Delete git folder, screenshots folder and README.md
+mv dotfiles/.bashrc ~
+mv dotfiles/* ~/.config
+```
 
-> rm -r ~/.config/.git
+### Cleanup
 
-> rm -r ~/.config/screenshots
+```console
+rm -r ~/.config/.git
+rm -r ~/.config/screenshots
+rm ~/.config/README.md
+```
+## Screenshots
 
-> rm ~/.config/README.md
+<p align="center">
+    <img src="screenshots/screenshot-2.png" />
+</p>
+
