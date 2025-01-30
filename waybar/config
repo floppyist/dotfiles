@@ -56,7 +56,8 @@
         "format-on": "󰂯",
         "format-off": "󰂲",
         "format-disabled": "󰂲",
-        "format-connected-battery": "󰂯 {device_alias}", 
+        "format-connected-battery": "󰂯 {device_alias} {icon}", 
+        "format-icons": ["","","","",""],
     }, 
     "backlight": {
 	    "format": "󰃠   {percent}%",
