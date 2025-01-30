@@ -39,6 +39,12 @@ window#waybar.hidden {
     padding: 5px 10px;
 }
 
+#wireplumber:hover,
+#backlight:hover {
+    color: @mauve;
+    transition: color 0.5s;
+}
+
 #workspaces button {
     padding: 0 10 0 10;
     color: @text;
@@ -50,6 +56,7 @@ window#waybar.hidden {
     text-shadow: inherit;
     background: transparent;
     border: @mauve;
+    color: @mauve;
 }
 
 #workspaces button.focused {

@@ -42,6 +42,7 @@
     },
     "clock": {
         "format": "{:%H:%M}",
+        "tooltip": false,
     },
     "network": {
         "format-wifi" : "{icon}   {essid}",
@@ -49,6 +50,7 @@
         "format-ethernet": "󰀂",
         "format-disconnected" : "󰖪",
 	    "interval": 5,
+        "tooltip": false,
     },
     "bluetooth": {
         "format-on": "󰂯",
@@ -60,6 +62,7 @@
 	    "format": "󰃠   {percent}%",
 	    "on-scroll-down": "brightnessctl -c backlight set 5%-",
 	    "on-scroll-up": "brightnessctl -c backlight set +5%",
+        "tooltip": false,
     },
     "wireplumber": {
         "format": "{icon}  {volume}%",
@@ -68,8 +71,9 @@
         "format-muted": "󰝟",
         "format-icons": {
             "headphone": "",
-            "default": ["󰕾"]
+            "default": ["󰕾"],
         },
-        "scroll-step": 5
+        "scroll-step": 5,
+        "tooltip": false,
     },
 }
