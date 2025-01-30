@@ -58,6 +58,8 @@
         "format-disabled": "󰂲",
         "format-connected-battery": "󰂯 {device_alias} {icon}", 
         "format-icons": ["","","","",""],
+        "on-click": "bluetoothctl connect 80:c3:ba:69:92:f5",
+        "on-click-right": "bluetoothctl disconnect",
     }, 
     "backlight": {
 	    "format": "󰃠   {percent}%",
