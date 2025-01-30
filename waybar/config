@@ -8,12 +8,13 @@
     "height": 34,
     "modules-left": [
         "sway/workspaces",
-	"sway/mode",
+	    "sway/mode",
     ],
-    "modules-center": [
-	"backlight",
-	"wireplumber",
+        "modules-center": [
+	    "backlight",
+	    "wireplumber",
         "network",
+        "bluetooth",
     ],
     "modules-right": [
         "tray",
@@ -46,20 +47,24 @@
         "format-wifi" : "{icon}   {essid}",
         "format-icons": ["󰤯","󰤟","󰤢","󰤥","󰤨"],
         "format-ethernet": "󰀂",
-	"format-alt" : "󱛇",
         "format-disconnected" : "󰖪",
-	"interval": 5,
+	    "interval": 5,
     },
+    "bluetooth": {
+        "format-on": "󰂯",
+        "format-off": "󰂲",
+        "format-disabled": "󰂲",
+        "format-connected-battery": "󰂯 {device_alias}", 
+    }, 
     "backlight": {
-	"format": "󰃠   {percent}%",
-	"on-scroll-down": "brightnessctl -c backlight set 5%-",
-	"on-scroll-up": "brightnessctl -c backlight set +5%",
+	    "format": "󰃠   {percent}%",
+	    "on-scroll-down": "brightnessctl -c backlight set 5%-",
+	    "on-scroll-up": "brightnessctl -c backlight set +5%",
     },
     "wireplumber": {
         "format": "{icon}  {volume}%",
         "format-bluetooth": "󰂰",
-	"spacing": 10,
-        "tooltip-format": "Volume : {volume}%",
+	    "spacing": 10,
         "format-muted": "󰝟",
         "format-icons": {
             "headphone": "",
