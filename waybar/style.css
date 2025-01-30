@@ -39,6 +39,7 @@ window#waybar.hidden {
     padding: 5px 10px;
 }
 
+#bluetooth:hover,
 #wireplumber:hover,
 #backlight:hover {
     color: @mauve;
