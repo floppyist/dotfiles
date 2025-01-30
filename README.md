@@ -46,6 +46,24 @@ rm -r ~/.config/screenshots
 rm ~/.config/README.md
 ```
 
+## Configuration
+
+### Add the mac address of your bluetooth device you want to switch on/off fast (left- & right click)
+```console
+sudo vim ~/.config/waybar/config
+```
+
+```bash
+"bluetooth": {
+    "format-on": "󰂯",
+    "format-off": "󰂲",
+    "format-disabled": "󰂲",
+    "format-connected-battery": "󰂯 {device_alias} {icon}",
+    "format-icons": ["","","","",""],
+    "on-click": "bluetoothctl connect YOUR_BLUETOOTH_DEVICE_MAC_ADDRESS",
+    "on-click-right": "bluetoothctl disconnect",
+},
+```
 ## Screenshots
 
 <p align="center">
