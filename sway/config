@@ -37,8 +37,8 @@ set $menu wofi --conf ~/.config/wofi/config --style ~/.config/wofi/style.css --s
 
 # SwayFX
 corner_radius 10
-blur off
-blur_xray off
+blur on
+blur_xray on
 blur_passes 2
 blur_radius 5
 
@@ -46,5 +46,8 @@ shadows on
 shadows_on_csd on
 shadow_blur_radius 20
 shadow_color #0000007F
+
+layer_effects "waybar" blur enable; shadows enable; corner_radius 10
+layer_effects "wofi" blur enable; shadows enable; corner_radius 10
 
 include /etc/sway/config.d/*
