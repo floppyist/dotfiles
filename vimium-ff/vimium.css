@@ -14,5 +14,5 @@ div > .vimiumHintMarker span {
 }
 
 div > .vimiumHintMarker > .matchingCharacter {
-    align: center;
+    color: #c6d0f5;
 }
