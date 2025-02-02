@@ -40,7 +40,7 @@ default_dim_inactive 0.1
 
 corner_radius 10
 blur on
-blur_xray on
+blur_xray off
 blur_passes 2
 blur_radius 5
 
