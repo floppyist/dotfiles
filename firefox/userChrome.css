@@ -1,9 +1,17 @@
 @namespace url("http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul");
 
-.titlebar-buttonbox-container{ display:none }
-#tabbrowser-tabs .tabbrowser-tab .tab-close-button {display:none!important}
+* {
+  border-color: transparent !important;
+}
 
-/* Minimize fullscreen transition time */
+.titlebar-buttonbox-container{ 
+  display:none 
+}
+
+#tabbrowser-tabs .tabbrowser-tab .tab-close-button {
+  display:none!important
+}
+
 #navigator-toolbox[fullscreenShouldAnimate] {
   transition: 0ms !important;
 }
@@ -11,11 +19,84 @@
 .tab-background {
   outline: none !important;
   box-shadow: none !important;
-  border-radius: 10px 10px 5px 5px !important;
+  border-radius: 10px !important;
   margin-left: 2px !important;
   margin-right: 2px !important;
 }
 
 .titlebar-spacer {
   display: none;
+}
+
+#page-action-buttons {
+  display: none;
+}
+
+#back-button, #forward-button, #home-button {
+  display: none;
+}
+
+#urlbar-background {
+  border-radius: 10px !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background-color: transparent !important;
+}
+
+#nav-bar-overflow-button {
+  display: none;
+}
+
+#nav-bar {
+  border-radius: 10px; 
+  margin-left: 4px;
+  margin-right: 4px;
+  margin-bottom: 4px;
+}
+
+#urlbar-container {
+  margin-left: 4px !important;
+}
+
+.urlbarView {
+  display: none !important;
+}
+
+#tracking-protection-icon-container {
+  
+}
+
+#browser {
+  background-color: #232634 !important;
+  border-color: #232634 !important;
+}
+
+#browser * {
+  outline: none !important;
+  box-shadow: none !important;
+  background-color: transparent !important;
+}
+
+browser {
+  margin: 4px;
+  margin-top: 0px;
+  border-radius: 10px !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background-color: #232634 !important;
+  border-color: #232634 !important;
+}
+
+.browserContainer {
+  background-color: #232634 !important;
+  border-color: #232634 !important;
+}
+
+.browserStack {
+  background-color: #232634 !important;
+  border-color: #232634 !important;
+}
+
+#tabbrowser-tabpanels {
+  background-color: #232634 !important;
 }
