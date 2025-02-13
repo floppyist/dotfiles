@@ -1,0 +1,21 @@
+@namespace url("http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul");
+
+.titlebar-buttonbox-container{ display:none }
+#tabbrowser-tabs .tabbrowser-tab .tab-close-button {display:none!important}
+
+/* Minimize fullscreen transition time */
+#navigator-toolbox[fullscreenShouldAnimate] {
+  transition: 0ms !important;
+}
+
+.tab-background {
+  outline: none !important;
+  box-shadow: none !important;
+  border-radius: 10px 10px 5px 5px !important;
+  margin-left: 2px !important;
+  margin-right: 2px !important;
+}
+
+.titlebar-spacer {
+  display: none;
+}

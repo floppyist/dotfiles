@@ -32,6 +32,10 @@ mv dotfiles/.bashrc ~
 mv dotfiles/* ~/.config
 ```
 
+```console
+mv ~/.config/firefox/userchrome.css ~/.mozilla/firefox/<YOUR_PROFILE>/chrome/
+```
+
 ### Cleanup
 
 ```console
@@ -40,6 +44,10 @@ rm -r ~/.config/.git
 
 ```console
 rm -r ~/.config/screenshots
+```
+
+```console
+rmdir ~/.config/firefox
 ```
 
 ```console
