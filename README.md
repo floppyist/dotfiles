@@ -1,4 +1,4 @@
-# Dotfiles for Sway(fx), Alacritty, LazyVim, Waybar and Wofi
+# Dotfiles for Sway(fx), Alacritty, Firefox, LazyVim, Waybar and Wofi
 
 <p align="center">
     <img src="screenshots/screenshot-1.png" />
@@ -11,6 +11,7 @@
 * Waybar
 * Wofi
 * Alacritty
+* Firefox
 * LazyVim
 * Nerd Fonts
 * Noto Fonts
@@ -33,7 +34,7 @@ mv dotfiles/* ~/.config
 ```
 
 ```console
-mv ~/.config/firefox/userchrome.css ~/.mozilla/firefox/<YOUR_PROFILE>/chrome/
+mv ~/.config/firefox/userChrome.css ~/.mozilla/firefox/<YOUR_PROFILE>/chrome/
 ```
 
 ### Cleanup
