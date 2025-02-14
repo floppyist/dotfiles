@@ -1,102 +1,101 @@
 @namespace url("http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul");
 
 * {
-  border-color: transparent !important;
+    border-color: transparent !important;
 }
 
 .titlebar-buttonbox-container{ 
-  display:none 
+    display:none 
 }
 
 #tabbrowser-tabs .tabbrowser-tab .tab-close-button {
-  display:none!important
+    display:none!important
 }
 
 #navigator-toolbox[fullscreenShouldAnimate] {
-  transition: 0ms !important;
+    transition: 0ms !important;
 }
 
 .tab-background {
-  outline: none !important;
-  box-shadow: none !important;
-  border-radius: 10px !important;
-  margin-left: 2px !important;
-  margin-right: 2px !important;
+    outline: none !important;
+    box-shadow: none !important;
+    border-radius: 10px !important;
+    margin: 7px !important;
+    margin-left: 5px !important;
+    margin-right: 5px !important;
 }
 
 .titlebar-spacer {
-  display: none;
+    display: none;
 }
 
 #page-action-buttons {
-  display: none;
+    display: none;
 }
 
 #back-button, #forward-button, #home-button {
-  display: none;
+    display: none;
 }
 
 #urlbar-background {
-  border-radius: 10px !important;
-  outline: none !important;
-  box-shadow: none !important;
-  background-color: transparent !important;
+    border-radius: 10px !important;
+    outline: none !important;
+    box-shadow: none !important;
+    background-color: transparent !important;
 }
 
 #nav-bar-overflow-button {
-  display: none;
+    display: none;
 }
 
 #nav-bar {
-  border-radius: 10px; 
-  margin-left: 4px;
-  margin-right: 4px;
-  margin-bottom: 4px;
+    border-radius: 10px; 
+    margin-left: 7px;
+    margin-right: 7px;
 }
 
 #urlbar-container {
-  margin-left: 4px !important;
+    margin-left: 4px !important;
 }
 
 .urlbarView {
-  display: none !important;
+    display: none !important;
 }
 
 #tracking-protection-icon-container {
-  
+
 }
 
 #browser {
-  background-color: #232634 !important;
-  border-color: #232634 !important;
+    background-color: #232634 !important;
+    border-color: #232634 !important;
 }
 
 #browser * {
-  outline: none !important;
-  box-shadow: none !important;
-  background-color: transparent !important;
+    outline: none !important;
+    box-shadow: none !important;
+    background-color: transparent !important;
 }
 
 browser {
-  margin: 4px;
-  margin-top: 0px;
-  border-radius: 10px !important;
-  outline: none !important;
-  box-shadow: none !important;
-  background-color: #232634 !important;
-  border-color: #232634 !important;
+    margin: 7px;
+    border-radius: 10px !important;
+    outline: none !important;
+    box-shadow: none !important;
+    background-color: #232634 !important;
+    border-color: #232634 !important;
 }
 
 .browserContainer {
-  background-color: #232634 !important;
-  border-color: #232634 !important;
+    background-color: #232634 !important;
+    border-color: #232634 !important;
 }
 
 .browserStack {
-  background-color: #232634 !important;
-  border-color: #232634 !important;
+    background-color: #232634 !important;
+    border-color: #232634 !important;
 }
 
 #tabbrowser-tabpanels {
-  background-color: #232634 !important;
+    background-color: #232634 !important;
 }
