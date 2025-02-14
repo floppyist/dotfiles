@@ -9,7 +9,11 @@
 }
 
 #tabbrowser-tabs .tabbrowser-tab .tab-close-button {
-    display:none!important
+    display:none !important;
+}
+
+.tab-content {
+    margin: 7px;
 }
 
 #navigator-toolbox[fullscreenShouldAnimate] {
