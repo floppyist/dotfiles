@@ -4,8 +4,8 @@ bindsym $mod+Return exec $term
 # Close
 bindsym $mod+Shift+q kill
 
-# Launcher 
-bindsym $mod+d exec $menu
+# Wofi
+bindsym $mod+d exec "pgrep -x wofi || wofi --conf ~/.config/wofi/config --style ~/.config/wofi/style.css --show run --monitor eDP-1"
 
 # Floating
 floating_modifier $mod normal

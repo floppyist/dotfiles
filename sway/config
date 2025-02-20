@@ -10,6 +10,13 @@ set $right l
 set $term alacritty
 set $menu wmenu
 
+# Workspaces
+workspace 1 output eDP-1
+workspace 2 output eDP-1
+workspace 3 output DP-3
+workspace 4 output DP-3
+workspace 5 output DP-3
+
 # Hide titlebar for all windows
 default_border pixel 1
 default_floating_border pixel 1
@@ -31,9 +38,6 @@ font pango:Ionicons 11, Poppins Regular 11
 
 # Setup cursor
 seat seat0 xcursor_theme Bibata-Modern-Ice 29
-
-# Setup app launcher
-set $menu wofi --conf ~/.config/wofi/config --style ~/.config/wofi/style.css --show run
 
 # SwayFX
 default_dim_inactive 0.1
