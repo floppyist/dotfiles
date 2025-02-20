@@ -30,6 +30,7 @@
             "4": " 󰝚 ",
             "5": "  ",
         },
+        "all-outputs": true,
         "persistent_workspaces": {
             "1": [],
             "2": [],
