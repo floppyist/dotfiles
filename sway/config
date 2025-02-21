@@ -1,3 +1,8 @@
+exec_always {
+	gsettings set org.gnome.desktop.interface cursor-theme Bibata-Modern-Ice
+	gesttings set org.gnome.desktop.interface cursor-size 29
+}
+
 # Autostart
 exec pipewire
 
