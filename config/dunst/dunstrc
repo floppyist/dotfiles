@@ -1,0 +1,22 @@
+[global]
+    monitor = 0
+    follow = mouse
+    width = 300
+    height = 100
+    origin = top-right
+    offset = 10x55
+    font = JetBrainsMono Nerd Font 11
+    frame_width = 0
+    corner_radius = 10
+
+[urgency_low]
+    background = "#191c1c"
+    timeout = 5
+
+[urgency_normal]
+    background = "#191c1c"
+    timeout = 10
+
+[urgency_critical]
+    background = "#191c1c"
+    timeout = 0

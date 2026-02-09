@@ -1,0 +1,78 @@
+# Colors
+set $bg      #282828
+set $red     #cc241d
+set $blue    #458588
+set $purple  #b16286
+set $gray    #a89984
+
+set $mod Mod1
+set $term alacritty
+set $menu rofi -show drun -disable-history -theme ~/.config/rofi/config.rasi
+
+font pango:JetBrainsMono Nerd Font 10
+
+focus_follows_mouse off
+
+# Autostart
+exec --no-startup-id /usr/libexec/polkit-gnome-authentication-agent-1
+exec --no-startup-id dunst
+exec --no-startup-id setxkbmap de
+exec --no-startup-id pipewire
+exec --no-startup-id pipewire-pulse
+exec --no-startup-id wireplumber
+exec_always --no-startup-id xrdb -merge ~/.Xresources
+exec_always --no-startup-id picom -b
+exec_always --no-startup-id feh --bg-fill ~/images/wallpaper.png
+exec_always --no-startup-id ~/.config/polybar/launch.sh
+exec_always --no-startup-id xsetroot -cursor_name left_ptr
+
+# i3-gaps
+gaps inner 10
+gaps outer 0
+gaps top 50
+default_border pixel 0
+default_floating_border pixel 0
+
+# Workspaces
+set $ws1 "1: "
+set $ws2 "2: "
+set $ws3 "3: "
+set $ws4 "4: "
+set $ws5 "5: "
+
+# Keybinds
+bindsym $mod+Return exec $term
+bindsym $mod+d exec $menu
+bindsym $mod+Shift+q kill
+bindsym $mod+Shift+r restart
+bindsym $mod+Shift+e exec i3-msg exit
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+bindsym XF86AudioMicMute exec --no-startup-id pactl set-source-mute @DEFAULT_SOURCE@ toggle
+bindsym XF86AudioMute exec --no-startup-id pactl set-sink-mute @DEFAULT_SINK@ toggle
+bindsym XF86AudioRaiseVolume exec --no-startup-id wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
+bindsym XF86AudioLowerVolume exec --no-startup-id wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+bindsym XF86MonBrightnessUp exec --no-startup-id brightnessctl set +5%
+bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
+bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
+bindsym $mod+Shift+space floating toggle
+bindsym $mod+space focus mode_toggle
+bindsym $mod+f fullscreen
+bindsym $mod+b splith
+bindsym $mod+v splitv
+bindsym $mod+1 workspace number $ws1
+bindsym $mod+2 workspace number $ws2
+bindsym $mod+3 workspace number $ws3
+bindsym $mod+4 workspace number $ws4
+bindsym $mod+5 workspace number $ws5
+bindsym $mod+Shift+1 move container to workspace number 1
+bindsym $mod+Shift+2 move container to workspace number 2
+bindsym $mod+Shift+3 move container to workspace number 3
+bindsym $mod+Shift+4 move container to workspace number 4
+bindsym $mod+Shift+5 move container to workspace number 5
