@@ -58,6 +58,7 @@ Required packages:
 - `pipewire`, `wireplumber`, `libspa-bluetooth`
 - `bluez`, `rfkill`
 - `NetworkManager`, `nm-applet`
+- mpv-mpris (if you use mpv)
 
 Example installation:
 ```bash
