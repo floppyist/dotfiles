@@ -12,7 +12,7 @@ configuration {
     red-outline: #e78284; 
     mauve:       #ca9ee6;
 
-    font: "Noto Sans 800 16px"; 
+    font: "JetBrainsMono Nerd Font Bold 14";
     background-color: transparent;
     text-color: @fg;
 }
@@ -34,7 +34,7 @@ inputbar {
     margin:           0px 0px 15px 0px;
     padding:          8px;
     border:           3px solid;
-    border-color:     @red-outline;
+    border-color:     none;
     border-radius:    10px;
     children:         [ entry ];
 }
