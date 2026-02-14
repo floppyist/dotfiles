@@ -6,6 +6,10 @@
 
 A minimalist and functional development environment based on **i3wm**, **Polybar**, and **Neovim** running on **Void Linux**.
 
+<p align="center">
+    <img src="screenshots/screenshot_000.png" />
+</p>
+
 ## Components
 
 - **Window Manager:** `i3wm` (with `i3blocks` & `picom`)
