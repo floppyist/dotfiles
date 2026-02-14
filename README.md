@@ -33,27 +33,29 @@ sudo xbps-install -S \
   bluez rfkill NetworkManager nm-applet mpv mpv-mpris
 ```
 
-### 2. Clone the Repository
+### 2. Clone the repository
 ```bash
 git clone https://github.com/floppyist/dotfiles ~/dotfiles
 cd ~/dotfiles
 ```
 
-### 3. Symlink All Configuration Files
-Most configurations belong in the `~/.config` directory:
+### 3. Symlink all configuration files and scripts
 ```bash
 mkdir -p ~/.config
 ln -s ~/dotfiles/config/* ~/.config/
 ln -s ~/dotfiles/userChrome.css ~/.config/mozilla/firefox/<your-profile>/chrome/
 ln -s ~/dotfiles/.bashrc ~
+
+mkdir -p ~/.local/bin
+ln -s ~/dotfiles/scripts/* ~/.local/bin/
 ```
 
-### 4. Install Scripts
-Scripts should be placed in your local binary path:
+### 4. Make scripts executable
 ```bash
-mkdir -p ~/.local/bin
-cp ~/dotfiles/scripts/*.sh ~/.local/bin/
-chmod +x ~/.local/bin/*.sh
+chmod +x ~/.local/bin/bluetooth-toggle.sh
+chmod +x ~/.local/bin/display-select.sh
+chmod +x ~/.local/bin/polybar-bluetooth.sh
+chmod +x ~/.local/bin/polybar-wlan.sh
 ```
 
 > **Note:** Ensure `~/.local/bin` is added to your `$PATH`.
