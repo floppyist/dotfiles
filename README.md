@@ -54,6 +54,6 @@ chmod +x ~/.local/bin/*.sh
 
 > **Note:** Ensure `~/.local/bin` is added to your `$PATH`.
 
-Enable custom styles in Firefox:
+### 5. Enable custom styles in Firefox:
 - Open `about:config`
 - Set `toolkit.legacyUserProfileCustomizations.stylesheets` to `true`
