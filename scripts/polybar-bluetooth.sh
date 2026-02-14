@@ -4,7 +4,7 @@
 bt_status() {
     local connected=$(bluetoothctl info 2>/dev/null | grep "Name:" | cut -d' ' -f2- | head -1)
     if [[ -z "$connected" ]]; then
-        echo "%{F#a89984}%{F-} off"
+        echo "%{F#a89984}%{F-}"
     else
         echo "%{F#458588}%{F-} $connected"
     fi

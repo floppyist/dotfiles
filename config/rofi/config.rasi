@@ -19,8 +19,8 @@ configuration {
 
 window {
     background-color: @bg;
-    border-radius:    10px;
-    width:            500px; 
+    border-radius:    0px;
+    width:            700px; 
     padding:          20px;
     anchor:           center;
     location:         center;

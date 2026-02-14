@@ -7,7 +7,7 @@ set $gray    #a89984
 
 set $mod Mod1
 set $term alacritty
-set $menu rofi -show drun -disable-history -theme ~/.config/rofi/config.rasi
+set $menu rofi -show drun -theme ~/.config/rofi/config.rasi
 
 font pango:JetBrainsMono Nerd Font 10
 
@@ -27,9 +27,10 @@ exec_always --no-startup-id ~/.config/polybar/launch.sh
 exec_always --no-startup-id xsetroot -cursor_name left_ptr
 
 # i3-gaps
-gaps inner 10
-gaps outer 0
-gaps top 50
+#gaps inner 5
+#gaps outer 0
+#gaps top 10
+
 default_border pixel 0
 default_floating_border pixel 0
 
@@ -41,7 +42,7 @@ set $ws4 "4"
 set $ws5 "5"
 
 # Keybinds
-bindsym $mod+Return exec $term
+bindsym $mod+Return exec vblank_mode=0 $term
 bindsym $mod+d exec $menu
 bindsym $mod+Shift+q kill
 bindsym $mod+Shift+r restart
