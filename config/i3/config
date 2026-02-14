@@ -62,6 +62,7 @@ bindsym XF86AudioLowerVolume exec --no-startup-id wpctl set-volume @DEFAULT_AUDI
 bindsym XF86MonBrightnessUp exec --no-startup-id brightnessctl set +5%
 bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
 bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
+bindsym Print exec --no-startup-id ~/.local/bin/screenshot.sh
 bindsym $mod+Shift+space floating toggle
 bindsym $mod+space focus mode_toggle
 bindsym $mod+f fullscreen
