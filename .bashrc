@@ -56,6 +56,8 @@ if [[ $- == *i* ]]; then
     alias mutt='neomutt'
 fi
 
+set -o vi
+
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
 if [ -f /usr/share/fzf/key-bindings.bash ]; then
