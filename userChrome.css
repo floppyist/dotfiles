@@ -9,8 +9,22 @@
     background-color: #191c1c !important;
 }
 
-toolbarbutton {
-    display: none !important;
+#tabbrowser-arrowscrollbox {
+    height: 35px !important;
+}
+
+.tabbrowser-tab {
+    border-bottom: 5px solid #ebdbb2 !important;
+}
+
+.tabbrowser-tab:is([selected="true"]):not([pinned]) {
+    max-width: 100% !important;
+    border-bottom: 5px solid #cc241d !important;
+}
+
+/* Disable tab animations */
+.tabbrowser-tab {
+    transition: none !important;
 }
 
 .tab-label-container {
@@ -29,6 +43,10 @@ toolbarbutton {
 }
 
 /* Hide elements */
+toolbarbutton {
+    display: none !important;
+}
+
 .urlbar-searchmode-switcher, 
 .tab-close-button, 
 .tab-icon-image,
