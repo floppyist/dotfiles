@@ -8,11 +8,11 @@ configuration {
 * {
     bg:          #191c1ce3; 
     bg-solid:    #191c1c;
-    fg:          #c6d0f5;  
-    red-outline: #e78284; 
-    mauve:       #ca9ee6;
+    fg:          #ebdbb2;  
+    red-outline: #cc241d;
+    text:        #b16286;
 
-    font: "JetBrainsMono Nerd Font Bold 14";
+    font: "JetBrainsMono Nerd Font 14";
     background-color: transparent;
     text-color: @fg;
 }
@@ -62,7 +62,7 @@ element selected {
 }
 
 element-text selected {
-    text-color: @mauve;
+    text-color: @text;
 }
 
 element-text {
