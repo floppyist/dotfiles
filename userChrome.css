@@ -14,10 +14,12 @@ toolbarbutton {
 }
 
 .tab-label-container {
+    text-align: center;
     background-color: #2b2b2b !important;
 }
 
 .tab-text, .tab-content {
+    width: 100% !important;
     font-weight: bold;
     background-color: #2b2b2b !important;
 }
@@ -29,6 +31,7 @@ toolbarbutton {
 /* Hide elements */
 .urlbar-searchmode-switcher, 
 .tab-close-button, 
+.tab-icon-image,
 .close-icon {
     display: none !important;
 }
