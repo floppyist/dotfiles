@@ -8,6 +8,7 @@
     color: #ebdbb2 !important;
     background-color: #191c1c !important;
 }
+
 toolbarbutton {
     display: none !important;
 }
@@ -24,6 +25,7 @@ toolbarbutton {
 .urlbar-container {
     text-align: center !important;
 }
+
 /* Hide elements */
 .urlbar-searchmode-switcher, 
 .tab-close-button, 
@@ -37,6 +39,7 @@ toolbarbutton {
 #tracking-protection-icon-container,
 #identity-box,
 #translations-button,
-#star-button {
+#star-button,
+#reader-mode-button-icon {
     display: none !important;
 }

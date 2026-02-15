@@ -1,10 +1,10 @@
 # Dotfiles (i3wm)
 
+A minimalist and functional development environment based on **i3wm**, **Polybar**, and **Neovim**.
+
 > [!CAUTION]
 > This project is currently a **Work in Progress (WIP)**.
 > Features may be incomplete and bugs are to be expected.
-
-A minimalist and functional development environment based on **i3wm**, **Polybar**, and **Neovim** running on **Void Linux**.
 
 <p align="center">
     <img src="screenshots/screenshot_000.png" />
@@ -15,7 +15,7 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 - **Window Manager:** `i3wm` (with `i3blocks` & `picom`)
 - **Terminal:** `Alacritty`
 - **Editor:** `Neovim` (LazyVim distribution)
-- **Status Bar:** `Polybar` (includes custom Bluetooth & WLAN modules)
+- **Status Bar:** `Polybar` (includes custom Bluetooth, WLAN, Display and Screenshot modules)
 - **Notifications:** `Dunst`
 - **Application Launcher:** `Rofi`
 - **Browser:** `Firefox` (custom `userChrome.css` for a minimal UI)
@@ -23,6 +23,7 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
     - `Bluetooth` Switch / Scan
     - `WiFi` Switch / Scan
     - `Display` Switch
+    - `Screenshot`
 
 ## Installation
 ### 1. Install packages
@@ -30,7 +31,8 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 sudo xbps-install -S \
   i3-gaps polybar rofi dunst picom alacritty \
   pipewire wireplumber libspa-bluetooth \
-  bluez rfkill NetworkManager nm-applet mpv mpv-mpris
+  bluez rfkill NetworkManager nm-applet mpv mpv-mpris \
+  feh
 ```
 
 ### 2. Clone the repository
@@ -44,6 +46,7 @@ cd ~/dotfiles
 mkdir -p ~/.config
 ln -s ~/dotfiles/config/* ~/.config/
 ln -s ~/dotfiles/userChrome.css ~/.config/mozilla/firefox/<your-profile>/chrome/
+ln -s ~/dotfiles/userContent.css ~/.config/mozilla/firefox/<your-profile>/chrome/
 ln -s ~/dotfiles/.bashrc ~
 
 mkdir -p ~/.local/bin
