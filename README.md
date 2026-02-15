@@ -56,6 +56,7 @@ chmod +x ~/.local/bin/bluetooth-toggle.sh
 chmod +x ~/.local/bin/display-select.sh
 chmod +x ~/.local/bin/polybar-bluetooth.sh
 chmod +x ~/.local/bin/polybar-wlan.sh
+chmod +x ~/.local/bin/screenshot.sh
 ```
 
 > **Note:** Ensure `~/.local/bin` is added to your `$PATH`.
