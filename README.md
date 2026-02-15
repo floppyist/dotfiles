@@ -48,6 +48,7 @@ ln -s ~/dotfiles/config/* ~/.config/
 ln -s ~/dotfiles/userChrome.css ~/.config/mozilla/firefox/<your-profile>/chrome/
 ln -s ~/dotfiles/userContent.css ~/.config/mozilla/firefox/<your-profile>/chrome/
 ln -s ~/dotfiles/.bashrc ~
+ln -s ~/dotfiles/.inputrc ~
 
 mkdir -p ~/.local/bin
 ln -s ~/dotfiles/scripts/* ~/.local/bin/
