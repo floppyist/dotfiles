@@ -33,6 +33,8 @@
 }
 
 .tab-text, .tab-content {
+    padding-left: 5px !important;
+    padding-right: 5px !important;
     width: 100% !important;
     font-weight: bold;
     background-color: #2b2b2b !important;
@@ -50,6 +52,7 @@ toolbarbutton {
 .urlbar-searchmode-switcher, 
 .tab-close-button, 
 .tab-icon-image,
+.tab-icon-stack,
 .close-icon {
     display: none !important;
 }
@@ -61,6 +64,7 @@ toolbarbutton {
 #identity-box,
 #translations-button,
 #star-button,
+#star-button-box,
 #reader-mode-button-icon {
     display: none !important;
 }

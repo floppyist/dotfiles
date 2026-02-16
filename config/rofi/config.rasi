@@ -9,8 +9,7 @@ configuration {
     bg:          #191c1ce3; 
     bg-solid:    #191c1c;
     fg:          #ebdbb2;  
-    red-outline: #cc241d;
-    text:        #b16286;
+    text:        #cc241d;
 
     font: "JetBrainsMono Nerd Font 14";
     background-color: transparent;
