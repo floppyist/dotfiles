@@ -41,6 +41,7 @@
 }
 
 .urlbar-container {
+    height: 15px !important;
     text-align: center !important;
 }
 
