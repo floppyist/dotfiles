@@ -11,7 +11,6 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 </p>
 
 ## Components
-
 - **Window Manager:** `i3wm` (with `i3blocks` & `picom`)
 - **Terminal:** `Alacritty`
 - **Editor:** `Neovim` (LazyVim distribution)
@@ -29,10 +28,10 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 ### 1. Install packages
 ```bash
 sudo xbps-install -S \
-  i3-gaps polybar rofi dunst picom alacritty \
-  pipewire wireplumber libspa-bluetooth \
-  bluez rfkill NetworkManager nm-applet mpv mpv-mpris \
-  feh
+i3-gaps polybar rofi dunst picom alacritty \
+pipewire wireplumber libspa-bluetooth \
+bluez rfkill NetworkManager nm-applet mpv mpv-mpris \
+feh
 ```
 
 ### 2. Clone the repository
@@ -45,8 +44,8 @@ cd ~/dotfiles
 ```bash
 mkdir -p ~/.config
 ln -s ~/dotfiles/config/* ~/.config/
-ln -s ~/dotfiles/userChrome.css ~/.config/mozilla/firefox/<your-profile>/chrome/
-ln -s ~/dotfiles/userContent.css ~/.config/mozilla/firefox/<your-profile>/chrome/
+ln -s ~/dotfiles/firefox/userChrome.css ~/.config/mozilla/firefox/<your-profile>/chrome/
+ln -s ~/dotfiles/firefox/userContent.css ~/.config/mozilla/firefox/<your-profile>/chrome/
 ln -s ~/dotfiles/.bashrc ~
 ln -s ~/dotfiles/.inputrc ~
 
@@ -68,3 +67,7 @@ chmod +x ~/.local/bin/screenshot.sh
 ### 5. Enable custom styles in Firefox:
 - Open `about:config`
 - Set `toolkit.legacyUserProfileCustomizations.stylesheets` to `true`
+
+## Optional steps: Enable/Disable vim mode in cli
+- Open `.bashrc`
+- Add/Delete: `set -o vi`
