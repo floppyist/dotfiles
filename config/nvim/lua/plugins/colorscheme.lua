@@ -1,5 +1,5 @@
 return {
-  { -- was missing this
+  {
     "catppuccin/nvim",
     lazy = true,
     name = "catppuccin",
@@ -39,8 +39,17 @@ return {
         treesitter_context = true,
         which_key = true,
       },
+      custom_highlights = function(colors)
+        return {
+          NormalFloat = { bg = "none" },
+          FloatBorder = { bg = "none" },
+          WhichKeyFloat = { bg = "none" },
+          TelescopeNormal = { bg = "none" },
+          TelescopeBorder = { bg = "none" },
+        }
+      end,
     },
-  }, -- and this
+  },
   {
     "LazyVim/LazyVim",
     opts = {
