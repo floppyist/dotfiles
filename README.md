@@ -5,27 +5,35 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 > [!CAUTION]
 > This project is currently a **Work in Progress (WIP)**.
 > Features may be incomplete and bugs are to be expected.
+> Especially the Firefox configuration isn't in a production-ready state!
 
 <p align="center">
     <img src="screenshots/screenshot_000.png" />
 </p>
 
+<p align="center">
+    <img src="screenshots/screenshot_001.png" />
+</p>
+
 ## Components
+
 - **Window Manager:** `i3wm` (with `i3blocks` & `picom`)
 - **Terminal:** `Alacritty`
 - **Editor:** `Neovim` (LazyVim distribution)
 - **Status Bar:** `Polybar` (includes custom Bluetooth, WLAN, Display and Screenshot modules)
 - **Notifications:** `Dunst`
 - **Application Launcher:** `Rofi`
-- **Browser:** `Firefox` (custom `userChrome.css` for a minimal UI)
+- **Browser:** `Firefox` (custom `userChrome.css`/`userContent.css`)
 - **Scripts:**
-    - `Bluetooth` Switch / Scan
-    - `WiFi` Switch / Scan
-    - `Display` Switch
-    - `Screenshot`
+  - `Bluetooth` Switch / Scan
+  - `WiFi` Switch / Scan  
+  - `Display` Switch
+  - `Screenshot`
 
 ## Installation
-### 1. Install packages
+
+### 1. Install packages (Void Linux)
+
 ```bash
 sudo xbps-install -S \
 i3-gaps polybar rofi dunst picom alacritty \
@@ -35,12 +43,14 @@ feh
 ```
 
 ### 2. Clone the repository
+
 ```bash
 git clone https://github.com/floppyist/dotfiles ~/dotfiles
 cd ~/dotfiles
 ```
 
 ### 3. Symlink all configuration files and scripts
+
 ```bash
 mkdir -p ~/.config
 ln -s ~/dotfiles/config/* ~/.config/
@@ -54,6 +64,7 @@ ln -s ~/dotfiles/scripts/* ~/.local/bin/
 ```
 
 ### 4. Make scripts executable
+
 ```bash
 chmod +x ~/.local/bin/bluetooth-toggle.sh
 chmod +x ~/.local/bin/display-select.sh
@@ -65,9 +76,11 @@ chmod +x ~/.local/bin/screenshot.sh
 > **Note:** Ensure `~/.local/bin` is added to your `$PATH`.
 
 ### 5. Enable custom styles in Firefox:
+
 - Open `about:config`
 - Set `toolkit.legacyUserProfileCustomizations.stylesheets` to `true`
 
-## Optional steps: Enable/Disable vim mode in cli
+## Optional steps: Enable/Disable vim mode in CLI
+
 - Open `.bashrc`
 - Add/Delete: `set -o vi`
