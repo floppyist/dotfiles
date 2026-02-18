@@ -1,9 +1,9 @@
 [global]
     monitor = 0
     follow = keyboard
-    width = 300
-    height = 100
-    offset = 0x45
+    width = (0, 400)
+    height = (0, 100)
+    offset = (0, 45)
     origin = top-right
     font = JetBrainsMono Nerd Font 11
     frame_width = 0
@@ -22,3 +22,11 @@
 [urgency_critical]
     background = "#cc241d"
     timeout = 0
+
+[signal_desktop]
+    appname = Signal
+    summary = "*"
+    background = "#3a76f0"
+    foreground = "#ffffff"
+    timeout = 10
+    format = "<b>%s</b>\n%b"
