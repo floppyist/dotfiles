@@ -1,7 +1,7 @@
 [global]
     monitor = 0
     follow = keyboard
-    width = (0, 400)
+    width = (350, 350)
     height = (0, 100)
     offset = (0, 45)
     origin = top-right
@@ -26,7 +26,7 @@
 [signal_desktop]
     appname = Signal
     summary = "*"
-    background = "#3a76f0"
-    foreground = "#ffffff"
+    background = "#458588"
+    foreground = "#ebdbb2"
     timeout = 10
     format = "<b>%s</b>\n%b"
