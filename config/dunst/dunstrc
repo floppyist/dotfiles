@@ -1,11 +1,12 @@
 [global]
     monitor = 0
     follow = keyboard
-    width = (350, 350)
+    width = (300, 300)
     height = (0, 100)
     offset = (0, 45)
     origin = top-right
     font = JetBrainsMono Nerd Font 11
+    foreground = "#ebdbb2"
     frame_width = 0
     corner_radius = 0
     notification_limit = 5
