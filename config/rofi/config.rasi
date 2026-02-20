@@ -6,10 +6,9 @@ configuration {
 }
 
 * {
-    bg:          #191c1ce3; 
-    bg-solid:    #191c1c;
-    fg:          #ebdbb2;  
-    text:        #cc241d;
+    bg:          #191c1c;
+    fg:          #ebdbb2;
+    text:        #458588;
 
     font: "JetBrainsMono Nerd Font 14";
     background-color: transparent;
