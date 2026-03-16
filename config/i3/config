@@ -22,7 +22,7 @@ exec --no-startup-id pipewire-pulse
 exec --no-startup-id wireplumber
 exec_always --no-startup-id xrdb -merge ~/.Xresources
 exec_always --no-startup-id picom -b
-exec_always --no-startup-id feh --bg-fill ~/images/wallpaper.png
+exec_always --no-startup-id feh --bg-fill ~/images/wallpaper
 exec_always --no-startup-id ~/.config/polybar/launch.sh
 exec_always --no-startup-id xsetroot -cursor_name left_ptr
 
