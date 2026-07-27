@@ -20,6 +20,7 @@ exec --no-startup-id setxkbmap de
 exec --no-startup-id pipewire
 exec --no-startup-id pipewire-pulse
 exec --no-startup-id wireplumber
+exec --no-startup-id xbanish
 exec_always --no-startup-id xrdb -merge ~/.Xresources
 exec_always --no-startup-id picom -b
 exec_always --no-startup-id feh --bg-fill ~/images/wallpaper
