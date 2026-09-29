@@ -63,3 +63,6 @@ set -o vi
 if [ -f /usr/share/fzf/key-bindings.bash ]; then
     source /usr/share/fzf/key-bindings.bash
 fi
+
+# opencode
+export PATH=/home/floppyist/.opencode/bin:$PATH

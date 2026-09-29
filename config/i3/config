@@ -60,8 +60,8 @@ bindsym XF86AudioMicMute exec --no-startup-id pactl set-source-mute @DEFAULT_SOU
 bindsym XF86AudioMute exec --no-startup-id pactl set-sink-mute @DEFAULT_SINK@ toggle
 bindsym XF86AudioRaiseVolume exec --no-startup-id wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
 bindsym XF86AudioLowerVolume exec --no-startup-id wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
-bindsym XF86MonBrightnessUp exec --no-startup-id brightnessctl set +5%
-bindsym XF86MonBrightnessDown exec --no-startup-id brightnessctl set 5%-
+bindsym XF86MonBrightnessUp exec --no-startup-id ~/.local/bin/polybar-backlight.sh up
+bindsym XF86MonBrightnessDown exec --no-startup-id ~/.local/bin/polybar-backlight.sh down
 bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
 bindsym Print exec --no-startup-id ~/.local/bin/screenshot.sh
 bindsym $mod+Shift+space floating toggle
