@@ -7,39 +7,114 @@
     font-family: "JetBrainsMono Nerd Font";
     color: #ebdbb2 !important;
     background-color: #191c1c !important;
+    box-shadow: none !important;
 }
 
+/* --- 1. TOOLBAR & TAB CONTAINER (ERZWINGT 100% BREITE) --- */
+:root {
+    --tab-min-width: 0px !important;
+}
+
+#TabsToolbar,
+#tabbrowser-tabs,
 #tabbrowser-arrowscrollbox {
-    height: 35px !important;
-}
-
-.tabbrowser-tab {
-    border-bottom: 5px solid #ebdbb2 !important;
-}
-
-.tabbrowser-tab:is([selected="true"]):not([pinned]) {
+    width: 100% !important;
     max-width: 100% !important;
+    min-width: 0 !important;
+    height: 35px !important;
+    flex: 1 1 auto !important;
+}
+
+/* Shadow DOM Scrollbox: Verhindert Rechtsbündigkeit & Lücken */
+#tabbrowser-arrowscrollbox::part(scrollbox),
+#tabbrowser-arrowscrollbox scrollbox {
+    display: flex !important;
+    width: 100% !important;
+    justify-content: flex-start !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Alle Firefox-Spacer & Störelemente ausblenden */
+.titlebar-spacer,
+#alltabs-button,
+#new-tab-button,
+#tabs-newtab-button,
+#scrollbutton-up,
+#scrollbutton-down,
+#tabbrowser-arrowscrollbox-perma-box,
+spacer {
+    display: none !important;
+}
+
+/* Geschlossene & animierte Tabs sofort komplett entfernen */
+.tabbrowser-tab[closing],
+.tabbrowser-tab[animating] {
+    display: none !important;
+    flex: 0 0 0px !important;
+    width: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Tabs gleichmäßig auf die gesamte Leiste verteilen */
+.tabbrowser-tab:not([pinned]) {
+    flex: 1 1 0px !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    width: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    transition: none !important;
+    background-color: transparent !important;
+}
+
+/* --- 2. TAB CONTENT & ZENTRIERUNG --- */
+.tab-background,
+.tab-line {
+    display: none !important;
+}
+
+.tab-stack {
+    width: 100% !important;
+    height: 100% !important;
+    background-color: transparent !important;
+}
+
+.tab-content {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    height: 100% !important;
+    padding: 0 5px !important;
+    background-color: #2b2b2b !important;
+    border-bottom: 5px solid #ebdbb2 !important;
+    box-sizing: border-box !important;
+}
+
+/* Tab-Titel exakt in der Mitte ausrichten */
+.tab-label-container,
+.tab-label,
+.tab-text {
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
+    text-align: center !important;
+    width: 100% !important;
+    margin: 0 !important;
+    background-color: transparent !important;
+    border: none !important;
+    font-weight: bold !important;
+}
+
+/* Aktiver Tab: Unterer Balken rot (#cc241d) */
+.tabbrowser-tab[selected="true"] .tab-content,
+.tabbrowser-tab[selected] .tab-content {
     border-bottom: 5px solid #cc241d !important;
 }
 
-/* Disable tab animations */
-.tabbrowser-tab {
-    transition: none !important;
-}
-
-.tab-label-container {
-    text-align: center;
-    background-color: #2b2b2b !important;
-}
-
-.tab-text, .tab-content {
-    padding-left: 5px !important;
-    padding-right: 5px !important;
-    width: 100% !important;
-    font-weight: bold;
-    background-color: #2b2b2b !important;
-}
-
+/* --- 3. URLBAR & UI CLEANUP --- */
 .urlbar-container {
     height: 15px !important;
     text-align: center !important;
@@ -54,16 +129,16 @@ toolbarbutton {
     display: none !important;
 }
 
-.urlbar-searchmode-switcher, 
-.tab-close-button, 
+.urlbar-searchmode-switcher,
+.tab-close-button,
 .tab-icon-image,
 .tab-icon-stack,
 .close-icon {
     display: none !important;
 }
 
-#back-button, 
-#forward-button, 
+#back-button,
+#forward-button,
 #home-button,
 #tracking-protection-icon-container,
 #identity-box,

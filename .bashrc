@@ -65,4 +65,4 @@ if [ -f /usr/share/fzf/key-bindings.bash ]; then
 fi
 
 # opencode
-export PATH=/home/floppyist/.opencode/bin:$PATH
+export PATH="$HOME/.opencode/bin:$PATH"
