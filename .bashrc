@@ -64,5 +64,5 @@ if [ -f /usr/share/fzf/key-bindings.bash ]; then
     source /usr/share/fzf/key-bindings.bash
 fi
 
-# opencode
+export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.opencode/bin:$PATH"

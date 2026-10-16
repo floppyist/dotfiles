@@ -1,0 +1,1783 @@
+#!/usr/bin/env python3
+import cmath
+import curses
+import glob
+import itertools
+import locale
+import math
+import os
+import random
+import re
+import shutil
+import sys
+import time
+import uuid
+from collections import deque
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+USAGE = """usage: nerdsaver [list | random | cycle [seconds] | NAME ...]
+
+  list         show all screensavers
+  random       pick one at random (default)
+  cycle [sec]  rotate through all of them (default 60 s)
+  NAME ...     run one, or pick randomly from the given names
+
+Any key ends the screensaver. Mouse movement does too, after a 1 s grace period."""
+
+GREEN, CYAN, YELLOW, RED, MAGENTA, BLUE, WHITE = 1, 2, 3, 4, 5, 6, 7
+BOLD, DIM, REV = curses.A_BOLD, curses.A_DIM, curses.A_REVERSE
+SPARK = "▁▂▃▄▅▆▇█"
+BG = -1
+PAIRS = {}
+
+MAT = (231, 195, 157, 120, 83, 46, 40, 34, 28, 22)
+HEAT = (27, 33, 39, 45, 48, 46, 82, 118, 154, 190, 226, 220, 214, 208, 202, 196)
+BARP = (46, 82, 118, 154, 190, 226, 220, 214, 208, 202, 196)
+RAIN = (196, 202, 208, 214, 220, 226, 190, 154, 118, 82, 46, 48, 50, 45, 39, 33, 27, 21, 57, 93, 129, 165, 201)
+FRAC = (17, 19, 21, 27, 33, 39, 45, 51, 87, 123, 159, 231, 229, 227, 226, 220, 214, 208, 202, 196, 160, 125, 90, 54)
+COOL = (17, 18, 19, 20, 21, 27, 33, 39, 45, 51, 87, 123, 159, 231)
+WARM = (52, 88, 124, 160, 196, 202, 208, 214, 220, 226, 227, 229, 231)
+FACTOR = (33, 39, 45, 141, 177, 213)
+
+
+def setup_locale():
+    for loc in ("", "C.UTF-8", "en_US.UTF-8"):
+        try:
+            locale.setlocale(locale.LC_ALL, loc)
+            if locale.nl_langinfo(locale.CODESET).upper().replace("-", "") == "UTF8":
+                return
+        except locale.Error:
+            pass
+
+
+def init_colors():
+    global BG
+    curses.start_color()
+    try:
+        curses.use_default_colors()
+        BG = -1
+    except curses.error:
+        BG = curses.COLOR_BLACK
+    base = [curses.COLOR_GREEN, curses.COLOR_CYAN, curses.COLOR_YELLOW, curses.COLOR_RED,
+            curses.COLOR_MAGENTA, curses.COLOR_BLUE, curses.COLOR_WHITE]
+    for i, c in enumerate(base, 1):
+        curses.init_pair(i, c, BG)
+
+
+def col(n):
+    return curses.color_pair(n)
+
+
+def c256(n, fb=WHITE):
+    if curses.COLORS < 256:
+        return col(fb)
+    p = PAIRS.get(n)
+    if p is None:
+        p = len(PAIRS) + 16
+        curses.init_pair(p, n, BG)
+        PAIRS[n] = p
+    return curses.color_pair(p)
+
+
+def mkpal(nums, fb=WHITE):
+    if curses.COLORS < 256:
+        half = len(nums) // 2
+        return [col(fb) | (BOLD if i < half else DIM) for i in range(len(nums))]
+    return [c256(n, fb) for n in nums]
+
+
+def pick(pal, f):
+    return pal[min(len(pal) - 1, max(0, int(f * len(pal))))]
+
+
+def put(scr, y, x, s, attr=0):
+    h, w = scr.getmaxyx()
+    if y < 0 or y >= h or x >= w or not s:
+        return
+    if x < 0:
+        s = s[-x:]
+        x = 0
+    s = s[: w - x]
+    if not s:
+        return
+    try:
+        scr.addstr(y, x, s, attr)
+    except curses.error:
+        pass
+
+
+def rd(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def box(scr, y, x, h, w, title="", attr=None):
+    if h < 2 or w < 4:
+        return
+    a = col(CYAN) if attr is None else attr
+    put(scr, y, x, "┌" + "─" * (w - 2) + "┐", a)
+    for i in range(1, h - 1):
+        put(scr, y + i, x, "│", a)
+        put(scr, y + i, x + w - 1, "│", a)
+    put(scr, y + h - 1, x, "└" + "─" * (w - 2) + "┘", a)
+    if title:
+        put(scr, y, x + 2, " " + title + " ", col(YELLOW) | BOLD)
+
+
+BR = {(0, 0): 0x01, (0, 1): 0x02, (0, 2): 0x04, (1, 0): 0x08, (1, 1): 0x10, (1, 2): 0x20, (0, 3): 0x40, (1, 3): 0x80}
+
+
+KATA = [chr(c) for c in range(0xFF66, 0xFF9E)]
+GLYPHS = KATA * 3 + list("0123456789:=*+-<>|")
+LETTERS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@%&")
+MESSAGES = ("WAKE UP, USER", "VOID LINUX", "THERE IS NO CLOUD", "KEEP IT SIMPLE", "RUNIT STAGE 2",
+            "FOLLOW THE WHITE RABBIT", "SUDO MAKE ME A SANDWICH", "NO SYSTEMD WAS HARMED", "RTFM")
+
+
+class Matrix:
+    fps = 18
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.h, s.w = scr.getmaxyx()
+        s.pal = mkpal(MAT, GREEN)
+        s.cols = [s.spawn(True) for _ in range(s.w)]
+        s.msg = None
+        s.next_msg = time.monotonic() + random.uniform(6, 12)
+        s.hi = c256(231, WHITE) | BOLD
+        s.lo = c256(46, GREEN) | BOLD
+
+    def spawn(s, first=False):
+        h, pal = s.h, s.pal
+        n = random.randint(max(5, h // 5), max(8, int(h * 0.9)))
+        y = random.uniform(-h, 2 * h) if first else h + random.uniform(0, 1.5 * h)
+        a = [pal[min(len(pal) - 1, int(i / n * len(pal)))] for i in range(n)]
+        a[0] |= BOLD
+        return [y, random.uniform(0.25, 1.0), n, [random.choice(GLYPHS) for _ in range(h + 1)], a]
+
+    def step(s):
+        scr, h, cols = s.scr, s.h, s.cols
+        scr.erase()
+        addstr = scr.addstr
+        for x, c in enumerate(cols):
+            c[0] -= c[1]
+            head, n = int(c[0]), c[2]
+            if head + n < 0:
+                cols[x] = s.spawn()
+                continue
+            lo, hi = max(0, -head), min(n, h - head)
+            if hi <= lo:
+                continue
+            g, a = c[3], c[4]
+            if random.random() < 0.5:
+                g[head + random.randrange(lo, hi)] = random.choice(GLYPHS)
+            for i in range(lo, hi):
+                try:
+                    addstr(head + i, x, g[head + i], a[i])
+                except curses.error:
+                    pass
+        now = time.monotonic()
+        if s.msg is None and now > s.next_msg and s.w >= 26:
+            s.msg = (now, random.choice(MESSAGES))
+        if s.msg:
+            t0, text = s.msg
+            k = int((now - t0) * 14)
+            if k > len(text) + 40:
+                s.msg = None
+                s.next_msg = now + random.uniform(10, 20)
+            else:
+                k = min(k, len(text))
+                tail = "".join(random.choice(LETTERS) if ch != " " else ch for ch in text[k:])
+                x0 = (s.w - len(text)) // 2
+                put(scr, h // 2 - 1, x0 - 2, " " * (len(text) + 4), 0)
+                put(scr, h // 2, x0 - 2, "  ", 0)
+                put(scr, h // 2, x0, text[:k], s.hi)
+                put(scr, h // 2, x0 + k, tail, s.lo)
+                put(scr, h // 2, x0 + len(text), "  ", 0)
+                put(scr, h // 2 + 1, x0 - 2, " " * (len(text) + 4), 0)
+
+
+DISK_RE = re.compile(r"^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$")
+
+
+def read_cpu():
+    out = []
+    for line in rd("/proc/stat").splitlines():
+        if line.startswith("cpu"):
+            p = line.split()
+            v = list(map(int, p[1:9]))
+            out.append((v[3] + v[4], sum(v)))
+    return out
+
+
+def read_mem():
+    d = {}
+    for line in rd("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        try:
+            d[k] = int(v.split()[0])
+        except (ValueError, IndexError):
+            pass
+    return d
+
+
+def read_net():
+    rx = tx = 0
+    for line in rd("/proc/net/dev").splitlines()[2:]:
+        name, _, data = line.partition(":")
+        if name.strip() == "lo":
+            continue
+        f = data.split()
+        try:
+            rx += int(f[0])
+            tx += int(f[8])
+        except (ValueError, IndexError):
+            pass
+    return rx, tx
+
+
+def read_disk():
+    r = w = 0
+    for line in rd("/proc/diskstats").splitlines():
+        f = line.split()
+        if len(f) > 9 and DISK_RE.match(f[2]):
+            r += int(f[5])
+            w += int(f[9])
+    return r * 512, w * 512
+
+
+def read_bat(d):
+    if not d:
+        return None
+    try:
+        cap = int(rd(d + "/capacity")) / 100.0
+    except ValueError:
+        return None
+    st = rd(d + "/status").strip()
+    eta = None
+    for now_f, full_f, rate_f in (("energy_now", "energy_full", "power_now"), ("charge_now", "charge_full", "current_now")):
+        try:
+            rate = int(rd("%s/%s" % (d, rate_f)))
+            if rate > 0:
+                now_v = int(rd("%s/%s" % (d, now_f)))
+                if st == "Discharging":
+                    eta = now_v / rate
+                elif st == "Charging":
+                    eta = (int(rd("%s/%s" % (d, full_f))) - now_v) / rate
+                break
+        except ValueError:
+            pass
+    return cap, st, eta
+
+
+def read_temp(files):
+    t = []
+    for f in files:
+        try:
+            t.append(int(rd(f)) / 1000.0)
+        except ValueError:
+            pass
+    return max(t) if t else None
+
+
+def read_freq(files):
+    t = []
+    for f in files:
+        try:
+            t.append(int(rd(f)) / 1e6)
+        except ValueError:
+            pass
+    return t
+
+
+def read_procs():
+    d = {}
+    try:
+        pids = os.listdir("/proc")
+    except OSError:
+        return d
+    for pid in pids:
+        if not pid.isdigit():
+            continue
+        st = rd("/proc/%s/stat" % pid)
+        r = st.rfind(")")
+        if r < 0:
+            continue
+        try:
+            f = st[r + 2:].split()
+            d[pid] = (st[st.find("(") + 1:r], int(f[11]) + int(f[12]))
+        except (ValueError, IndexError):
+            pass
+    return d
+
+
+def rss_mb(pid, page):
+    try:
+        return int(rd("/proc/%s/statm" % pid).split()[1]) * page / 1048576.0
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def spark(vals, width, vmax=None):
+    vals = list(vals)[-width:]
+    vmax = vmax or max(max(vals, default=0), 1e-9)
+    return "".join(SPARK[min(7, int(v / vmax * 7.999))] for v in vals).rjust(width)
+
+
+def human(n):
+    for u in ("B/s", "KB/s", "MB/s", "GB/s"):
+        if n < 1024:
+            return "%6.1f %s" % (n, u)
+        n /= 1024.0
+    return "%6.1f TB/s" % n
+
+
+def hms(hours):
+    return "%dh%02dm" % (int(hours), int(hours % 1 * 60))
+
+
+class SysMon:
+    fps = 10
+
+    def __init__(s, scr):
+        s.scr = scr
+        u = os.uname()
+        s.host, s.kernel = u.nodename, u.release
+        s.tck = os.sysconf("SC_CLK_TCK")
+        s.page = os.sysconf("SC_PAGE_SIZE")
+        s.prev_cpu = read_cpu()
+        s.nc = max(1, len(s.prev_cpu) - 1)
+        s.cpu = [0.0] * (s.nc + 1)
+        s.hist = deque(maxlen=400)
+        s.disp = {}
+        s.mem = s.swap = s.disk = 0.0
+        s.memtxt = s.swaptxt = s.disktxt = ""
+        bats = sorted(glob.glob("/sys/class/power_supply/BAT*"))
+        s.bat_dir = bats[0] if bats else None
+        s.therm = glob.glob("/sys/class/thermal/thermal_zone*/temp")
+        s.freqf = [("/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq" % i) for i in range(s.nc)]
+        s.freq = []
+        s.bat, s.temp = None, None
+        s.load = (0.0, 0.0, 0.0)
+        s.rx = s.tx = s.dr = s.dw = 0.0
+        s.hist_n = {k: deque(maxlen=300) for k in ("rx", "tx", "dr", "dw")}
+        s.prev_net, s.prev_disk = read_net(), read_disk()
+        s.prev_proc = read_procs()
+        s.procs = []
+        s.last = s.slow = time.monotonic() - 2
+        s.barp = mkpal(BARP, GREEN)
+        s.heat = mkpal(HEAT, GREEN)
+        s.lab = c256(51, CYAN) | BOLD
+        s.empty = c256(238, WHITE) | DIM
+        s.white = col(WHITE) | BOLD
+
+    def sample(s, now):
+        dt = max(now - s.last, 1e-3)
+        s.last = now
+        cur = read_cpu()
+        if len(cur) == len(s.prev_cpu):
+            s.cpu = [1 - (i - i0) / (t - t0) if t > t0 else 0.0 for (i, t), (i0, t0) in zip(cur, s.prev_cpu)]
+            s.hist.append(s.cpu[0])
+        s.prev_cpu = cur
+        m = read_mem()
+        tot, av = m.get("MemTotal", 1), m.get("MemAvailable", 0)
+        s.mem = 1 - av / tot
+        s.memtxt = "%.1f/%.1fG" % ((tot - av) / 1048576, tot / 1048576)
+        st, sf = m.get("SwapTotal", 0), m.get("SwapFree", 0)
+        s.swap = (1 - sf / st) if st else 0.0
+        s.swaptxt = "%.1f/%.1fG" % ((st - sf) / 1048576, st / 1048576)
+        try:
+            du = shutil.disk_usage("/")
+            s.disk = du.used / du.total
+            s.disktxt = "%.0f/%.0fG" % (du.used / 2 ** 30, du.total / 2 ** 30)
+        except OSError:
+            pass
+        try:
+            s.load = os.getloadavg()
+        except OSError:
+            pass
+        rx, tx = read_net()
+        dr, dw = read_disk()
+        s.rx, s.tx = (rx - s.prev_net[0]) / dt, (tx - s.prev_net[1]) / dt
+        s.dr, s.dw = (dr - s.prev_disk[0]) / dt, (dw - s.prev_disk[1]) / dt
+        s.prev_net, s.prev_disk = (rx, tx), (dr, dw)
+        for k, v in (("rx", s.rx), ("tx", s.tx), ("dr", s.dr), ("dw", s.dw)):
+            s.hist_n[k].append(max(0.0, v))
+        if now - s.slow >= 2.0:
+            dts = now - s.slow
+            s.slow = now
+            s.bat = read_bat(s.bat_dir)
+            s.temp = read_temp(s.therm)
+            s.freq = read_freq(s.freqf)
+            pr = read_procs()
+            lst = [(pid, name, (tt - s.prev_proc[pid][1]) / s.tck / dts)
+                   for pid, (name, tt) in pr.items() if pid in s.prev_proc]
+            s.prev_proc = pr
+            lst.sort(key=lambda z: -z[2])
+            s.procs = [(n, c, rss_mb(p, s.page)) for p, n, c in lst[:14]]
+
+    def sm(s, key, target):
+        v = s.disp.get(key, 0.0)
+        v += (target - v) * 0.3
+        s.disp[key] = v
+        return v
+
+    def bar(s, y, x, wid, val, label, suffix=""):
+        scr = s.scr
+        put(scr, y, x, "%-5s" % label, s.lab)
+        inner = wid - 8 - len(suffix)
+        if inner < 4:
+            return
+        val = min(1.0, max(0.0, val))
+        n = int(val * inner)
+        put(scr, y, x + 5, "[", s.white)
+        k = len(s.barp)
+        for i in range(k):
+            a, b = int(i * inner / k), min(n, int((i + 1) * inner / k))
+            if b > a:
+                put(scr, y, x + 6 + a, "█" * (b - a), s.barp[i])
+        if n < inner:
+            put(scr, y, x + 6 + n, "░" * (inner - n), s.empty)
+        put(scr, y, x + 6 + inner, "]", s.white)
+        put(scr, y, x + 8 + inner, suffix, col(WHITE))
+
+    def graph(s, y, x, h, w, data):
+        data = list(data)[-w:]
+        pad = w - len(data)
+        units = [int(max(0.0, min(1.0, v)) * h * 8) for v in data]
+        for r in range(h):
+            line = "".join("█" if u >= (r + 1) * 8 else SPARK[u - r * 8 - 1] if u > r * 8 else " " for u in units)
+            put(s.scr, y + h - 1 - r, x + pad, line, pick(s.heat, (r + 0.5) / h))
+
+    def io_line(s, y, x, wid, label, rate, key, attr):
+        put(s.scr, y, x, label, attr | BOLD)
+        put(s.scr, y, x + 5, human(rate), attr | BOLD)
+        sw = wid - 16
+        if sw > 3:
+            put(s.scr, y, x + 16, spark(s.hist_n[key], sw), attr)
+
+    def step(s):
+        now = time.monotonic()
+        if now - s.last >= 1.0:
+            s.sample(now)
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        up = float(rd("/proc/uptime").split()[0]) if rd("/proc/uptime") else 0.0
+        put(scr, 0, 0, " ▓▒░ %s ░▒▓  VOID LINUX  kernel %s " % (s.host, s.kernel), c256(46, GREEN) | BOLD)
+        clock = time.strftime(" %a %Y-%m-%d %H:%M:%S ")
+        put(scr, 0, max(0, w - len(clock)), clock, c256(51, CYAN) | BOLD)
+        p = abs(((now * 28) % (2 * w)) - w)
+        put(scr, 1, int(p), "░▒▓█▓▒░", c256(28, GREEN))
+
+        lw = w // 2
+        rw = w - lw
+        ch_ = min(s.nc + 3, max(5, (h - 2) // 2))
+        box(scr, 2, 0, ch_, lw, "CPU  %d threads" % s.nc)
+        for i in range(ch_ - 2):
+            if i >= len(s.cpu):
+                break
+            v = s.sm("c%d" % i, s.cpu[i])
+            tail = "%5.1f%%" % (v * 100)
+            if i > 0 and i - 1 < len(s.freq):
+                tail += " %.1fG" % s.freq[i - 1]
+            s.bar(3 + i, 2, lw - 4, v, "ALL" if i == 0 else "cpu%d" % (i - 1), tail)
+        gh = h - (2 + ch_)
+        if gh >= 4:
+            box(scr, 2 + ch_, 0, gh, lw, "CPU history (%ds)" % (lw - 2))
+            s.graph(3 + ch_, 1, gh - 2, lw - 2, s.hist)
+
+        x, wd = lw, rw
+        box(scr, 2, x, 9, wd, "memory / power / thermal")
+        s.bar(3, x + 2, wd - 4, s.sm("mem", s.mem), "MEM", s.memtxt)
+        s.bar(4, x + 2, wd - 4, s.sm("swap", s.swap), "SWAP", s.swaptxt)
+        s.bar(5, x + 2, wd - 4, s.sm("disk", s.disk), "DISK/", s.disktxt)
+        if s.bat is None:
+            put(scr, 6, x + 2, "BAT  AC power, no battery found", col(YELLOW))
+        else:
+            cap, st, eta = s.bat
+            sym = {"Charging": "⚡", "Discharging": "▼", "Full": "✔"}.get(st, "?")
+            tail = "%3d%% %s" % (cap * 100, sym) + (" " + hms(eta) if eta else "")
+            s.bar(6, x + 2, wd - 4, s.sm("bat", cap), "BAT", tail)
+        if s.temp is None:
+            put(scr, 7, x + 2, "TEMP n/a", col(YELLOW))
+        else:
+            s.bar(7, x + 2, wd - 4, s.sm("tmp", s.temp / 100.0), "TEMP", "%4.0f°C" % s.temp)
+        put(scr, 8, x + 2, "LOAD  %.2f %.2f %.2f   UP %dd %02dh %02dm" %
+            (s.load[0], s.load[1], s.load[2], up // 86400, up % 86400 // 3600, up % 3600 // 60), s.white)
+
+        box(scr, 11, x, 6, wd, "network / disk i/o")
+        s.io_line(12, x + 2, wd - 4, "RX ▼", s.rx, "rx", c256(46, GREEN))
+        s.io_line(13, x + 2, wd - 4, "TX ▲", s.tx, "tx", c256(207, MAGENTA))
+        s.io_line(14, x + 2, wd - 4, "RD ◀", s.dr, "dr", c256(45, CYAN))
+        s.io_line(15, x + 2, wd - 4, "WR ▶", s.dw, "dw", c256(214, YELLOW))
+
+        ph = h - 17
+        if ph >= 4:
+            box(scr, 17, x, ph, wd, "top processes")
+            for i, (name, cp, mb) in enumerate(s.procs[: ph - 2]):
+                v = s.sm("p%d" % i, min(1.0, cp / max(1, s.nc)))
+                s.bar(18 + i, x + 2, wd - 4, v, name[:5], "%5.1f%% %5.0fM" % (cp * 100, mb))
+
+
+def escape_grid(w, h, cx, cy, sy, c, maxit, off, pal_len, ship):
+    sx = sy * 0.5
+    stride = 1 if np is not None else 2
+    wc = (w + stride - 1) // stride
+    sxc = sx * stride
+    ramp = len(Fractal.RAMP) - 1
+    if np is not None:
+        xs = cx + (np.arange(wc) - wc / 2) * sxc
+        ys = (cy - (np.arange(h) - h / 2) * sy) if ship else (cy + (np.arange(h) - h / 2) * sy)
+        z0 = (xs[None, :] + 1j * ys[:, None]).ravel()
+        cc = np.full(z0.shape, c, dtype=np.complex128) if c is not None else z0.copy()
+        nu = np.full(z0.shape, -1.0)
+        idx = np.arange(z0.size)
+        z = z0.copy()
+        for i in range(maxit):
+            if ship:
+                z = np.abs(z.real) + 1j * np.abs(z.imag)
+            z = z * z + cc
+            m2 = z.real * z.real + z.imag * z.imag
+            esc = m2 > 4.0
+            if esc.any():
+                nu[idx[esc]] = i + 1 - np.log2(np.log2(np.sqrt(m2[esc])))
+                keep = ~esc
+                idx, z, cc = idx[keep], z[keep], cc[keep]
+                if idx.size == 0:
+                    break
+        inside = nu < 0
+        colors = np.where(inside, -1, ((nu * 1.2 + off) % pal_len).astype(np.int64))
+        chars = np.where(inside, 0, (((nu % 1.0) * ramp).astype(np.int64) + 1))
+        return colors.reshape(h, wc).tolist(), chars.reshape(h, wc).tolist(), stride
+    colors, chars = [], []
+    for j in range(h):
+        im = (cy - (j - h / 2) * sy) if ship else (cy + (j - h / 2) * sy)
+        rc, rh = [], []
+        for i in range(wc):
+            z = complex(cx + (i - wc / 2) * sxc, im)
+            k = z if c is None else c
+            n = 0
+            while n < maxit:
+                if ship:
+                    z = complex(abs(z.real), abs(z.imag))
+                z = z * z + k
+                if z.real * z.real + z.imag * z.imag > 4.0:
+                    break
+                n += 1
+            if n >= maxit:
+                rc.append(-1)
+                rh.append(0)
+            else:
+                v = n + 1 - math.log2(math.log2(math.sqrt(z.real * z.real + z.imag * z.imag)))
+                rc.append(int(v * 1.2 + off) % pal_len)
+                rh.append(int((v % 1.0) * ramp) + 1)
+        colors.append(rc)
+        chars.append(rh)
+    return colors, chars, stride
+
+
+class Fractal:
+    RAMP = " .:-=+*#%@"
+    MODES = ("julia", "mandelbrot", "ship")
+    LIMITS = {"julia": 40, "mandelbrot": 60, "ship": 50}
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.fps = 9 if np is not None else 4
+        s.pal = mkpal(FRAC, CYAN)
+        s.t = random.uniform(0, 6)
+        s.mode = random.randrange(3)
+        s.start()
+
+    def start(s):
+        s.mt = time.monotonic()
+        s.scale = 3.0 if s.mode != 2 else 2.4
+
+    def step(s):
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        hh = max(2, h)
+        now = time.monotonic()
+        mode = s.MODES[s.mode]
+        if now - s.mt > s.LIMITS[mode]:
+            s.mode = (s.mode + 1) % 3
+            s.start()
+            mode = s.MODES[s.mode]
+        s.t += 0.05
+        off = s.t * 4
+        n = len(s.pal)
+        if mode == "julia":
+            a = s.t * 0.3
+            c = 0.7885 * complex(math.cos(a), math.sin(a))
+            maxit = 56
+            colors, chars, stride = escape_grid(w, hh, 0.0, 0.0, 2.8 / hh, c, maxit, off, n, False)
+            # head = "JULIA SET   z -> z^2 + c   c = %+.4f %+.4fi" % (c.real, c.imag)
+        elif mode == "mandelbrot":
+            s.scale = max(s.scale * 0.978, 4e-5)
+            maxit = min(240, int(50 + 45 * math.log10(3.0 / s.scale)))
+            colors, chars, stride = escape_grid(w, hh, -0.743643887037151, 0.131825904205330, s.scale / hh,
+                                                None, maxit, off, n, False)
+            # head = "MANDELBROT   z -> z^2 + c   zoom x%.1e   iterations %d" % (3.0 / s.scale, maxit)
+        else:
+            s.scale = max(s.scale * 0.982, 2.5e-3)
+            maxit = min(200, int(50 + 40 * math.log10(2.4 / s.scale)))
+            colors, chars, stride = escape_grid(w, hh, -1.7443359375, -0.017451171875, s.scale / hh,
+                                                None, maxit, off, n, True)
+            # head = "BURNING SHIP   z -> (|Re z| + i|Im z|)^2 + c   zoom x%.1e" % (2.4 / s.scale)
+        scr.erase()
+        ramp = s.RAMP
+        for y in range(hh):
+            rc, rh = colors[y], chars[y]
+            x = 0
+            for key, grp in itertools.groupby(range(len(rc)), key=rc.__getitem__):
+                idxs = list(grp)
+                if key >= 0:
+                    text = "".join(ramp[rh[i]] * stride for i in idxs)
+                    put(scr, y, idxs[0] * stride, text, s.pal[key] | BOLD)
+        # put(scr, h - 1, 0, " " + head + " ", col(WHITE) | BOLD | REV)
+
+
+DMESG = [
+    "Linux version {kv} (void@build) (gcc (GCC) 13.2.0) #1 SMP PREEMPT_DYNAMIC",
+    "Command line: BOOT_IMAGE=/vmlinuz-{kv} root=UUID={uuid} ro quiet loglevel=3",
+    "x86/fpu: Supporting XSAVE feature 0x001: 'x87 floating point registers'",
+    "BIOS-e820: [mem 0x0000000000100000-0x00000000bffdffff] usable",
+    "ACPI: Core revision 20230628",
+    "tsc: Refined TSC clocksource calibration: {mhz}.000 MHz",
+    "PCI: MMCONFIG for domain 0000 [bus 00-ff] at [mem 0xf0000000-0xf7ffffff]",
+    "Memory: {mem}K/16380000K available (16384K kernel code, 2831K rwdata)",
+    "nvme nvme0: pci function 0000:01:00.0",
+    "nvme0n1: p1 p2 p3",
+    "usb 1-1: new high-speed USB device number 2 using xhci_hcd",
+    "EXT4-fs (nvme0n1p2): mounted filesystem {uuid} r/w with ordered data mode",
+    "random: crng init done",
+    "i915 0000:00:02.0: [drm] Finished loading DMC firmware i915/kbl_dmc_ver1_04.bin (v1.4)",
+    "Bluetooth: Core ver 2.22",
+    "NET: Registered PF_INET6 protocol family",
+    "iwlwifi 0000:02:00.0: Detected Intel(R) Wi-Fi 6 AX200 160MHz",
+    "input: AT Translated Set 2 keyboard as /devices/platform/i8042/serio0/input/input3",
+    "audit: type=1400 audit(1713371337.042:2): apparmor=\"STATUS\" operation=\"profile_load\"",
+    "Freeing unused kernel image (initmem) memory: 2840K",
+    "Run /sbin/init as init process",
+]
+SERVICES = ["udevd", "dbus", "dhcpcd", "sshd", "elogind", "chronyd", "cronie", "acpid",
+            "socklog-unix", "nanoklogd", "NetworkManager", "polkitd", "bluetoothd", "docker"]
+DIRS = ["drivers/net", "fs/ext4", "kernel/sched", "mm", "net/ipv4", "crypto", "sound/soc",
+        "arch/x86/kvm", "lib", "block", "drivers/gpu/drm", "fs/btrfs", "security/selinux"]
+FILES = ["core", "main", "irq", "hash", "sort", "dma", "mmu", "socket", "tcp", "lru", "vfs",
+         "fault", "rbtree", "slab", "futex", "ring", "pci", "clk"]
+CRATES = ["libc v0.2.153", "serde v1.0.197", "tokio v1.37.0", "syn v2.0.60", "regex v1.10.4",
+          "hyper v1.3.1", "clap v4.5.4", "rand v0.8.5", "bytes v1.6.0", "ring v0.17.8", "mio v0.8.11"]
+PKGS = ["linux6.6-6.6.30_1", "mesa-24.0.5_1", "firefox-125.0.1_1", "glibc-2.38_4", "python3-3.12.3_1",
+        "gcc-13.2.0_3", "linux-firmware-20240312_1", "xorg-server-21.1.12_1", "i3-4.23_1",
+        "neovim-0.9.5_1", "rustc-1.77.2_1", "openssl-3.2.1_1", "zsh-5.9_5", "ffmpeg-6.1.1_2"]
+HOSTS = ["voidlinux.org", "kernel.org", "gnu.org", "1.1.1.1", "debian.org", "xkcd.com", "9.9.9.9"]
+COMMITS = ["fix: off-by-one in ring buffer", "refactor: kill global state", "feat: add --dry-run",
+           "revert \"it works on my machine\"", "docs: explain the thing nobody understood",
+           "chore: bump deps", "fix: race condition (hopefully)", "perf: avoid O(n^2) in hot path",
+           "wip", "fix typo", "merge branch 'feature/rewrite-in-rust'", "test: add flaky test",
+           "fix: segfault when pointer is NULL (who knew)", "feat: vim keybindings for everything"]
+MATH = ["2**127 - 1", "math.factorial(30)", "sum(1/n**2 for n in range(1, 10**6))", "math.pi**2 / 6",
+        "[p for p in range(2, 60) if all(p % d for d in range(2, p))]", "math.gcd(2**64 - 1, 3**40 - 1)",
+        "hex(0xdeadbeef ^ 0xcafebabe)", "int('1337', 8)", "sum(i for i in range(1000) if i%3==0 or i%5==0)",
+        "(1 + 5**.5) / 2", "cmath.exp(1j * math.pi)", "bin(2**10 - 1).count('1')",
+        "sorted(random.sample(range(100), 8))", "math.comb(52, 5)", "2**0.5 * 2**0.5 == 2"]
+SYSCALLS = [
+    (r'openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC)', "3"),
+    (r'fstat(3, {st_mode=S_IFREG|0644, st_size=48217, ...})', "0"),
+    (r'mmap(NULL, 48217, PROT_READ, MAP_PRIVATE, 3, 0)', "0x7f3a1c2b0000"),
+    (r'close(3)', "0"),
+    (r'openat(AT_FDCWD, "/usr/lib/libc.so.6", O_RDONLY|O_CLOEXEC)', "3"),
+    (r'read(3, "\177ELF\2\1\1\3\0\0\0\0\0\0\0\0\3\0>\0\1\0\0\0"..., 832)', "832"),
+    (r'mprotect(0x7f3a1c1f0000, 16384, PROT_READ)', "0"),
+    (r'openat(AT_FDCWD, "/usr/share/locale/locale.alias", O_RDONLY|O_CLOEXEC)', "-1 ENOENT (No such file or directory)"),
+    (r'getrandom("\x8f\x1c\x4e\xa2\x07\x9b\x33\xd1", 8, GRND_NONBLOCK)', "8"),
+    (r'ioctl(1, TCGETS, {c_iflag=ICRNL|IXON, c_oflag=NL0|OPOST|ONLCR})', "0"),
+    (r'brk(NULL)', "0x55d2c7e1a000"),
+    (r'futex(0x7f3a1c1ef990, FUTEX_WAKE_PRIVATE, 2147483647)', "0"),
+    (r'epoll_wait(4, [], 1024, 100)', "0"),
+    (r'write(1, "hello, world\n", 13)', "13"),
+    (r'exit_group(0)', "?"),
+]
+
+
+class BootLog:
+    fps = 20
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.h, s.w = scr.getmaxyx()
+        s.user = os.environ.get("USER", "user")
+        s.host = os.uname().nodename
+        s.lines = deque(maxlen=max(5, s.h))
+        s.phases = [s.p_dmesg, s.p_runit, s.p_compile, s.p_xbps, s.p_net, s.p_python, s.p_git,
+                    s.p_sysinfo, s.p_hexdump, s.p_strace]
+        s.last_phase = None
+        s.gen = s.next_phase()
+        s.next_t = time.monotonic()
+        s.blink = -1
+
+    def next_phase(s):
+        while True:
+            ph = random.choice(s.phases)
+            if ph != s.last_phase:
+                break
+        s.last_phase = ph
+        return ph()
+
+    def P(s, cwd="~", root=False):
+        if root:
+            return [("root", RED), ("@", 0), (s.host, CYAN), (":", 0), (cwd, BLUE), ("# ", RED)]
+        return [(s.user, GREEN), ("@", 0), (s.host, CYAN), (":", 0), (cwd, BLUE), ("$ ", 0)]
+
+    def typed(s, prompt, cmd):
+        for i in range(len(cmd) + 1):
+            yield (prompt + [(cmd[:i], WHITE)], random.uniform(0.02, 0.1), i > 0)
+        yield (prompt + [(cmd, WHITE)], 0.35, True)
+
+    def p_dmesg(s):
+        yield from s.typed(s.P(root=True), "dmesg | head -n 40")
+        t = random.uniform(0, 2)
+        kv = "6.6.%d_1" % random.randint(20, 40)
+        for i in range(random.randint(18, 28)):
+            t += random.expovariate(6)
+            msg = DMESG[i % len(DMESG)] if i < 2 else random.choice(DMESG)
+            msg = msg.format(kv=kv, uuid=uuid.uuid4(), mhz=random.choice([2808, 3392, 1996]),
+                             mem=random.randint(15000000, 16200000))
+            yield ([("[%11.6f] " % t, CYAN), (msg, 0)], random.choice([0.01, 0.02, 0.05, 0.12]), False)
+
+    def p_runit(s):
+        yield from s.typed(s.P(root=True), "sv status /var/service/*")
+        svcs = random.sample(SERVICES, random.randint(7, 11))
+        bad = random.choice(svcs) if random.random() < 0.3 else None
+        for sv in svcs:
+            pid, sec = random.randint(300, 4000), random.randint(2, 90000)
+            if sv == bad:
+                yield ([("down: ", RED), ("/var/service/%s: %ds, normally up" % (sv, random.randint(1, 30)), 0)], 0.08, False)
+            else:
+                yield ([("run: ", GREEN), ("/var/service/%s: (pid %d) %ds; " % (sv, pid, sec), 0),
+                        ("run: ", GREEN), ("log: (pid %d) %ds" % (pid - 1, sec), 0)], 0.08, False)
+
+    def p_compile(s):
+        if random.random() < 0.6:
+            yield from s.typed(s.P("~/src/linux"), "make -j$(nproc)")
+            for _ in range(random.randint(25, 45)):
+                d, f = random.choice(DIRS), random.choice(FILES)
+                yield ([("  CC      ", CYAN), ("%s/%s.o" % (d, f), 0)], random.choice([0.01, 0.02, 0.04, 0.08]), False)
+                if random.random() < 0.06:
+                    yield ([("%s/%s.c:%d:%d: " % (d, f, random.randint(20, 900), random.randint(2, 30)), 0),
+                            ("warning: ", YELLOW), ("unused variable 'ret' [-Wunused-variable]", 0)], 0.05, False)
+            if random.random() < 0.2:
+                d, f = random.choice(DIRS), random.choice(FILES)
+                yield ([("%s/%s.c:%d:9: " % (d, f, random.randint(20, 900)), 0), ("error: ", RED),
+                        ("implicit declaration of function 'kmalloc_fast'", 0)], 0.3, False)
+                yield ([("make[3]: *** [scripts/Makefile.build:243: %s/%s.o] Error 1" % (d, f), RED)], 0.3, False)
+                yield ([("make: *** [Makefile:1921: .] Error 2", RED)], 0.5, False)
+            else:
+                yield ([("  LD      vmlinux", YELLOW)], 0.4, False)
+                yield ([("  OBJCOPY arch/x86/boot/bzImage", CYAN)], 0.2, False)
+                yield ([("Kernel: arch/x86/boot/bzImage is ready  (#1)", GREEN)], 0.5, False)
+        else:
+            yield from s.typed(s.P("~/dev/fastthing"), "cargo build --release")
+            for c in random.sample(CRATES, 8):
+                yield ([("   Compiling ", GREEN), (c, 0)], random.uniform(0.05, 0.3), False)
+            yield ([("    Finished ", GREEN), ("`release` profile [optimized] target(s) in %.2fs" % random.uniform(8, 60), 0)], 0.5, False)
+
+    def p_xbps(s):
+        yield from s.typed(s.P(root=True), "xbps-install -Su")
+        yield ([("[*] Updating repository `https://repo-default.voidlinux.org/current/x86_64-repodata' ...", 0)], 0.6, False)
+        pk = random.sample(PKGS, random.randint(3, 5))
+        for p in pk:
+            size = random.randint(300, 40000)
+            for step in range(11):
+                yield ([("%s.x86_64.xbps: " % p, 0), ("%dKB " % size, CYAN),
+                        ("[%s%s] %3d%%" % ("#" * step, "-" * (10 - step), step * 10), GREEN)],
+                       random.uniform(0.02, 0.09), step > 0)
+        yield ([("Transaction: %d packages to be updated" % len(pk), YELLOW)], 0.4, False)
+        for p in pk:
+            yield ([("%s: " % p, 0), ("unpacking ...", CYAN)], 0.05, False)
+        for p in pk:
+            yield ([("%s: " % p, 0), ("configuring ... ", CYAN), ("done.", GREEN)], 0.07, False)
+
+    def p_net(s):
+        if random.random() < 0.5:
+            host = random.choice(HOSTS)
+            yield from s.typed(s.P(), "ping -c 8 " + host)
+            ip = "%d.%d.%d.%d" % tuple(random.randint(1, 254) for _ in range(4))
+            yield ([("PING %s (%s) 56(84) bytes of data." % (host, ip), 0)], 0.3, False)
+            base = random.uniform(5, 60)
+            rtts = []
+            for i in range(1, 9):
+                r = base + random.uniform(-2, 6)
+                rtts.append(r)
+                yield ([("64 bytes from %s: icmp_seq=%d ttl=%d " % (ip, i, random.choice([52, 57, 63])), 0),
+                        ("time=%.1f ms" % r, GREEN)], 0.4, False)
+            yield ([("--- %s ping statistics ---" % host, CYAN)], 0.2, False)
+            yield ([("8 packets transmitted, 8 received, 0% packet loss", 0)], 0.1, False)
+            yield ([("rtt min/avg/max = %.3f/%.3f/%.3f ms" % (min(rtts), sum(rtts) / 8, max(rtts)), 0)], 0.3, False)
+        else:
+            yield from s.typed(s.P(root=True), "nmap -sV 192.168.1.0/28")
+            yield ([("Starting Nmap 7.94 ( https://nmap.org )", 0)], 0.5, False)
+            for n in random.sample(range(1, 15), 3):
+                yield ([("Nmap scan report for ", 0), ("192.168.1.%d" % n, YELLOW)], 0.4, False)
+                for port, svc in random.sample([("22/tcp", "ssh      OpenSSH 9.7"), ("80/tcp", "http     nginx 1.25.4"),
+                                                ("443/tcp", "https    nginx 1.25.4"), ("3306/tcp", "mysql    MariaDB 10.11"),
+                                                ("5432/tcp", "postgres PostgreSQL 16.2"), ("8080/tcp", "http-alt Jetty 11")], 3):
+                    yield ([("%-9s" % port, 0), ("open  ", GREEN), (svc, 0)], 0.2, False)
+            yield ([("Nmap done: 16 IP addresses (3 hosts up) scanned in %.2f seconds" % random.uniform(3, 20), 0)], 0.5, False)
+
+    def p_python(s):
+        yield from s.typed(s.P(), "python3")
+        yield ([("Python 3.12.3 (main) [GCC 13.2.0] on linux", 0)], 0.1, False)
+        env = {"math": math, "cmath": cmath, "random": random}
+        for expr in random.sample(MATH, 5):
+            yield from s.typed([(">>> ", YELLOW)], expr)
+            try:
+                res = repr(eval(expr, env))
+            except Exception as e:
+                res = "Error: %s" % e
+            yield ([(res, 0)], 0.5, False)
+
+    def p_git(s):
+        yield from s.typed(s.P("~/dev/project"), "git log --oneline --graph -n 14")
+        for i in range(14):
+            seg = [("* ", RED), ("%07x" % random.getrandbits(28), YELLOW)]
+            if i == 0:
+                seg.append((" (HEAD -> main, origin/main)", CYAN))
+            seg.append((" " + random.choice(COMMITS), 0))
+            yield (seg, random.choice([0.04, 0.08, 0.15]), False)
+
+    def p_sysinfo(s):
+        u = os.uname()
+        yield from s.typed(s.P(), "uname -a")
+        yield ([("%s %s %s %s %s GNU/Linux" % (u.sysname, u.nodename, u.release, u.version, u.machine), 0)], 0.3, False)
+        yield from s.typed(s.P(), "grep -m1 'model name' /proc/cpuinfo")
+        model = next((l for l in rd("/proc/cpuinfo").splitlines() if l.startswith("model name")),
+                     "model name\t: Generic CPU @ 3.00GHz")
+        yield ([(model, 0)], 0.3, False)
+        yield from s.typed(s.P(), "free -h")
+        m = read_mem()
+
+        def gi(k):
+            return "%.1fGi" % (m.get(k, 0) / 1048576)
+        yield ([("%-6s%12s%12s%12s%12s%12s%12s" % ("", "total", "used", "free", "shared", "buff/cache", "available"), WHITE)], 0.1, False)
+        yield ([("%-6s%12s%12s%12s%12s%12s%12s" % ("Mem:", gi("MemTotal"), "%.1fGi" % ((m.get("MemTotal", 0) - m.get("MemAvailable", 0)) / 1048576),
+                                                    gi("MemFree"), gi("Shmem"), gi("Cached"), gi("MemAvailable")), 0)], 0.1, False)
+        yield from s.typed(s.P(), "df -h /")
+        try:
+            du = shutil.disk_usage("/")
+            yield ([("Filesystem      Size  Used Avail Use% Mounted on", WHITE)], 0.1, False)
+            yield ([("/dev/root     %5.0fG %4.0fG %4.0fG %3d%% /" % (du.total / 2 ** 30, du.used / 2 ** 30, du.free / 2 ** 30,
+                                                                     du.used * 100 // du.total), 0)], 0.3, False)
+        except OSError:
+            pass
+        yield from s.typed(s.P(), "uptime")
+        up = float(rd("/proc/uptime").split()[0]) if rd("/proc/uptime") else 0.0
+        ld = os.getloadavg() if hasattr(os, "getloadavg") else (0, 0, 0)
+        yield ([(" %s up %d days, %02d:%02d,  1 user,  load average: %.2f, %.2f, %.2f" %
+                 (time.strftime("%H:%M:%S"), up // 86400, up % 86400 // 3600, up % 3600 // 60, ld[0], ld[1], ld[2]), 0)], 0.4, False)
+
+    def p_hexdump(s):
+        yield from s.typed(s.P(), "xxd -l 192 /bin/sh")
+        try:
+            with open(os.path.realpath("/bin/sh"), "rb") as f:
+                data = f.read(192)
+        except OSError:
+            data = b""
+        if len(data) < 192:
+            data = os.urandom(192)
+        for off in range(0, 192, 16):
+            chunk = data[off:off + 16]
+            hexs = " ".join("%02x%02x" % (chunk[i], chunk[i + 1]) for i in range(0, 16, 2))
+            asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+            yield ([("%08x: " % off, CYAN), (hexs + "  ", 0), (asc, GREEN)], 0.06, False)
+
+    def p_strace(s):
+        yield from s.typed(s.P(), "strace -f ./hello")
+        pid = random.randint(2000, 30000)
+        yield ([("execve(\"./hello\", [\"./hello\"], 0x7ffd3c1a2b58 /* 41 vars */) = 0", 0)], 0.2, False)
+        for text, ret in SYSCALLS:
+            name, _, rest = text.partition("(")
+            bad = ret.startswith("-1")
+            yield ([("[pid %d] " % pid, MAGENTA), (name, YELLOW), ("(" + rest, 0), (" = " + ret, RED if bad else GREEN)],
+                   random.choice([0.03, 0.06, 0.12]), False)
+        yield ([("+++ exited with 0 +++", CYAN)], 0.4, False)
+
+    def draw(s):
+        scr = s.scr
+        scr.erase()
+        now = time.monotonic()
+        for y, segs in enumerate(s.lines):
+            x = 0
+            for text, c in segs:
+                put(scr, y, x, text, col(c) | (BOLD if c else 0))
+                x += len(text)
+            if y == len(s.lines) - 1 and int(now * 2) % 2 == 0:
+                put(scr, y, x, "█", c256(46, GREEN))
+
+    def step(s):
+        now = time.monotonic()
+        changed = False
+        while now >= s.next_t:
+            try:
+                segs, delay, rep = next(s.gen)
+            except StopIteration:
+                s.gen = s.next_phase()
+                continue
+            if rep and s.lines:
+                s.lines[-1] = segs
+            else:
+                s.lines.append(segs)
+            s.next_t = max(s.next_t, now - 0.2) + delay
+            changed = True
+            if delay > 0.01:
+                break
+        blink = int(now * 2) % 2
+        if changed or blink != s.blink:
+            s.blink = blink
+            s.draw()
+        return max(0.01, min(s.next_t - now, 0.5 - (now % 0.5)) + 0.005)
+
+
+def f_lorenz(p):
+    x, y, z = p
+    return (10 * (y - x), x * (28 - z) - y, x * y - 8 * z / 3)
+
+
+def f_rossler(p):
+    x, y, z = p
+    return (-y - z, x + 0.2 * y, 0.2 + z * (x - 5.7))
+
+
+def f_thomas(p):
+    x, y, z = p
+    b = 0.208186
+    return (math.sin(y) - b * x, math.sin(z) - b * y, math.sin(x) - b * z)
+
+
+def f_aizawa(p):
+    x, y, z = p
+    return ((z - 0.7) * x - 3.5 * y, 3.5 * x + (z - 0.7) * y,
+            0.6 + 0.95 * z - z ** 3 / 3 - (x * x + y * y) * (1 + 0.25 * z) + 0.1 * z * x ** 3)
+
+
+def f_halvorsen(p):
+    x, y, z = p
+    return (-1.89 * x - 4 * y - 4 * z - y * y, -1.89 * y - 4 * z - 4 * x - z * z, -1.89 * z - 4 * x - 4 * y - x * x)
+
+
+ATTRACTORS = [
+    ("LORENZ", ("dx/dt = 10 (y - x)", "dy/dt = x (28 - z) - y", "dz/dt = x y - 8z/3"), f_lorenz, 0.008, 6, (1.0, 1.0, 20.0)),
+    ("ROSSLER", ("dx/dt = -y - z", "dy/dt = x + 0.2 y", "dz/dt = 0.2 + z (x - 5.7)"), f_rossler, 0.03, 3, (1.0, 1.0, 0.0)),
+    ("THOMAS", ("dx/dt = sin y - b x", "dy/dt = sin z - b y", "dz/dt = sin x - b z   (b=0.208)"), f_thomas, 0.05, 3, (0.1, 0.0, 0.0)),
+    ("AIZAWA", ("dx/dt = (z - b) x - d y", "dy/dt = d x + (z - b) y", "dz/dt = c + a z - z^3/3 - ..."), f_aizawa, 0.01, 6, (0.1, 0.0, 0.0)),
+    ("HALVORSEN", ("dx/dt = -a x - 4y - 4z - y^2", "dy/dt = -a y - 4z - 4x - z^2", "dz/dt = -a z - 4x - 4y - x^2"), f_halvorsen, 0.005, 10, (-1.48, -1.51, 2.04)),
+]
+
+
+def rk4(f, p, dt):
+    k1 = f(p)
+    k2 = f([p[0] + dt / 2 * k1[0], p[1] + dt / 2 * k1[1], p[2] + dt / 2 * k1[2]])
+    k3 = f([p[0] + dt / 2 * k2[0], p[1] + dt / 2 * k2[1], p[2] + dt / 2 * k2[2]])
+    k4 = f([p[0] + dt * k3[0], p[1] + dt * k3[1], p[2] + dt * k3[2]])
+    return [p[i] + dt / 6 * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]) for i in range(3)]
+
+
+class Attractors:
+    fps = 16
+    STAY = 32.0
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pa = mkpal(COOL, CYAN)
+        s.pb = mkpal(WARM, RED)
+        s.idx = random.randrange(len(ATTRACTORS))
+        s.load()
+
+    def load(s):
+        name, eq, f, dt, spf, init = ATTRACTORS[s.idx]
+        s.name, s.eq, s.f, s.dt, s.spf = name, eq, f, dt, spf
+        p = list(init)
+        pts = []
+        for i in range(6000):
+            p = rk4(f, p, dt)
+            if i > 800:
+                pts.append(p)
+        s.c = [(min(q[k] for q in pts) + max(q[k] for q in pts)) / 2 for k in range(3)]
+        s.R = max(math.dist(q, s.c) for q in pts)
+        s.a = list(pts[-1])
+        s.b = [s.a[0] + 1e-3, s.a[1], s.a[2]]
+        s.ta, s.tb = deque(maxlen=1800), deque(maxlen=1800)
+        s.t = 0.0
+        s.ang = random.uniform(0, 6.28)
+        s.born = time.monotonic()
+
+    def plot(s, cells, trail, pal, w, h, sc, ca, sa):
+        pts = list(trail)[::3]
+        n = len(pts)
+        if not n:
+            return
+        k = len(pal)
+        c0, c1, c2 = s.c
+        W2, H2 = w * 2 / 2.0 * 1.0, h * 4 / 2.0
+        for i, (x, y, z) in enumerate(pts):
+            u, v, q = x - c0, y - c1, z - c2
+            yr = u * sa + v * ca
+            px = int(W2 + (u * ca - v * sa) * sc)
+            py = int(H2 - (q * 0.94 - yr * 0.34) * sc)
+            cx, cy = px >> 1, py >> 2
+            if px < 0 or py < 0 or cx >= w or cy >= h:
+                continue
+            a = pal[i * k // n] | (BOLD if yr * 0.94 + q * 0.34 > 0 else 0)
+            m = BR[(px & 1, py & 3)]
+            old = cells.get((cx, cy))
+            cells[(cx, cy)] = ((old[0] | m) if old else m, a)
+
+    def step(s):
+        if time.monotonic() - s.born > s.STAY:
+            s.idx = (s.idx + 1) % len(ATTRACTORS)
+            s.load()
+        for _ in range(s.spf):
+            s.a = rk4(s.f, s.a, s.dt)
+            s.b = rk4(s.f, s.b, s.dt)
+            s.t += s.dt
+            s.ta.append(tuple(s.a))
+            s.tb.append(tuple(s.b))
+        s.ang += 0.012
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        sc = 0.47 * min(w * 2, h * 4) / s.R
+        ca, sa = math.cos(s.ang), math.sin(s.ang)
+        cells = {}
+        s.plot(cells, s.ta, s.pa, w, h, sc, ca, sa)
+        s.plot(cells, s.tb, s.pb, w, h, sc, ca, sa)
+        scr.erase()
+        for (cx, cy), (m, a) in cells.items():
+            put(scr, cy, cx, chr(0x2800 + m), a)
+        #put(scr, 1, 2, s.name, c256(46, GREEN) | BOLD)
+        #for i, line in enumerate(s.eq):
+            #put(scr, 2 + i, 2, line, c256(41, GREEN))
+        #put(scr, 6, 2, "x=%+7.3f y=%+7.3f z=%+7.3f" % tuple(s.a), c256(51, CYAN))
+        d = math.dist(s.a, s.b)
+        # put(scr, h - 2, 2, "t = %7.2f   |delta| = %.5f   (start offset 1e-3)" % (s.t, d), c256(226, YELLOW) | BOLD)
+        # put(scr, h - 1, 2, "blue: x0    red: x0 + 0.001    deterministic chaos", col(WHITE) | DIM)
+
+
+def ulam_positions(N):
+    x = y = 0
+    pos = [(0, 0)]
+    dx, dy, seg = 1, 0, 1
+    while len(pos) < N:
+        for _ in range(2):
+            for _ in range(seg):
+                if len(pos) >= N:
+                    break
+                x += dx
+                y += dy
+                pos.append((x, y))
+            dx, dy = dy, -dx
+        seg += 1
+    return pos
+
+
+def simple_sieve(N):
+    s = bytearray([1]) * (N + 1)
+    s[0:2] = b"\x00\x00"
+    for i in range(2, int(N ** 0.5) + 1):
+        if s[i]:
+            s[i * i::i] = bytearray(len(s[i * i::i]))
+    return s
+
+
+class Primes:
+    fps = 20
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.a_prime = c256(46, GREEN) | BOLD
+        s.a_cur = c256(226, YELLOW) | BOLD | REV
+        s.a_hl = c256(196, RED) | BOLD | REV
+        s.a_comp = [c256(n, CYAN) | DIM for n in FACTOR]
+        s.a_unit = col(WHITE) | DIM
+        s.a_head = c256(46, GREEN) | BOLD
+        s.a_sub = c256(51, CYAN)
+        s.a_stat = c256(226, YELLOW) | BOLD
+        s.pal = mkpal(RAIN, GREEN)
+        s.start_sieve()
+
+    def header(s, a, b):
+        put(s.scr, 0, 1, a, s.a_head)
+        put(s.scr, 1, 1, b, s.a_sub)
+
+    def status(s, text):
+        h, w = s.scr.getmaxyx()
+        put(s.scr, h - 1, 1, text.ljust(w - 2), s.a_stat)
+
+    def start_sieve(s):
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        s.cols = max(1, (w - 2) // 5)
+        s.rows = max(2, h - 4)
+        if s.cols * s.rows > 2400:
+            s.rows = max(2, 2400 // s.cols)
+        s.N = s.cols * s.rows
+        s.mark = [0] * (s.N + 1)
+        s.mark[1] = 3
+        s.fac = [0] * (s.N + 1)
+        s.cur = s.hl = 0
+        s.found = 0
+        s.spf = max(1, s.N // 120)
+        s.gen = s.sieve()
+        s.phase = "sieve"
+        s.header("SIEVE OF ERATOSTHENES   N = %d" % s.N, "for p in 2..sqrt(N): if p is prime, strike out p^2, p^2+p, p^2+2p, ...")
+        for n in range(1, s.N + 1):
+            s.paint(n)
+
+    def paint(s, n):
+        r, c = divmod(n - 1, s.cols)
+        m = s.mark[n]
+        if n == s.hl:
+            a = s.a_hl
+        elif n == s.cur:
+            a = s.a_cur
+        elif m == 1:
+            a = s.a_prime
+        elif m == 2:
+            a = s.a_comp[s.fac[n] % len(s.a_comp)]
+        elif m == 3:
+            a = s.a_unit
+        else:
+            a = col(WHITE)
+        put(s.scr, 2 + r, 1 + c * 5, "%4d" % n, a)
+
+    def sieve(s):
+        N = s.N
+        p = 2
+        while p * p <= N:
+            if s.mark[p] == 0:
+                old = s.cur
+                s.mark[p] = 1
+                s.cur = p
+                s.found += 1
+                s.paint(p)
+                if old:
+                    s.paint(old)
+                s.status("p = %d    primes so far: %d" % (p, s.found))
+                for _ in range(3):
+                    yield 0
+                for m in range(p * p, N + 1, p):
+                    if s.mark[m] == 0:
+                        prev = s.hl
+                        s.mark[m] = 2
+                        s.fac[m] = p
+                        s.hl = m
+                        s.paint(m)
+                        if prev:
+                            s.paint(prev)
+                        yield 1
+                if s.hl:
+                    last, s.hl = s.hl, 0
+                    s.paint(last)
+            p += 1
+
+    def start_ulam(s):
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        size = min(h - 3, (w - 2) // 2)
+        if size % 2 == 0:
+            size -= 1
+        size = max(5, size)
+        s.UN = size * size
+        s.pos = ulam_positions(s.UN)
+        s.isp = simple_sieve(s.UN)
+        s.rev = s.cnt = 0
+        s.cx0, s.cy0 = w // 2, 2 + (h - 3) // 2
+        s.phase = "ulam"
+        s.header("ULAM SPIRAL   (1963, Stanislaw Ulam, bored in a lecture)",
+                 "integers on a square spiral; primes line up on diagonals: 4n^2 + bn + c")
+
+    def start_sacks(s):
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        s.SN = 6000
+        s.isp = simple_sieve(s.SN)
+        s.rev = s.cnt = 0
+        s.cells = {}
+        s.W, s.H = w * 2, h * 4
+        s.k = (min(s.W, s.H - 8) / 2 - 2) / math.sqrt(s.SN)
+        s.phase = "sacks"
+        s.header("SACKS SPIRAL   (1994)", "r = sqrt(n), theta = 2 pi sqrt(n): perfect squares sit on one ray, primes curve into arms")
+
+    def step(s):
+        now = time.monotonic()
+        ph = s.phase
+        if ph == "sieve":
+            for _ in range(s.spf):
+                try:
+                    v = next(s.gen)
+                except StopIteration:
+                    for i in range(2, s.N + 1):
+                        if s.mark[i] == 0:
+                            s.mark[i] = 1
+                            s.paint(i)
+                    old, s.cur = s.cur, 0
+                    if old:
+                        s.paint(old)
+                    primes = sum(1 for i in range(2, s.N + 1) if s.mark[i] == 1)
+                    twins = sum(1 for i in range(2, s.N - 1) if s.mark[i] == 1 and s.mark[i + 2] == 1)
+                    s.status("pi(%d) = %d    N/ln N = %.1f    twin primes: %d" % (s.N, primes, s.N / math.log(s.N), twins))
+                    s.phase, s.until = "hold", now + 5
+                    s.after = s.start_ulam
+                    break
+                if v == 0:
+                    break
+        elif ph == "ulam":
+            new = min(s.UN, s.rev + max(1, s.UN // 200))
+            for n in range(s.rev + 1, new + 1):
+                if s.isp[n]:
+                    s.cnt += 1
+                    x, y = s.pos[n - 1]
+                    put(s.scr, s.cy0 + y, s.cx0 + 2 * x, "●", s.a_prime if n % 4 == 1 else c256(51, CYAN) | BOLD)
+            s.rev = new
+            s.status("n <= %d    primes: %d    density %.3f    1/ln n = %.3f" %
+                     (s.rev, s.cnt, s.cnt / max(1, s.rev), 1 / math.log(max(3, s.rev))))
+            if s.rev >= s.UN:
+                s.phase, s.until = "hold", now + 6
+                s.after = s.start_sacks
+        elif ph == "sacks":
+            new = min(s.SN, s.rev + 40)
+            h, w = s.scr.getmaxyx()
+            for n in range(s.rev + 1, new + 1):
+                if s.isp[n]:
+                    s.cnt += 1
+                    r = s.k * math.sqrt(n)
+                    th = 2 * math.pi * math.sqrt(n)
+                    px, py = int(s.W / 2 + r * math.cos(th)), int(s.H / 2 + 2 + r * math.sin(th))
+                    cx, cy = px >> 1, py >> 2
+                    if 0 <= px < s.W and 2 <= cy < h - 1:
+                        old = s.cells.get((cx, cy), (0, 0))
+                        m = old[0] | BR[(px & 1, py & 3)]
+                        a = pick(s.pal, n / s.SN) | BOLD
+                        s.cells[(cx, cy)] = (m, a)
+                        put(s.scr, cy, cx, chr(0x2800 + m), a)
+            s.rev = new
+            s.status("n <= %d    primes: %d" % (s.rev, s.cnt))
+            if s.rev >= s.SN:
+                s.phase, s.until = "hold", now + 7
+                s.after = s.start_sieve
+        else:
+            if now > s.until:
+                s.after()
+            return 0.25
+
+
+class Sorter:
+    fps = 24
+
+    def __init__(s, scr):
+        s.scr = scr
+        h, w = scr.getmaxyx()
+        s.n = max(8, min(96, w // 2))
+        s.bw = max(1, w // s.n)
+        s.heat = mkpal(HEAT, GREEN)
+        s.rain = mkpal(RAIN, GREEN)
+        s.a_hi = c256(231, WHITE) | BOLD
+        s.a_done = c256(46, GREEN) | BOLD
+        s.algos = [("Bubble Sort", "O(n^2)", s.bubble, 12), ("Insertion Sort", "O(n^2)", s.insertion, 6),
+                   ("Selection Sort", "O(n^2)", s.selection, 12), ("Cocktail Shaker Sort", "O(n^2)", s.cocktail, 10),
+                   ("Comb Sort", "O(n^2 / n log n)", s.comb, 3), ("Shell Sort", "O(n^1.3)", s.shell, 2),
+                   ("Quick Sort (Lomuto)", "O(n log n)", s.quick, 2), ("Heap Sort", "O(n log n)", s.heap, 2),
+                   ("Merge Sort (bottom-up)", "O(n log n)", s.merge, 2), ("Radix Sort (LSD, base 4)", "O(d n)", s.radix, 2)]
+        s.i = -1
+        s.next_algo()
+
+    def next_algo(s):
+        s.i = (s.i + 1) % len(s.algos)
+        if s.i == 0:
+            random.shuffle(s.algos)
+        s.name, s.cx, fn, s.spf = s.algos[s.i]
+        n = s.n
+        a = list(range(1, n + 1))
+        mode = random.choice(["shuffled", "shuffled", "reversed", "few unique", "nearly sorted"])
+        if mode == "reversed":
+            a.reverse()
+        elif mode == "few unique":
+            a = [random.randint(1, 6) * max(1, n // 6) for _ in range(n)]
+        elif mode == "nearly sorted":
+            for _ in range(n // 8):
+                i, j = random.randrange(n), random.randrange(n)
+                a[i], a[j] = a[j], a[i]
+        else:
+            random.shuffle(a)
+        s.mode = mode
+        s.view = random.choice(["bars", "bars", "dots"])
+        s.a, s.cmp, s.wr, s.hl = a, 0, 0, ()
+        s.gen = fn()
+        s.phase, s.pt = "sort", 0
+
+    def bubble(s):
+        a = s.a
+        n = len(a)
+        for i in range(n):
+            sw = False
+            for j in range(n - 1 - i):
+                s.cmp += 1
+                s.hl = (j, j + 1)
+                if a[j] > a[j + 1]:
+                    a[j], a[j + 1] = a[j + 1], a[j]
+                    s.wr += 1
+                    sw = True
+                yield
+            if not sw:
+                return
+
+    def cocktail(s):
+        a = s.a
+        lo, hi = 0, len(a) - 1
+        sw = True
+        while sw and lo < hi:
+            sw = False
+            for i in range(lo, hi):
+                s.cmp += 1
+                s.hl = (i, i + 1)
+                if a[i] > a[i + 1]:
+                    a[i], a[i + 1] = a[i + 1], a[i]
+                    s.wr += 1
+                    sw = True
+                yield
+            hi -= 1
+            for i in range(hi, lo, -1):
+                s.cmp += 1
+                s.hl = (i - 1, i)
+                if a[i - 1] > a[i]:
+                    a[i - 1], a[i] = a[i], a[i - 1]
+                    s.wr += 1
+                    sw = True
+                yield
+            lo += 1
+
+    def comb(s):
+        a = s.a
+        n = len(a)
+        gap, done = n, False
+        while not done:
+            gap = max(1, int(gap / 1.3))
+            done = gap == 1
+            for i in range(n - gap):
+                s.cmp += 1
+                s.hl = (i, i + gap)
+                if a[i] > a[i + gap]:
+                    a[i], a[i + gap] = a[i + gap], a[i]
+                    s.wr += 1
+                    done = False
+                yield
+
+    def insertion(s):
+        a = s.a
+        for i in range(1, len(a)):
+            j = i
+            while j > 0:
+                s.cmp += 1
+                s.hl = (j - 1, j)
+                yield
+                if a[j - 1] > a[j]:
+                    a[j - 1], a[j] = a[j], a[j - 1]
+                    s.wr += 1
+                    j -= 1
+                else:
+                    break
+
+    def selection(s):
+        a = s.a
+        n = len(a)
+        for i in range(n - 1):
+            m = i
+            for j in range(i + 1, n):
+                s.cmp += 1
+                s.hl = (m, j, i)
+                if a[j] < a[m]:
+                    m = j
+                yield
+            a[i], a[m] = a[m], a[i]
+            s.wr += 1
+            yield
+
+    def shell(s):
+        a = s.a
+        n = len(a)
+        gap = n // 2
+        while gap > 0:
+            for i in range(gap, n):
+                j = i
+                while j >= gap:
+                    s.cmp += 1
+                    s.hl = (j - gap, j)
+                    yield
+                    if a[j - gap] > a[j]:
+                        a[j - gap], a[j] = a[j], a[j - gap]
+                        s.wr += 1
+                        j -= gap
+                    else:
+                        break
+            gap //= 2
+
+    def quick(s, lo=0, hi=None):
+        a = s.a
+        if hi is None:
+            hi = len(a) - 1
+        if lo >= hi:
+            return
+        p, i = a[hi], lo
+        for j in range(lo, hi):
+            s.cmp += 1
+            s.hl = (j, hi, i)
+            yield
+            if a[j] < p:
+                a[i], a[j] = a[j], a[i]
+                s.wr += 1
+                i += 1
+        a[i], a[hi] = a[hi], a[i]
+        s.wr += 1
+        yield
+        yield from s.quick(lo, i - 1)
+        yield from s.quick(i + 1, hi)
+
+    def heap(s):
+        a = s.a
+        n = len(a)
+
+        def sift(root, end):
+            while True:
+                child = 2 * root + 1
+                if child >= end:
+                    return
+                if child + 1 < end:
+                    s.cmp += 1
+                    s.hl = (child, child + 1)
+                    yield
+                    if a[child] < a[child + 1]:
+                        child += 1
+                s.cmp += 1
+                s.hl = (root, child)
+                yield
+                if a[root] < a[child]:
+                    a[root], a[child] = a[child], a[root]
+                    s.wr += 1
+                    root = child
+                else:
+                    return
+
+        for st in range(n // 2 - 1, -1, -1):
+            yield from sift(st, n)
+        for end in range(n - 1, 0, -1):
+            a[0], a[end] = a[end], a[0]
+            s.wr += 1
+            yield
+            yield from sift(0, end)
+
+    def merge(s):
+        a = s.a
+        n = len(a)
+        w = 1
+        while w < n:
+            for lo in range(0, n, 2 * w):
+                mid, hi = min(lo + w, n), min(lo + 2 * w, n)
+                L, R = a[lo:mid], a[mid:hi]
+                i = j = 0
+                k = lo
+                while i < len(L) or j < len(R):
+                    if j >= len(R) or (i < len(L) and L[i] <= R[j]):
+                        a[k] = L[i]
+                        i += 1
+                    else:
+                        a[k] = R[j]
+                        j += 1
+                    s.cmp += 1
+                    s.wr += 1
+                    s.hl = (k,)
+                    k += 1
+                    yield
+            w *= 2
+
+    def radix(s):
+        a = s.a
+        exp = 1
+        mx = max(a)
+        while mx // exp > 0:
+            buckets = [[] for _ in range(4)]
+            for v in a:
+                buckets[(v // exp) % 4].append(v)
+                s.cmp += 1
+            k = 0
+            for b in buckets:
+                for v in b:
+                    a[k] = v
+                    s.wr += 1
+                    s.hl = (k,)
+                    k += 1
+                    yield
+            exp *= 4
+
+    def step(s):
+        if s.phase == "sort":
+            for _ in range(s.spf):
+                try:
+                    next(s.gen)
+                except StopIteration:
+                    s.phase, s.pt, s.hl = "sweep", 0, ()
+                    break
+        elif s.phase == "sweep":
+            s.pt += max(1, s.n // 25)
+            if s.pt >= s.n + 8:
+                s.phase, s.until = "pause", time.monotonic() + 1.6
+        else:
+            if time.monotonic() > s.until:
+                s.next_algo()
+            else:
+                return 0.3
+        s.draw()
+
+    def draw(s):
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        n, bw = s.n, s.bw
+        put(scr, 0, 1, "%s   %s   n=%d  (%s)" % (s.name, s.cx, n, s.mode), c256(46, GREEN) | BOLD)
+        put(scr, 1, 1, "comparisons: %-8d writes/swaps: %-8d" % (s.cmp, s.wr), c256(51, CYAN))
+        rows = max(2, h)
+        off = max(0, (w - n * bw) // 2)
+        width = max(1, bw - 1) if bw > 1 else 1
+        if s.view == "bars":
+            gap = " " * (bw - width)
+            us = [int(v / n * rows * 8) for v in s.a]
+            for r in range(rows):
+                line = "".join(((("█" if u >= (r + 1) * 8 else SPARK[u - r * 8 - 1] if u > r * 8 else " ") * width) + gap)
+                               for u in us)
+                y = 2 + rows - 1 - r
+                c = pick(s.heat, r / rows)
+                if s.phase == "sweep":
+                    k = min(s.pt, n) * bw
+                    put(scr, y, off, line[:k], s.a_done)
+                    put(scr, y, off + k, line[k:], c)
+                else:
+                    put(scr, y, off, line, c)
+            for i in s.hl:
+                if 0 <= i < n:
+                    full = us[i] // 8 + (1 if us[i] % 8 else 0)
+                    for r in range(min(full, rows)):
+                        put(scr, 2 + rows - 1 - r, off + i * bw, "█" * width, s.a_hi)
+        else:
+            for i, v in enumerate(s.a):
+                y = 2 + rows - 1 - int((v - 1) / max(1, n - 1) * (rows - 1))
+                if s.phase == "sweep" and i < s.pt:
+                    a = s.a_done
+                elif i in s.hl:
+                    a = s.a_hi
+                else:
+                    a = pick(s.rain, v / (n + 1)) | BOLD
+                put(scr, y, off + i * bw, "●" * width, a)
+        #put(scr, h - 1, 1, "white = being compared / moved    green = sorted", col(WHITE) | DIM)
+
+class Dice:
+    fps = 30
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.t = 0.0
+        s.dice = [
+            (0.0, 0.0, 0.0, 2, 1),
+        ]
+        s.chars = " .:-=+*#%@"
+
+    def project(s, p, w, h, scale, angles):
+        x, y, z = p
+        ax, ay, az = angles
+        x, y = x * math.cos(az) - y * math.sin(az), x * math.sin(az) + y * math.cos(az)
+        y, z = y * math.cos(ax) - z * math.sin(ax), y * math.sin(ax) + z * math.cos(ax)
+        x, z = x * math.cos(ay) + z * math.sin(ay), -x * math.sin(ay) + z * math.cos(ay)
+        d = 5.5
+        f = d / max(0.5, d + z / 5)
+        return int(w / 2 + x * scale * f * 2), int(h / 2 + y * scale * f)
+
+    def step(s):
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        scr.erase()
+        s.t += 0.045
+
+        size = max(1.0, min(h / 15, w / 36))
+        vertices = [
+            (-1, -1, -1), (-1, -1, 1),
+            (-1, 1, -1), (-1, 1, 1),
+            (1, -1, -1), (1, -1, 1),
+            (1, 1, -1), (1, 1, 1),
+        ]
+        edges = [
+            (0, 1), (0, 2), (0, 4), (1, 3),
+            (1, 5), (2, 3), (2, 6), (3, 7),
+            (4, 5), (4, 6), (5, 7), (6, 7),
+        ]
+
+        zbuf = {}
+        for idx, (ox, oy, oz, scale, color) in enumerate(s.dice):
+            ax = s.t * (0.7 + idx * 0.13) + idx
+            ay = s.t * (0.9 + idx * 0.17) + idx * 2
+            az = s.t * 0.4 + idx
+            angles = (ax, ay, az)
+            bob = math.sin(s.t * 1.7 + idx * 2) * 1.5
+            size2 = size * scale
+
+            pts = []
+            for vx, vy, vz in vertices:
+                pts.append(s.project(
+                    (vx * size2 * 2.0 + ox,
+                     vy * size2 + oy + bob,
+                     vz * size2 + oz),
+                    w, h, 1.0, angles
+                ))
+
+            for a, b in edges:
+                x1, y1 = pts[a]
+                x2, y2 = pts[b]
+                steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+                for j in range(steps + 1):
+                    f = j / steps
+                    x = round(x1 + (x2 - x1) * f)
+                    y = round(y1 + (y2 - y1) * f)
+                    if 0 <= x < w and 0 <= y < h:
+                        depth = (a + b) / 14
+                        zbuf[(x, y)] = (".:-=+*#@"[min(7, int(depth * 8))], color)
+
+            cx = sum(p[0] for p in pts) // len(pts)
+            cy = sum(p[1] for p in pts) // len(pts)
+            face = 1 + int((math.sin(ax) + math.cos(ay)) * 2) % 6
+            if 0 <= cx < w and 0 <= cy < h:
+                zbuf[(cx, cy)] = (str(face), color)
+
+        for (x, y), (ch, color) in zbuf.items():
+            try:
+                scr.addstr(y, x, ch, curses.color_pair(color) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+
+SAVERS = {
+    "matrix": (Matrix, "matrix rain, falling upwards"),
+    "sysmon": (SysMon, "live system monitor: cpu, ram, battery, thermal, net, disk, processes"),
+    "fractal": (Fractal, "julia morphing, mandelbrot zoom, burning ship zoom"),
+    "bootlog": (BootLog, "fake terminal: dmesg, runit, make, xbps, ping, python, git, strace, hexdump"),
+    "attractors": (Attractors, "chaotic attractors in braille with butterfly effect"),
+    "primes": (Primes, "sieve of Eratosthenes, Ulam spiral, Sacks spiral"),
+    "sorter": (Sorter, "sorting algorithm visualizer"),
+    "dice": (Dice, "rotating ascii cube"),
+}
+
+def run(scr, names, cycle):
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+
+    init_colors()
+    scr.nodelay(True)
+    scr.keypad(True)
+
+    try:
+        curses.mousemask(
+            curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION
+        )
+    except curses.error:
+        pass
+
+    # Ersten Saver zufällig wählen.
+    name = random.choice(names)
+
+    # Alle anderen Saver zufällig mischen.
+    remaining = [n for n in names if n != name]
+    random.shuffle(remaining)
+
+    saver = SAVERS[name][0](scr)
+    tsw = time.time()
+    t0 = tsw
+
+    while True:
+        t = time.time()
+        ch = scr.getch()
+
+        if ch == curses.KEY_RESIZE:
+            saver = SAVERS[name][0](scr)
+            continue
+
+        if ch != -1:
+            if ch == curses.KEY_MOUSE:
+                try:
+                    curses.getmouse()
+                except curses.error:
+                    pass
+                if t - t0 > 1.0:
+                    return
+            else:
+                return
+
+        if cycle and t - tsw > cycle and len(names) > 1:
+            if not remaining:
+                # Alle Saver des bisherigen Zyklus wurden gezeigt.
+                # Neuer Zyklus mit zufälligem Start.
+                name = random.choice(names)
+                remaining = [n for n in names if n != name]
+                random.shuffle(remaining)
+            else:
+                name = remaining.pop()
+
+            saver = SAVERS[name][0](scr)
+            tsw = t
+
+        saver.step()
+        scr.refresh()
+        time.sleep(max(
+            0.0,
+            1.0 / saver.fps - (time.time() - t)
+        ))
+
+def main(argv):
+    args = argv[1:]
+    if args and args[0] in ("-h", "--help", "list"):
+        if args[0] != "list":
+            print(USAGE + "\n")
+        for k, (_, d) in SAVERS.items():
+            print("  %-11s %s" % (k, d))
+        return 0
+    cycle = 0
+    if args and args[0] == "cycle":
+        cycle = float(args[1]) if len(args) > 1 else 60.0
+        names = list(SAVERS)
+    elif not args or args[0] == "random":
+        names = list(SAVERS)
+    else:
+        names = args
+        for n in names:
+            if n not in SAVERS:
+                print("unknown screensaver: %s (try: nerdsaver list)" % n, file=sys.stderr)
+                return 2
+    setup_locale()
+    os.environ.setdefault("ESCDELAY", "25")
+    try:
+        curses.wrapper(run, names, cycle)
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

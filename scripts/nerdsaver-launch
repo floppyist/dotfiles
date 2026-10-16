@@ -1,0 +1,32 @@
+#!/bin/sh
+# nerdsaver-launch [SAVER|random|cycle [sek]]
+# Startet nerdsaver vollbild in einem eigenen Terminalfenster (WM_CLASS "nerdsaver").
+# i3 braucht dafür:   for_window [class="nerdsaver"] fullscreen enable
+#
+# Umgebungsvariablen:
+#   NERDSAVER_TERM=xterm|alacritty|kitty|st   Terminal erzwingen
+#   NERDSAVER_LOCK=1                           nach dem Beenden i3lock starten
+
+# nur eine Instanz gleichzeitig
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/nerdsaver.lock"
+flock -n 9 || exit 0
+
+DIR="$(dirname "$(readlink -f "$0")")"
+if [ -x "$DIR/nerdsaver" ]; then SAVER="$DIR/nerdsaver"; else SAVER="$DIR/nerdsaver.py"; fi
+[ $# -eq 0 ] && set -- random
+
+TERMS="${NERDSAVER_TERM:-alacritty kitty xterm st}"
+for t in $TERMS; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    case "$t" in
+        alacritty) alacritty --class nerdsaver,nerdsaver -e "$SAVER" "$@" ;;
+        kitty)     kitty --class nerdsaver "$SAVER" "$@" ;;
+        st)        st -c nerdsaver -e "$SAVER" "$@" ;;
+        xterm)     xterm -class nerdsaver -name nerdsaver -bg black -fg green \
+                         -fa Monospace -fs 11 +sb -e "$SAVER" "$@" ;;
+    esac
+    break
+done
+
+[ -n "$NERDSAVER_LOCK" ] && command -v i3lock >/dev/null 2>&1 && i3lock -n -c 000000
+exit 0

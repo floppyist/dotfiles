@@ -29,6 +29,7 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
   - `WiFi` Switch / Scan  
   - `Display` Switch
   - `Screenshot`
+  - `Screensaver`
 
 ## Installation
 
@@ -39,7 +40,7 @@ sudo xbps-install -S \
 i3-gaps polybar rofi dunst picom alacritty \
 pipewire wireplumber libspa-bluetooth \
 bluez rfkill NetworkManager nm-applet mpv mpv-mpris \
-feh
+feh ncurses
 ```
 
 ### 2. Clone the repository
@@ -71,6 +72,8 @@ chmod +x ~/.local/bin/display-select.sh
 chmod +x ~/.local/bin/polybar-bluetooth.sh
 chmod +x ~/.local/bin/polybar-wlan.sh
 chmod +x ~/.local/bin/screenshot.sh
+chmod +x ~/.local/bin/nerdsaver
+chmod +x ~/.local/bin/nerdsaver-launch
 ```
 
 > **Note:** Ensure `~/.local/bin` is added to your `$PATH`.

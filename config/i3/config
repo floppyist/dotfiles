@@ -27,6 +27,10 @@ exec_always --no-startup-id feh --bg-fill ~/images/wallpaper
 exec_always --no-startup-id ~/.config/polybar/launch.sh
 exec_always --no-startup-id xsetroot -cursor_name left_ptr
 
+# Screensaver
+for_window [class="nerdsaver"] fullscreen enable
+exec --no-startup-id xautolock -time 10 -detectsleep -locker "nerdsaver-launch cycle 60"
+
 # i3-gaps
 #gaps inner 5
 #gaps outer 0
