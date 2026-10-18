@@ -28,5 +28,5 @@ for t in $TERMS; do
     break
 done
 
-[ -n "$NERDSAVER_LOCK" ] && command -v i3lock >/dev/null 2>&1 && i3lock -n -c 000000
+[ -n "$NERDSAVER_LOCK" ] && command -v ~/.local/bin/lock.sh >/dev/null 2>&1 && ~/.local/bin/lock.sh -n -c 000000
 exit 0

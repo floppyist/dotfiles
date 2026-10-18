@@ -84,7 +84,7 @@ bindsym $mod+Shift+4 move container to workspace number 4
 bindsym $mod+Shift+5 move container to workspace number 5
 
 # Lock
-bindsym Mod4+l exec --no-startup-id i3lock
+bindsym Mod4+l exec --no-startup-id ~/.local/bin/lock.sh
 
 # Resize
 bindsym $mod+r mode "resize"
