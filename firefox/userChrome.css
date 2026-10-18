@@ -14,9 +14,9 @@
 #tabbrowser-tabs,
 .tabbrowser-tab {
     --tab-min-width: 0px !important;
-    --tab-max-width: none !important;
+    --tab-max-width: 100vw !important;
     --tab-min-inline-size: 0px !important;
-    --tab-max-inline-size: none !important;
+    --tab-max-inline-size: 100vw !important;
 }
 
 #TabsToolbar,
@@ -49,14 +49,9 @@
 }
 
 #tabbrowser-arrowscrollbox-periphery,
-#tabbrowser-arrowscrollbox-perma-box {
-    display: none !important;
-}
-
+#tabbrowser-arrowscrollbox-perma-box,
 .closing-tabs-spacer {
     display: none !important;
-    width: 0 !important;
-    flex: 0 0 0 !important;
 }
 
 .titlebar-spacer,
@@ -69,6 +64,10 @@
 spacer,
 toolbarbutton,
 .urlbar-searchmode-switcher,
+#urlbar-searchmode-switcher,
+#searchmode-switcher-chicklet,
+#searchmode-switcher-icon,
+#searchmode-switcher-dropmarker,
 .tab-close-button,
 .tab-icon-image,
 .tab-icon-stack,
@@ -85,25 +84,26 @@ toolbarbutton,
     display: none !important;
 }
 
-.tabbrowser-tab[closing],
-.tabbrowser-tab[animating] {
-    display: none !important;
-    flex: 0 0 0px !important;
-    width: 0 !important;
-    max-width: 0 !important;
-}
-
 .tabbrowser-tab:not([pinned]) {
     flex: 1 1 0px !important;
-    min-width: 0 !important;
-    max-width: none !important;
     width: 0px !important;
+    min-width: 0px !important;
+    max-width: 100vw !important;
     min-inline-size: 0px !important;
-    max-inline-size: none !important;
-    transition: none !important;
+    max-inline-size: 100vw !important;
+    overflow: hidden !important;
+    transition: max-width 1ms linear, min-width 1ms linear !important;
     background-color: transparent !important;
 }
 
+.tabbrowser-tab:not([pinned]):not([fadein]),
+.tabbrowser-tab[closing] {
+    flex: 0 0 0.1px !important;
+    min-width: 0.1px !important;
+    max-width: 0.1px !important;
+    min-inline-size: 0.1px !important;
+    max-inline-size: 0.1px !important;
+}
 
 .tab-background,
 .tab-line {
@@ -146,7 +146,6 @@ toolbarbutton,
     border-bottom: 3px solid #cc241d !important;
     background-color: #32302f !important;
 }
-
 
 .urlbar-container {
     height: 15px !important;
@@ -215,6 +214,13 @@ menuitem {
     color: #ebdbb2 !important;
 }
 
+menuitem *,
+menu > :not(menupopup),
+menu > :not(menupopup) * {
+    background-color: transparent !important;
+    color: inherit !important;
+}
+
 menu:hover,
 menuitem:hover,
 menu[_moz-menuactive="true"],
@@ -233,7 +239,6 @@ menuseparator {
     border-top: 1px solid #2b2b2b !important;
 }
 
-
 #urlbar-view {
     background-color: #191c1c !important;
     border: 1px solid #2b2b2b !important;
@@ -246,13 +251,13 @@ menuseparator {
     color: inherit !important;
 }
 
-.urlbarView-row {
+#urlbar-view .urlbarView-row {
     padding: 6px 10px !important;
     border-bottom: 1px solid #2b2b2b !important;
 }
 
-.urlbarView-row-inner,
-.urlbarView-no-wrap {
+#urlbar-view .urlbarView-row-inner,
+#urlbar-view .urlbarView-no-wrap {
     display: flex !important;
     flex-direction: row !important;
     align-items: center !important;
@@ -261,20 +266,17 @@ menuseparator {
     overflow: hidden !important;
 }
 
-.urlbarView-favicon,
-.urlbarView-type-icon,
-.urlbarView-icon {
+#urlbar-view .urlbarView-favicon,
+#urlbar-view .urlbarView-type-icon,
+#urlbar-view .urlbarView-icon,
+#urlbar-view .urlbarView-button,
+#urlbar-view .urlbarView-button-menu,
+#urlbar-view .urlbarView-button-result-menu {
     display: none !important;
 }
 
-.urlbarView-button,
-.urlbarView-button-menu,
-.urlbarView-button-result-menu {
-    display: none !important;
-}
-
-.urlbarView-row[selected],
-.urlbarView-row:hover {
+#urlbar-view .urlbarView-row[selected],
+#urlbar-view .urlbarView-row:hover {
     background-color: #32302f !important;
     color: #cc241d !important;
 }
