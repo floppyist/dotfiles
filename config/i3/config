@@ -28,13 +28,12 @@ exec_always --no-startup-id ~/.config/polybar/launch.sh
 exec_always --no-startup-id xsetroot -cursor_name left_ptr
 
 # Screensaver
-for_window [class="nerdsaver"] fullscreen enable
-exec --no-startup-id xautolock -time 1 -detectsleep -locker "nerdsaver-launch cycle 60"
+exec --no-startup-id caffeine-ng
+exec --no-startup-id xset s 60
+exec --no-startup-id xset dpms 0 0 300
 
-# i3-gaps
-#gaps inner 5
-#gaps outer 0
-#gaps top 10
+for_window [class="nerdsaver"] fullscreen enable
+exec --no-startup-id xss-lock -- ~/.local/bin/nerdsaver-launch cycle 60
 
 default_border pixel 0
 default_floating_border pixel 0

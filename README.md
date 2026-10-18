@@ -37,10 +37,10 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 
 ```bash
 sudo xbps-install -S \
-i3-gaps polybar rofi dunst picom alacritty \
+i3-gaps i3lock-color polybar rofi dunst picom alacritty \
 pipewire wireplumber libspa-bluetooth \
 bluez rfkill NetworkManager nm-applet mpv mpv-mpris \
-feh ncurses
+feh ncurses caffeine-ng
 ```
 
 ### 2. Clone the repository
