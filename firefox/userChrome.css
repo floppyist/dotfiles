@@ -17,6 +17,17 @@
     --tab-max-width: 100vw !important;
     --tab-min-inline-size: 0px !important;
     --tab-max-inline-size: 100vw !important;
+    --tab-min-height: 32px !important;
+}
+
+:root,
+#nav-bar,
+#urlbar-container,
+#urlbar,
+.urlbar-container {
+    --urlbar-height: 28px !important;
+    --urlbar-container-height: 28px !important;
+    --urlbar-toolbar-height: 28px !important;
 }
 
 #TabsToolbar,
@@ -32,6 +43,8 @@
 
 #TabsToolbar {
     width: 100vw !important;
+    position: relative !important;
+    z-index: 1000 !important;
 }
 
 #tabbrowser-tabs {
@@ -76,11 +89,17 @@ toolbarbutton,
 #forward-button,
 #home-button,
 #tracking-protection-icon-container,
+#tracking-protection-icon-box,
+#tracking-protection-icon,
 #identity-box,
+#identity-icon-box,
 #translations-button,
 #star-button,
 #star-button-box,
-#reader-mode-button-icon {
+#reader-mode-button-icon,
+#urlbar-go-button,
+.urlbar-go-button,
+.urlbar-input-container > :has(~ .urlbar-input-box) {
     display: none !important;
 }
 
@@ -124,7 +143,6 @@ toolbarbutton,
     height: 100% !important;
     padding: 0 5px !important;
     background-color: #2b2b2b !important;
-    border-bottom: 3px solid #ebdbb2 !important;
     box-sizing: border-box !important;
 }
 
@@ -142,13 +160,16 @@ toolbarbutton,
     font-weight: bold !important;
 }
 
+.tab-label-container {
+    height: 100% !important;
+}
+
 .tabbrowser-tab[selected] .tab-content {
-    border-bottom: 3px solid #cc241d !important;
     background-color: #32302f !important;
 }
 
 .urlbar-container {
-    height: 15px !important;
+    height: 28px !important;
     text-align: center !important;
 }
 
@@ -160,6 +181,16 @@ toolbarbutton,
     top: 0 !important;
     left: 0 !important;
     width: 100% !important;
+    margin: 0 !important;
+}
+
+#urlbar[breakout-extend] > #urlbar-background {
+    top: 0 !important;
+    margin: 0 !important;
+}
+
+#urlbar[breakout-extend] > .urlbar-input-container {
+    height: 28px !important;
 }
 
 panel,
@@ -239,55 +270,79 @@ menuseparator {
     border-top: 1px solid #2b2b2b !important;
 }
 
-#urlbar-view {
+.urlbarView {
     background-color: #191c1c !important;
-    border: 1px solid #2b2b2b !important;
+    border: none !important;
     color: #ebdbb2 !important;
-    padding: 4px !important;
+    padding: 0 0 4px 0 !important;
+    margin: -3px 0 0 0 !important;
 }
 
-#urlbar-view * {
+.urlbarView * {
     background-color: transparent !important;
+    background-image: none !important;
+    list-style-image: none !important;
     color: inherit !important;
 }
 
-#urlbar-view .urlbarView-row {
-    padding: 6px 10px !important;
-    border-bottom: 1px solid #2b2b2b !important;
+.urlbarView *::before,
+.urlbarView *::after {
+    content: none !important;
+    display: none !important;
 }
 
-#urlbar-view .urlbarView-row-inner,
-#urlbar-view .urlbarView-no-wrap {
+.urlbarView .urlbarView-row {
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+}
+
+.urlbarView .urlbarView-row-inner {
+    padding: 5px 12px !important;
+    margin: 0 !important;
+}
+
+.urlbarView .urlbarView-row-inner,
+.urlbarView .urlbarView-no-wrap {
     display: flex !important;
     flex-direction: row !important;
     align-items: center !important;
     gap: 10px !important;
     min-width: 0 !important;
     overflow: hidden !important;
+    position: static !important;
+    text-indent: 0 !important;
 }
 
-#urlbar-view .urlbarView-favicon,
-#urlbar-view .urlbarView-type-icon,
-#urlbar-view .urlbarView-icon,
-#urlbar-view .urlbarView-button,
-#urlbar-view .urlbarView-button-menu,
-#urlbar-view .urlbarView-button-result-menu {
+.urlbarView img,
+.urlbarView [class*="icon" i],
+.urlbarView [class*="favicon" i],
+.urlbarView [class*="label" i],
+.urlbarView [class*="badge" i],
+.urlbarView .urlbarView-button,
+.urlbarView .urlbarView-button-menu,
+.urlbarView .urlbarView-button-result-menu {
     display: none !important;
 }
 
-#urlbar-view .urlbarView-row[selected],
-#urlbar-view .urlbarView-row:hover {
-    background-color: #32302f !important;
+.urlbarView .urlbarView-row[selected],
+.urlbarView .urlbarView-row:hover {
+    background-color: #2b2b2b !important;
     color: #cc241d !important;
 }
 
-#urlbar-view .urlbarView-url {
+.urlbarView .urlbarView-url,
+.urlbarView .urlbarView-action {
+    margin-inline-start: 14px !important;
+}
+
+.urlbarView .urlbarView-url {
     color: #d79921 !important;
     white-space: nowrap !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
 }
 
-#urlbar-view .urlbarView-title {
+.urlbarView .urlbarView-title {
     white-space: nowrap !important;
 }
