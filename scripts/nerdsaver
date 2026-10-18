@@ -9,6 +9,7 @@ import os
 import random
 import re
 import shutil
+import signal
 import sys
 import time
 import uuid
@@ -24,9 +25,12 @@ USAGE = """usage: nerdsaver [list | random | cycle [seconds] | NAME ...]
   list         show all screensavers
   random       pick one at random (default)
   cycle [sec]  rotate through all of them (default 60 s)
-  NAME ...     run one, or pick randomly from the given names
+  NAME ...     run one, or rotate through the given names
 
-Any key ends the screensaver. Mouse movement does too, after a 1 s grace period."""
+Any key ends the screensaver.
+Environment: NERDSAVER_ECO=1 halves the frame rate (battery mode)."""
+
+ECO = os.environ.get("NERDSAVER_ECO") == "1"
 
 GREEN, CYAN, YELLOW, RED, MAGENTA, BLUE, WHITE = 1, 2, 3, 4, 5, 6, 7
 BOLD, DIM, REV = curses.A_BOLD, curses.A_DIM, curses.A_REVERSE
@@ -42,6 +46,10 @@ FRAC = (17, 19, 21, 27, 33, 39, 45, 51, 87, 123, 159, 231, 229, 227, 226, 220, 2
 COOL = (17, 18, 19, 20, 21, 27, 33, 39, 45, 51, 87, 123, 159, 231)
 WARM = (52, 88, 124, 160, 196, 202, 208, 214, 220, 226, 227, 229, 231)
 FACTOR = (33, 39, 45, 141, 177, 213)
+GRAYS = (236, 240, 244, 248, 252, 255)
+ICE = (17, 18, 24, 31, 38, 45, 51, 159)
+GOLD = (52, 94, 136, 178, 220, 226, 229)
+PIPEC = (196, 208, 226, 46, 51, 39, 201, 129)
 
 
 def setup_locale():
@@ -134,25 +142,50 @@ def box(scr, y, x, h, w, title="", attr=None):
 BR = {(0, 0): 0x01, (0, 1): 0x02, (0, 2): 0x04, (1, 0): 0x08, (1, 1): 0x10, (1, 2): 0x20, (0, 3): 0x40, (1, 3): 0x80}
 
 
+def popcount(x):
+    return x.bit_count() if hasattr(x, "bit_count") else bin(x).count("1")
+
+
+class Canvas:
+    def __init__(s, w, h):
+        s.w, s.h = w, h
+        s.W, s.H = w * 2, h * 4
+        s.cells = {}
+
+    def dot(s, x, y, a):
+        if 0 <= x < s.W and 0 <= y < s.H:
+            k = (x >> 1, y >> 2)
+            m = BR[(x & 1, y & 3)]
+            o = s.cells.get(k)
+            s.cells[k] = ((o[0] | m) if o else m, a)
+
+    def line(s, x0, y0, x1, y1, a):
+        n = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
+        dx, dy = (x1 - x0) / n, (y1 - y0) / n
+        for i in range(n + 1):
+            s.dot(int(round(x0 + dx * i)), int(round(y0 + dy * i)), a)
+
+    def flush(s, scr):
+        addstr = scr.addstr
+        for (cx, cy), (m, a) in s.cells.items():
+            try:
+                addstr(cy, cx, chr(0x2800 + m), a)
+            except curses.error:
+                pass
+
+
 KATA = [chr(c) for c in range(0xFF66, 0xFF9E)]
 GLYPHS = KATA * 3 + list("0123456789:=*+-<>|")
-LETTERS = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#@%&")
-MESSAGES = ("WAKE UP, USER", "VOID LINUX", "THERE IS NO CLOUD", "KEEP IT SIMPLE", "RUNIT STAGE 2",
-            "FOLLOW THE WHITE RABBIT", "SUDO MAKE ME A SANDWICH", "NO SYSTEMD WAS HARMED", "RTFM")
 
 
 class Matrix:
-    fps = 18
+    fps = 15
 
     def __init__(s, scr):
         s.scr = scr
         s.h, s.w = scr.getmaxyx()
         s.pal = mkpal(MAT, GREEN)
         s.cols = [s.spawn(True) for _ in range(s.w)]
-        s.msg = None
-        s.next_msg = time.monotonic() + random.uniform(6, 12)
-        s.hi = c256(231, WHITE) | BOLD
-        s.lo = c256(46, GREEN) | BOLD
 
     def spawn(s, first=False):
         h, pal = s.h, s.pal
@@ -160,14 +193,14 @@ class Matrix:
         y = random.uniform(-h, 2 * h) if first else h + random.uniform(0, 1.5 * h)
         a = [pal[min(len(pal) - 1, int(i / n * len(pal)))] for i in range(n)]
         a[0] |= BOLD
-        return [y, random.uniform(0.25, 1.0), n, [random.choice(GLYPHS) for _ in range(h + 1)], a]
+        return [y, random.uniform(4.0, 15.0), n, [random.choice(GLYPHS) for _ in range(h + 1)], a]
 
-    def step(s):
+    def step(s, dt):
         scr, h, cols = s.scr, s.h, s.cols
         scr.erase()
         addstr = scr.addstr
         for x, c in enumerate(cols):
-            c[0] -= c[1]
+            c[0] -= c[1] * dt
             head, n = int(c[0]), c[2]
             if head + n < 0:
                 cols[x] = s.spawn()
@@ -183,25 +216,6 @@ class Matrix:
                     addstr(head + i, x, g[head + i], a[i])
                 except curses.error:
                     pass
-        now = time.monotonic()
-        if s.msg is None and now > s.next_msg and s.w >= 26:
-            s.msg = (now, random.choice(MESSAGES))
-        if s.msg:
-            t0, text = s.msg
-            k = int((now - t0) * 14)
-            if k > len(text) + 40:
-                s.msg = None
-                s.next_msg = now + random.uniform(10, 20)
-            else:
-                k = min(k, len(text))
-                tail = "".join(random.choice(LETTERS) if ch != " " else ch for ch in text[k:])
-                x0 = (s.w - len(text)) // 2
-                put(scr, h // 2 - 1, x0 - 2, " " * (len(text) + 4), 0)
-                put(scr, h // 2, x0 - 2, "  ", 0)
-                put(scr, h // 2, x0, text[:k], s.hi)
-                put(scr, h // 2, x0 + k, tail, s.lo)
-                put(scr, h // 2, x0 + len(text), "  ", 0)
-                put(scr, h // 2 + 1, x0 - 2, " " * (len(text) + 4), 0)
 
 
 DISK_RE = re.compile(r"^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$")
@@ -344,7 +358,7 @@ def hms(hours):
 
 
 class SysMon:
-    fps = 10
+    fps = 8
 
     def __init__(s, scr):
         s.scr = scr
@@ -357,6 +371,7 @@ class SysMon:
         s.cpu = [0.0] * (s.nc + 1)
         s.hist = deque(maxlen=400)
         s.disp = {}
+        s.alpha = 0.3
         s.mem = s.swap = s.disk = 0.0
         s.memtxt = s.swaptxt = s.disktxt = ""
         bats = sorted(glob.glob("/sys/class/power_supply/BAT*"))
@@ -365,6 +380,7 @@ class SysMon:
         s.freqf = [("/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq" % i) for i in range(s.nc)]
         s.freq = []
         s.bat, s.temp = None, None
+        s.up = 0.0
         s.load = (0.0, 0.0, 0.0)
         s.rx = s.tx = s.dr = s.dw = 0.0
         s.hist_n = {k: deque(maxlen=300) for k in ("rx", "tx", "dr", "dw")}
@@ -401,7 +417,8 @@ class SysMon:
             pass
         try:
             s.load = os.getloadavg()
-        except OSError:
+            s.up = float(rd("/proc/uptime").split()[0])
+        except (OSError, ValueError, IndexError):
             pass
         rx, tx = read_net()
         dr, dw = read_disk()
@@ -425,7 +442,7 @@ class SysMon:
 
     def sm(s, key, target):
         v = s.disp.get(key, 0.0)
-        v += (target - v) * 0.3
+        v += (target - v) * s.alpha
         s.disp[key] = v
         return v
 
@@ -463,15 +480,16 @@ class SysMon:
         if sw > 3:
             put(s.scr, y, x + 16, spark(s.hist_n[key], sw), attr)
 
-    def step(s):
+    def step(s, dt):
         now = time.monotonic()
+        s.alpha = 1 - math.exp(-dt * 7)
         if now - s.last >= 1.0:
             s.sample(now)
         scr = s.scr
         scr.erase()
         h, w = scr.getmaxyx()
-        up = float(rd("/proc/uptime").split()[0]) if rd("/proc/uptime") else 0.0
-        put(scr, 0, 0, " ▓▒░ %s ░▒▓  VOID LINUX  kernel %s " % (s.host, s.kernel), c256(46, GREEN) | BOLD)
+        up = s.up
+        put(scr, 0, 0, " ▓▒░ %s ░▒▓  kernel %s " % (s.host, s.kernel), c256(46, GREEN) | BOLD)
         clock = time.strftime(" %a %Y-%m-%d %H:%M:%S ")
         put(scr, 0, max(0, w - len(clock)), clock, c256(51, CYAN) | BOLD)
         p = abs(((now * 28) % (2 * w)) - w)
@@ -591,7 +609,7 @@ class Fractal:
 
     def __init__(s, scr):
         s.scr = scr
-        s.fps = 9 if np is not None else 4
+        s.fps = 8 if np is not None else 3
         s.pal = mkpal(FRAC, CYAN)
         s.t = random.uniform(0, 6)
         s.mode = random.randrange(3)
@@ -601,7 +619,7 @@ class Fractal:
         s.mt = time.monotonic()
         s.scale = 3.0 if s.mode != 2 else 2.4
 
-    def step(s):
+    def step(s, dt):
         scr = s.scr
         h, w = scr.getmaxyx()
         hh = max(2, h)
@@ -611,38 +629,31 @@ class Fractal:
             s.mode = (s.mode + 1) % 3
             s.start()
             mode = s.MODES[s.mode]
-        s.t += 0.05
+        s.t += 0.45 * dt
         off = s.t * 4
         n = len(s.pal)
         if mode == "julia":
             a = s.t * 0.3
             c = 0.7885 * complex(math.cos(a), math.sin(a))
-            maxit = 56
-            colors, chars, stride = escape_grid(w, hh, 0.0, 0.0, 2.8 / hh, c, maxit, off, n, False)
-            # head = "JULIA SET   z -> z^2 + c   c = %+.4f %+.4fi" % (c.real, c.imag)
+            colors, chars, stride = escape_grid(w, hh, 0.0, 0.0, 2.8 / hh, c, 56, off, n, False)
         elif mode == "mandelbrot":
-            s.scale = max(s.scale * 0.978, 4e-5)
+            s.scale = max(s.scale * math.exp(-0.2 * dt), 4e-5)
             maxit = min(240, int(50 + 45 * math.log10(3.0 / s.scale)))
             colors, chars, stride = escape_grid(w, hh, -0.743643887037151, 0.131825904205330, s.scale / hh,
                                                 None, maxit, off, n, False)
-            # head = "MANDELBROT   z -> z^2 + c   zoom x%.1e   iterations %d" % (3.0 / s.scale, maxit)
         else:
-            s.scale = max(s.scale * 0.982, 2.5e-3)
+            s.scale = max(s.scale * math.exp(-0.165 * dt), 2.5e-3)
             maxit = min(200, int(50 + 40 * math.log10(2.4 / s.scale)))
             colors, chars, stride = escape_grid(w, hh, -1.7443359375, -0.017451171875, s.scale / hh,
                                                 None, maxit, off, n, True)
-            # head = "BURNING SHIP   z -> (|Re z| + i|Im z|)^2 + c   zoom x%.1e" % (2.4 / s.scale)
         scr.erase()
         ramp = s.RAMP
         for y in range(hh):
             rc, rh = colors[y], chars[y]
-            x = 0
             for key, grp in itertools.groupby(range(len(rc)), key=rc.__getitem__):
-                idxs = list(grp)
                 if key >= 0:
-                    text = "".join(ramp[rh[i]] * stride for i in idxs)
-                    put(scr, y, idxs[0] * stride, text, s.pal[key] | BOLD)
-        # put(scr, h - 1, 0, " " + head + " ", col(WHITE) | BOLD | REV)
+                    idxs = list(grp)
+                    put(scr, y, idxs[0] * stride, "".join(ramp[rh[i]] * stride for i in idxs), s.pal[key] | BOLD)
 
 
 DMESG = [
@@ -923,7 +934,7 @@ class BootLog:
             if y == len(s.lines) - 1 and int(now * 2) % 2 == 0:
                 put(scr, y, x, "█", c256(46, GREEN))
 
-    def step(s):
+    def step(s, dt):
         now = time.monotonic()
         changed = False
         while now >= s.next_t:
@@ -975,11 +986,11 @@ def f_halvorsen(p):
 
 
 ATTRACTORS = [
-    ("LORENZ", ("dx/dt = 10 (y - x)", "dy/dt = x (28 - z) - y", "dz/dt = x y - 8z/3"), f_lorenz, 0.008, 6, (1.0, 1.0, 20.0)),
-    ("ROSSLER", ("dx/dt = -y - z", "dy/dt = x + 0.2 y", "dz/dt = 0.2 + z (x - 5.7)"), f_rossler, 0.03, 3, (1.0, 1.0, 0.0)),
-    ("THOMAS", ("dx/dt = sin y - b x", "dy/dt = sin z - b y", "dz/dt = sin x - b z   (b=0.208)"), f_thomas, 0.05, 3, (0.1, 0.0, 0.0)),
-    ("AIZAWA", ("dx/dt = (z - b) x - d y", "dy/dt = d x + (z - b) y", "dz/dt = c + a z - z^3/3 - ..."), f_aizawa, 0.01, 6, (0.1, 0.0, 0.0)),
-    ("HALVORSEN", ("dx/dt = -a x - 4y - 4z - y^2", "dy/dt = -a y - 4z - 4x - z^2", "dz/dt = -a z - 4x - 4y - x^2"), f_halvorsen, 0.005, 10, (-1.48, -1.51, 2.04)),
+    (f_lorenz, 0.008, 96, (1.0, 1.0, 20.0)),
+    (f_rossler, 0.03, 48, (1.0, 1.0, 0.0)),
+    (f_thomas, 0.05, 48, (0.1, 0.0, 0.0)),
+    (f_aizawa, 0.01, 96, (0.1, 0.0, 0.0)),
+    (f_halvorsen, 0.005, 160, (-1.48, -1.51, 2.04)),
 ]
 
 
@@ -992,7 +1003,7 @@ def rk4(f, p, dt):
 
 
 class Attractors:
-    fps = 16
+    fps = 12
     STAY = 32.0
 
     def __init__(s, scr):
@@ -1003,8 +1014,8 @@ class Attractors:
         s.load()
 
     def load(s):
-        name, eq, f, dt, spf, init = ATTRACTORS[s.idx]
-        s.name, s.eq, s.f, s.dt, s.spf = name, eq, f, dt, spf
+        f, dt, sps, init = ATTRACTORS[s.idx]
+        s.f, s.dt, s.sps = f, dt, sps
         p = list(init)
         pts = []
         for i in range(6000):
@@ -1016,59 +1027,46 @@ class Attractors:
         s.a = list(pts[-1])
         s.b = [s.a[0] + 1e-3, s.a[1], s.a[2]]
         s.ta, s.tb = deque(maxlen=1800), deque(maxlen=1800)
-        s.t = 0.0
+        s.acc = 0.0
         s.ang = random.uniform(0, 6.28)
         s.born = time.monotonic()
 
-    def plot(s, cells, trail, pal, w, h, sc, ca, sa):
+    def plot(s, cv, trail, pal, sc, ca, sa):
         pts = list(trail)[::3]
         n = len(pts)
         if not n:
             return
         k = len(pal)
         c0, c1, c2 = s.c
-        W2, H2 = w * 2 / 2.0 * 1.0, h * 4 / 2.0
+        W2, H2 = cv.W / 2.0, cv.H / 2.0
         for i, (x, y, z) in enumerate(pts):
             u, v, q = x - c0, y - c1, z - c2
             yr = u * sa + v * ca
-            px = int(W2 + (u * ca - v * sa) * sc)
-            py = int(H2 - (q * 0.94 - yr * 0.34) * sc)
-            cx, cy = px >> 1, py >> 2
-            if px < 0 or py < 0 or cx >= w or cy >= h:
-                continue
             a = pal[i * k // n] | (BOLD if yr * 0.94 + q * 0.34 > 0 else 0)
-            m = BR[(px & 1, py & 3)]
-            old = cells.get((cx, cy))
-            cells[(cx, cy)] = ((old[0] | m) if old else m, a)
+            cv.dot(int(W2 + (u * ca - v * sa) * sc), int(H2 - (q * 0.94 - yr * 0.34) * sc), a)
 
-    def step(s):
+    def step(s, dt):
         if time.monotonic() - s.born > s.STAY:
             s.idx = (s.idx + 1) % len(ATTRACTORS)
             s.load()
-        for _ in range(s.spf):
+        s.acc = min(s.acc + dt * s.sps, s.sps * 0.5)
+        n = int(s.acc)
+        s.acc -= n
+        for _ in range(n):
             s.a = rk4(s.f, s.a, s.dt)
             s.b = rk4(s.f, s.b, s.dt)
-            s.t += s.dt
             s.ta.append(tuple(s.a))
             s.tb.append(tuple(s.b))
-        s.ang += 0.012
+        s.ang += 0.19 * dt
         scr = s.scr
         h, w = scr.getmaxyx()
-        sc = 0.47 * min(w * 2, h * 4) / s.R
+        cv = Canvas(w, h)
+        sc = 0.47 * min(cv.W, cv.H) / s.R
         ca, sa = math.cos(s.ang), math.sin(s.ang)
-        cells = {}
-        s.plot(cells, s.ta, s.pa, w, h, sc, ca, sa)
-        s.plot(cells, s.tb, s.pb, w, h, sc, ca, sa)
+        s.plot(cv, s.ta, s.pa, sc, ca, sa)
+        s.plot(cv, s.tb, s.pb, sc, ca, sa)
         scr.erase()
-        for (cx, cy), (m, a) in cells.items():
-            put(scr, cy, cx, chr(0x2800 + m), a)
-        #put(scr, 1, 2, s.name, c256(46, GREEN) | BOLD)
-        #for i, line in enumerate(s.eq):
-            #put(scr, 2 + i, 2, line, c256(41, GREEN))
-        #put(scr, 6, 2, "x=%+7.3f y=%+7.3f z=%+7.3f" % tuple(s.a), c256(51, CYAN))
-        d = math.dist(s.a, s.b)
-        # put(scr, h - 2, 2, "t = %7.2f   |delta| = %.5f   (start offset 1e-3)" % (s.t, d), c256(226, YELLOW) | BOLD)
-        # put(scr, h - 1, 2, "blue: x0    red: x0 + 0.001    deterministic chaos", col(WHITE) | DIM)
+        cv.flush(scr)
 
 
 def ulam_positions(N):
@@ -1098,7 +1096,7 @@ def simple_sieve(N):
 
 
 class Primes:
-    fps = 20
+    fps = 15
 
     def __init__(s, scr):
         s.scr = scr
@@ -1107,38 +1105,29 @@ class Primes:
         s.a_hl = c256(196, RED) | BOLD | REV
         s.a_comp = [c256(n, CYAN) | DIM for n in FACTOR]
         s.a_unit = col(WHITE) | DIM
-        s.a_head = c256(46, GREEN) | BOLD
-        s.a_sub = c256(51, CYAN)
-        s.a_stat = c256(226, YELLOW) | BOLD
+        s.a_cyan = c256(51, CYAN) | BOLD
         s.pal = mkpal(RAIN, GREEN)
         s.start_sieve()
-
-    def header(s, a, b):
-        put(s.scr, 0, 1, a, s.a_head)
-        put(s.scr, 1, 1, b, s.a_sub)
-
-    def status(s, text):
-        h, w = s.scr.getmaxyx()
-        put(s.scr, h - 1, 1, text.ljust(w - 2), s.a_stat)
 
     def start_sieve(s):
         scr = s.scr
         scr.erase()
         h, w = scr.getmaxyx()
         s.cols = max(1, (w - 2) // 5)
-        s.rows = max(2, h - 4)
+        s.rows = max(2, h - 2)
         if s.cols * s.rows > 2400:
             s.rows = max(2, 2400 // s.cols)
         s.N = s.cols * s.rows
+        s.oy = max(0, (h - s.rows) // 2)
+        s.ox = max(0, (w - s.cols * 5) // 2)
         s.mark = [0] * (s.N + 1)
         s.mark[1] = 3
         s.fac = [0] * (s.N + 1)
         s.cur = s.hl = 0
-        s.found = 0
-        s.spf = max(1, s.N // 120)
+        s.sps = max(40, s.N // 120 * 15)
+        s.acc = 0.0
         s.gen = s.sieve()
         s.phase = "sieve"
-        s.header("SIEVE OF ERATOSTHENES   N = %d" % s.N, "for p in 2..sqrt(N): if p is prime, strike out p^2, p^2+p, p^2+2p, ...")
         for n in range(1, s.N + 1):
             s.paint(n)
 
@@ -1157,7 +1146,7 @@ class Primes:
             a = s.a_unit
         else:
             a = col(WHITE)
-        put(s.scr, 2 + r, 1 + c * 5, "%4d" % n, a)
+        put(s.scr, s.oy + r, s.ox + c * 5, "%4d" % n, a)
 
     def sieve(s):
         N = s.N
@@ -1167,13 +1156,11 @@ class Primes:
                 old = s.cur
                 s.mark[p] = 1
                 s.cur = p
-                s.found += 1
                 s.paint(p)
                 if old:
                     s.paint(old)
-                s.status("p = %d    primes so far: %d" % (p, s.found))
                 for _ in range(3):
-                    yield 0
+                    yield 6
                 for m in range(p * p, N + 1, p):
                     if s.mark[m] == 0:
                         prev = s.hl
@@ -1193,18 +1180,16 @@ class Primes:
         scr = s.scr
         scr.erase()
         h, w = scr.getmaxyx()
-        size = min(h - 3, (w - 2) // 2)
+        size = min(h, (w - 2) // 2)
         if size % 2 == 0:
             size -= 1
         size = max(5, size)
         s.UN = size * size
         s.pos = ulam_positions(s.UN)
         s.isp = simple_sieve(s.UN)
-        s.rev = s.cnt = 0
-        s.cx0, s.cy0 = w // 2, 2 + (h - 3) // 2
+        s.rev = 0
+        s.cx0, s.cy0 = w // 2, h // 2
         s.phase = "ulam"
-        s.header("ULAM SPIRAL   (1963, Stanislaw Ulam, bored in a lecture)",
-                 "integers on a square spiral; primes line up on diagonals: 4n^2 + bn + c")
 
     def start_sacks(s):
         scr = s.scr
@@ -1212,20 +1197,20 @@ class Primes:
         h, w = scr.getmaxyx()
         s.SN = 6000
         s.isp = simple_sieve(s.SN)
-        s.rev = s.cnt = 0
+        s.rev = 0
         s.cells = {}
         s.W, s.H = w * 2, h * 4
-        s.k = (min(s.W, s.H - 8) / 2 - 2) / math.sqrt(s.SN)
+        s.k = (min(s.W, s.H) / 2 - 2) / math.sqrt(s.SN)
         s.phase = "sacks"
-        s.header("SACKS SPIRAL   (1994)", "r = sqrt(n), theta = 2 pi sqrt(n): perfect squares sit on one ray, primes curve into arms")
 
-    def step(s):
+    def step(s, dt):
         now = time.monotonic()
         ph = s.phase
         if ph == "sieve":
-            for _ in range(s.spf):
+            s.acc = min(s.acc + dt * s.sps, s.sps * 0.4)
+            while s.acc > 0:
                 try:
-                    v = next(s.gen)
+                    c = next(s.gen)
                 except StopIteration:
                     for i in range(2, s.N + 1):
                         if s.mark[i] == 0:
@@ -1234,45 +1219,36 @@ class Primes:
                     old, s.cur = s.cur, 0
                     if old:
                         s.paint(old)
-                    primes = sum(1 for i in range(2, s.N + 1) if s.mark[i] == 1)
-                    twins = sum(1 for i in range(2, s.N - 1) if s.mark[i] == 1 and s.mark[i + 2] == 1)
-                    s.status("pi(%d) = %d    N/ln N = %.1f    twin primes: %d" % (s.N, primes, s.N / math.log(s.N), twins))
                     s.phase, s.until = "hold", now + 5
                     s.after = s.start_ulam
                     break
-                if v == 0:
-                    break
+                s.acc -= c
         elif ph == "ulam":
-            new = min(s.UN, s.rev + max(1, s.UN // 200))
+            new = min(s.UN, s.rev + max(1, int(s.UN * dt / 8)))
             for n in range(s.rev + 1, new + 1):
                 if s.isp[n]:
-                    s.cnt += 1
                     x, y = s.pos[n - 1]
-                    put(s.scr, s.cy0 + y, s.cx0 + 2 * x, "●", s.a_prime if n % 4 == 1 else c256(51, CYAN) | BOLD)
+                    put(s.scr, s.cy0 + y, s.cx0 + 2 * x, "●", s.a_prime if n % 4 == 1 else s.a_cyan)
             s.rev = new
-            s.status("n <= %d    primes: %d    density %.3f    1/ln n = %.3f" %
-                     (s.rev, s.cnt, s.cnt / max(1, s.rev), 1 / math.log(max(3, s.rev))))
             if s.rev >= s.UN:
                 s.phase, s.until = "hold", now + 6
                 s.after = s.start_sacks
         elif ph == "sacks":
-            new = min(s.SN, s.rev + 40)
+            new = min(s.SN, s.rev + max(1, int(s.SN * dt / 10)))
             h, w = s.scr.getmaxyx()
             for n in range(s.rev + 1, new + 1):
                 if s.isp[n]:
-                    s.cnt += 1
                     r = s.k * math.sqrt(n)
                     th = 2 * math.pi * math.sqrt(n)
-                    px, py = int(s.W / 2 + r * math.cos(th)), int(s.H / 2 + 2 + r * math.sin(th))
+                    px, py = int(s.W / 2 + r * math.cos(th)), int(s.H / 2 + r * math.sin(th))
                     cx, cy = px >> 1, py >> 2
-                    if 0 <= px < s.W and 2 <= cy < h - 1:
+                    if 0 <= px < s.W and 0 <= cy < h:
                         old = s.cells.get((cx, cy), (0, 0))
                         m = old[0] | BR[(px & 1, py & 3)]
                         a = pick(s.pal, n / s.SN) | BOLD
                         s.cells[(cx, cy)] = (m, a)
                         put(s.scr, cy, cx, chr(0x2800 + m), a)
             s.rev = new
-            s.status("n <= %d    primes: %d" % (s.rev, s.cnt))
             if s.rev >= s.SN:
                 s.phase, s.until = "hold", now + 7
                 s.after = s.start_sieve
@@ -1283,7 +1259,7 @@ class Primes:
 
 
 class Sorter:
-    fps = 24
+    fps = 20
 
     def __init__(s, scr):
         s.scr = scr
@@ -1294,11 +1270,8 @@ class Sorter:
         s.rain = mkpal(RAIN, GREEN)
         s.a_hi = c256(231, WHITE) | BOLD
         s.a_done = c256(46, GREEN) | BOLD
-        s.algos = [("Bubble Sort", "O(n^2)", s.bubble, 12), ("Insertion Sort", "O(n^2)", s.insertion, 6),
-                   ("Selection Sort", "O(n^2)", s.selection, 12), ("Cocktail Shaker Sort", "O(n^2)", s.cocktail, 10),
-                   ("Comb Sort", "O(n^2 / n log n)", s.comb, 3), ("Shell Sort", "O(n^1.3)", s.shell, 2),
-                   ("Quick Sort (Lomuto)", "O(n log n)", s.quick, 2), ("Heap Sort", "O(n log n)", s.heap, 2),
-                   ("Merge Sort (bottom-up)", "O(n log n)", s.merge, 2), ("Radix Sort (LSD, base 4)", "O(d n)", s.radix, 2)]
+        s.algos = [(s.bubble, 240), (s.insertion, 120), (s.selection, 240), (s.cocktail, 200), (s.comb, 60),
+                   (s.shell, 40), (s.quick, 40), (s.heap, 40), (s.merge, 40), (s.radix, 40)]
         s.i = -1
         s.next_algo()
 
@@ -1306,7 +1279,7 @@ class Sorter:
         s.i = (s.i + 1) % len(s.algos)
         if s.i == 0:
             random.shuffle(s.algos)
-        s.name, s.cx, fn, s.spf = s.algos[s.i]
+        fn, s.sps = s.algos[s.i]
         n = s.n
         a = list(range(1, n + 1))
         mode = random.choice(["shuffled", "shuffled", "reversed", "few unique", "nearly sorted"])
@@ -1320,11 +1293,10 @@ class Sorter:
                 a[i], a[j] = a[j], a[i]
         else:
             random.shuffle(a)
-        s.mode = mode
         s.view = random.choice(["bars", "bars", "dots"])
-        s.a, s.cmp, s.wr, s.hl = a, 0, 0, ()
+        s.a, s.hl = a, ()
         s.gen = fn()
-        s.phase, s.pt = "sort", 0
+        s.phase, s.pt, s.acc = "sort", 0, 0.0
 
     def bubble(s):
         a = s.a
@@ -1332,11 +1304,9 @@ class Sorter:
         for i in range(n):
             sw = False
             for j in range(n - 1 - i):
-                s.cmp += 1
                 s.hl = (j, j + 1)
                 if a[j] > a[j + 1]:
                     a[j], a[j + 1] = a[j + 1], a[j]
-                    s.wr += 1
                     sw = True
                 yield
             if not sw:
@@ -1349,20 +1319,16 @@ class Sorter:
         while sw and lo < hi:
             sw = False
             for i in range(lo, hi):
-                s.cmp += 1
                 s.hl = (i, i + 1)
                 if a[i] > a[i + 1]:
                     a[i], a[i + 1] = a[i + 1], a[i]
-                    s.wr += 1
                     sw = True
                 yield
             hi -= 1
             for i in range(hi, lo, -1):
-                s.cmp += 1
                 s.hl = (i - 1, i)
                 if a[i - 1] > a[i]:
                     a[i - 1], a[i] = a[i], a[i - 1]
-                    s.wr += 1
                     sw = True
                 yield
             lo += 1
@@ -1375,11 +1341,9 @@ class Sorter:
             gap = max(1, int(gap / 1.3))
             done = gap == 1
             for i in range(n - gap):
-                s.cmp += 1
                 s.hl = (i, i + gap)
                 if a[i] > a[i + gap]:
                     a[i], a[i + gap] = a[i + gap], a[i]
-                    s.wr += 1
                     done = False
                 yield
 
@@ -1388,12 +1352,10 @@ class Sorter:
         for i in range(1, len(a)):
             j = i
             while j > 0:
-                s.cmp += 1
                 s.hl = (j - 1, j)
                 yield
                 if a[j - 1] > a[j]:
                     a[j - 1], a[j] = a[j], a[j - 1]
-                    s.wr += 1
                     j -= 1
                 else:
                     break
@@ -1404,13 +1366,11 @@ class Sorter:
         for i in range(n - 1):
             m = i
             for j in range(i + 1, n):
-                s.cmp += 1
                 s.hl = (m, j, i)
                 if a[j] < a[m]:
                     m = j
                 yield
             a[i], a[m] = a[m], a[i]
-            s.wr += 1
             yield
 
     def shell(s):
@@ -1421,12 +1381,10 @@ class Sorter:
             for i in range(gap, n):
                 j = i
                 while j >= gap:
-                    s.cmp += 1
                     s.hl = (j - gap, j)
                     yield
                     if a[j - gap] > a[j]:
                         a[j - gap], a[j] = a[j], a[j - gap]
-                        s.wr += 1
                         j -= gap
                     else:
                         break
@@ -1440,15 +1398,12 @@ class Sorter:
             return
         p, i = a[hi], lo
         for j in range(lo, hi):
-            s.cmp += 1
             s.hl = (j, hi, i)
             yield
             if a[j] < p:
                 a[i], a[j] = a[j], a[i]
-                s.wr += 1
                 i += 1
         a[i], a[hi] = a[hi], a[i]
-        s.wr += 1
         yield
         yield from s.quick(lo, i - 1)
         yield from s.quick(i + 1, hi)
@@ -1463,17 +1418,14 @@ class Sorter:
                 if child >= end:
                     return
                 if child + 1 < end:
-                    s.cmp += 1
                     s.hl = (child, child + 1)
                     yield
                     if a[child] < a[child + 1]:
                         child += 1
-                s.cmp += 1
                 s.hl = (root, child)
                 yield
                 if a[root] < a[child]:
                     a[root], a[child] = a[child], a[root]
-                    s.wr += 1
                     root = child
                 else:
                     return
@@ -1482,7 +1434,6 @@ class Sorter:
             yield from sift(st, n)
         for end in range(n - 1, 0, -1):
             a[0], a[end] = a[end], a[0]
-            s.wr += 1
             yield
             yield from sift(0, end)
 
@@ -1503,8 +1454,6 @@ class Sorter:
                     else:
                         a[k] = R[j]
                         j += 1
-                    s.cmp += 1
-                    s.wr += 1
                     s.hl = (k,)
                     k += 1
                     yield
@@ -1518,20 +1467,21 @@ class Sorter:
             buckets = [[] for _ in range(4)]
             for v in a:
                 buckets[(v // exp) % 4].append(v)
-                s.cmp += 1
             k = 0
             for b in buckets:
                 for v in b:
                     a[k] = v
-                    s.wr += 1
                     s.hl = (k,)
                     k += 1
                     yield
             exp *= 4
 
-    def step(s):
+    def step(s, dt):
         if s.phase == "sort":
-            for _ in range(s.spf):
+            s.acc = min(s.acc + dt * s.sps, s.sps * 0.3)
+            n = int(s.acc)
+            s.acc -= n
+            for _ in range(n):
                 try:
                     next(s.gen)
                 except StopIteration:
@@ -1553,19 +1503,16 @@ class Sorter:
         scr.erase()
         h, w = scr.getmaxyx()
         n, bw = s.n, s.bw
-        put(scr, 0, 1, "%s   %s   n=%d  (%s)" % (s.name, s.cx, n, s.mode), c256(46, GREEN) | BOLD)
-        put(scr, 1, 1, "comparisons: %-8d writes/swaps: %-8d" % (s.cmp, s.wr), c256(51, CYAN))
-        rows = max(2, h)
         off = max(0, (w - n * bw) // 2)
         width = max(1, bw - 1) if bw > 1 else 1
         if s.view == "bars":
             gap = " " * (bw - width)
-            us = [int(v / n * rows * 8) for v in s.a]
-            for r in range(rows):
+            us = [int(v / n * h * 8) for v in s.a]
+            for r in range(h):
                 line = "".join(((("█" if u >= (r + 1) * 8 else SPARK[u - r * 8 - 1] if u > r * 8 else " ") * width) + gap)
                                for u in us)
-                y = 2 + rows - 1 - r
-                c = pick(s.heat, r / rows)
+                y = h - 1 - r
+                c = pick(s.heat, r / h)
                 if s.phase == "sweep":
                     k = min(s.pt, n) * bw
                     put(scr, y, off, line[:k], s.a_done)
@@ -1575,11 +1522,11 @@ class Sorter:
             for i in s.hl:
                 if 0 <= i < n:
                     full = us[i] // 8 + (1 if us[i] % 8 else 0)
-                    for r in range(min(full, rows)):
-                        put(scr, 2 + rows - 1 - r, off + i * bw, "█" * width, s.a_hi)
+                    for r in range(min(full, h)):
+                        put(scr, h - 1 - r, off + i * bw, "█" * width, s.a_hi)
         else:
             for i, v in enumerate(s.a):
-                y = 2 + rows - 1 - int((v - 1) / max(1, n - 1) * (rows - 1))
+                y = h - 1 - int((v - 1) / max(1, n - 1) * (h - 1))
                 if s.phase == "sweep" and i < s.pt:
                     a = s.a_done
                 elif i in s.hl:
@@ -1587,89 +1534,598 @@ class Sorter:
                 else:
                     a = pick(s.rain, v / (n + 1)) | BOLD
                 put(scr, y, off + i * bw, "●" * width, a)
-        #put(scr, h - 1, 1, "white = being compared / moved    green = sorted", col(WHITE) | DIM)
+
+
+FACES = [
+    ((0, 0, 1), (1, 0, 0), (0, 1, 0), 1), ((0, 0, -1), (1, 0, 0), (0, 1, 0), 6),
+    ((1, 0, 0), (0, 1, 0), (0, 0, 1), 2), ((-1, 0, 0), (0, 1, 0), (0, 0, 1), 5),
+    ((0, 1, 0), (0, 0, 1), (1, 0, 0), 3), ((0, -1, 0), (0, 0, 1), (1, 0, 0), 4),
+]
+PIPS = {
+    1: [(0, 0)], 2: [(-.5, -.5), (.5, .5)], 3: [(-.5, -.5), (0, 0), (.5, .5)],
+    4: [(-.5, -.5), (.5, -.5), (-.5, .5), (.5, .5)],
+    5: [(-.5, -.5), (.5, -.5), (-.5, .5), (.5, .5), (0, 0)],
+    6: [(-.5, -.55), (-.5, 0), (-.5, .55), (.5, -.55), (.5, 0), (.5, .55)],
+}
+
+
+def rotation(ax, ay, az):
+    ca, sa = math.cos(ax), math.sin(ax)
+    cb, sb = math.cos(ay), math.sin(ay)
+    cc, sc = math.cos(az), math.sin(az)
+    return ((cc * cb, cc * sb * sa - sc * ca, cc * sb * ca + sc * sa),
+            (sc * cb, sc * sb * sa + cc * ca, sc * sb * ca - cc * sa),
+            (-sb, cb * sa, cb * ca))
+
+
+def xform(R, p):
+    return (R[0][0] * p[0] + R[0][1] * p[1] + R[0][2] * p[2],
+            R[1][0] * p[0] + R[1][1] * p[1] + R[1][2] * p[2],
+            R[2][0] * p[0] + R[2][1] * p[1] + R[2][2] * p[2])
+
 
 class Dice:
-    fps = 30
+    fps = 15
 
     def __init__(s, scr):
         s.scr = scr
-        s.t = 0.0
-        s.dice = [
-            (0.0, 0.0, 0.0, 2, 1),
-        ]
-        s.chars = " .:-=+*#%@"
+        s.t = random.uniform(0, 10)
+        s.edge = mkpal((24, 31, 38, 45, 51, 87, 123, 159, 195, 231), CYAN)
+        s.pip = mkpal(GOLD, YELLOW)
+        s.ace = mkpal((52, 88, 124, 160, 196, 203, 210), RED)
+        s.dim = c256(238, WHITE) | DIM
 
-    def project(s, p, w, h, scale, angles):
-        x, y, z = p
-        ax, ay, az = angles
-        x, y = x * math.cos(az) - y * math.sin(az), x * math.sin(az) + y * math.cos(az)
-        y, z = y * math.cos(ax) - z * math.sin(ax), y * math.sin(ax) + z * math.cos(ax)
-        x, z = x * math.cos(ay) + z * math.sin(ay), -x * math.sin(ay) + z * math.cos(ay)
-        d = 5.5
-        f = d / max(0.5, d + z / 5)
-        return int(w / 2 + x * scale * f * 2), int(h / 2 + y * scale * f)
-
-    def step(s):
+    def step(s, dt):
         scr = s.scr
         h, w = scr.getmaxyx()
+        s.t += dt
+        t = s.t
+        cv = Canvas(w, h)
+        S = 0.24 * min(cv.W, cv.H)
+        cx0 = cv.W / 2.0
+        cy0 = cv.H / 2.0 + math.sin(t * 1.3) * 0.05 * cv.H
+        R = rotation(0.55 * t, 0.8 * t, 0.3 * t)
+        D = 4.5
+
+        def proj(p):
+            q = xform(R, p)
+            f = D / (D - q[2])
+            return cx0 + q[0] * S * f, cy0 - q[1] * S * f
+
+        for n, e1, e2, k in FACES:
+            nr = xform(R, n)
+            corners = [proj((n[0] + sa * e1[0] + sb * e2[0], n[1] + sa * e1[1] + sb * e2[1], n[2] + sa * e1[2] + sb * e2[2]))
+                       for sa, sb in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+            vis = nr[0] * (0 - nr[0]) + nr[1] * (0 - nr[1]) + nr[2] * (D - nr[2])
+            if vis <= 0:
+                for i in range(4):
+                    cv.line(*corners[i], *corners[(i + 1) % 4], s.dim)
+                continue
+            b = max(0.0, min(1.0, nr[2]))
+            ea = pick(s.edge, 0.35 + 0.65 * b) | BOLD
+            for i in range(4):
+                cv.line(*corners[i], *corners[(i + 1) % 4], ea)
+            pal = s.ace if k == 1 else s.pip
+            pa = pick(pal, 0.4 + 0.6 * b) | BOLD
+            for u, v in PIPS[k]:
+                c = (n[0] + u * e1[0] + v * e2[0], n[1] + u * e1[1] + v * e2[1], n[2] + u * e1[2] + v * e2[2])
+                for rad in (0.2, 0.11, 0.03):
+                    pts = []
+                    for j in range(11):
+                        th = j * 2 * math.pi / 10
+                        ct, st = math.cos(th) * rad, math.sin(th) * rad
+                        pts.append(proj((c[0] + ct * e1[0] + st * e2[0], c[1] + ct * e1[1] + st * e2[1],
+                                         c[2] + ct * e1[2] + st * e2[2])))
+                    for j in range(10):
+                        cv.line(*pts[j], *pts[j + 1], pa)
         scr.erase()
-        s.t += 0.045
+        cv.flush(scr)
 
-        size = max(1.0, min(h / 15, w / 36))
-        vertices = [
-            (-1, -1, -1), (-1, -1, 1),
-            (-1, 1, -1), (-1, 1, 1),
-            (1, -1, -1), (1, -1, 1),
-            (1, 1, -1), (1, 1, 1),
-        ]
-        edges = [
-            (0, 1), (0, 2), (0, 4), (1, 3),
-            (1, 5), (2, 3), (2, 6), (3, 7),
-            (4, 5), (4, 6), (5, 7), (6, 7),
-        ]
 
-        zbuf = {}
-        for idx, (ox, oy, oz, scale, color) in enumerate(s.dice):
-            ax = s.t * (0.7 + idx * 0.13) + idx
-            ay = s.t * (0.9 + idx * 0.17) + idx * 2
-            az = s.t * 0.4 + idx
-            angles = (ax, ay, az)
-            bob = math.sin(s.t * 1.7 + idx * 2) * 1.5
-            size2 = size * scale
+class Life:
+    fps = 10
 
-            pts = []
-            for vx, vy, vz in vertices:
-                pts.append(s.project(
-                    (vx * size2 * 2.0 + ox,
-                     vy * size2 + oy + bob,
-                     vz * size2 + oz),
-                    w, h, 1.0, angles
-                ))
+    def __init__(s, scr):
+        s.scr = scr
+        s.h, s.w = scr.getmaxyx()
+        s.W, s.H = s.w * 2, s.h * 4
+        s.mask = (1 << s.W) - 1
+        s.pal = mkpal(RAIN, GREEN)
+        s.acc = 0.0
+        s.seed()
 
-            for a, b in edges:
-                x1, y1 = pts[a]
-                x2, y2 = pts[b]
-                steps = max(abs(x2 - x1), abs(y2 - y1), 1)
-                for j in range(steps + 1):
-                    f = j / steps
-                    x = round(x1 + (x2 - x1) * f)
-                    y = round(y1 + (y2 - y1) * f)
-                    if 0 <= x < w and 0 <= y < h:
-                        depth = (a + b) / 14
-                        zbuf[(x, y)] = (".:-=+*#@"[min(7, int(depth * 8))], color)
+    def seed(s):
+        W = s.W
+        k = random.choice((2, 2, 3))
+        rows = []
+        for _ in range(s.H):
+            r = random.getrandbits(W)
+            for _ in range(k - 1):
+                r &= random.getrandbits(W)
+            rows.append(r)
+        s.rows = rows
+        s.quiet = 0
+        s.born = time.monotonic()
+        s.hue = random.random()
+        s.scr.erase()
+        s.dirty = {(x, y) for x in range(s.w) for y in range(s.h)}
+        s.render()
 
-            cx = sum(p[0] for p in pts) // len(pts)
-            cy = sum(p[1] for p in pts) // len(pts)
-            face = 1 + int((math.sin(ax) + math.cos(ay)) * 2) % 6
-            if 0 <= cx < w and 0 <= cy < h:
-                zbuf[(cx, cy)] = (str(face), color)
+    def advance(s):
+        W, mask, rows, H = s.W, s.mask, s.rows, s.H
+        new = []
+        shift = W - 1
+        changed = 0
+        dirty = s.dirty
+        for i in range(H):
+            a, b, c = rows[i - 1], rows[i], rows[(i + 1) % H]
+            la, ra = ((a << 1) | (a >> shift)) & mask, (a >> 1) | ((a & 1) << shift)
+            lb, rb = ((b << 1) | (b >> shift)) & mask, (b >> 1) | ((b & 1) << shift)
+            lc, rc = ((c << 1) | (c >> shift)) & mask, (c >> 1) | ((c & 1) << shift)
+            s1, c1 = la ^ a ^ ra, (la & a) | (ra & (la ^ a))
+            s3, c3 = lc ^ c ^ rc, (lc & c) | (rc & (lc ^ c))
+            s2, c2 = lb ^ rb, lb & rb
+            sm, cc = s1 ^ s2 ^ s3, (s1 & s2) | (s3 & (s1 ^ s2))
+            two = (c1 & c2) | (c1 & c3) | (c1 & cc) | (c2 & c3) | (c2 & cc) | (c3 & cc)
+            one = (c1 | c2 | c3 | cc) & ~two
+            nb = one & (sm | b) & mask
+            d = nb ^ b
+            if d:
+                changed += popcount(d)
+                cy = i >> 2
+                while d:
+                    low = d & -d
+                    dirty.add(((low.bit_length() - 1) >> 1, cy))
+                    d ^= low
+            new.append(nb)
+        s.rows = new
+        return changed
 
-        for (x, y), (ch, color) in zbuf.items():
+    def render(s):
+        rows, scr = s.rows, s.scr
+        t = (time.monotonic() * 0.03 + s.hue) % 1.0
+        for cx, cy in s.dirty:
+            m = 0
+            x = cx * 2
+            y = cy * 4
+            for dy in range(4):
+                r = rows[y + dy] >> x
+                if r & 1:
+                    m |= BR[(0, dy)]
+                if r & 2:
+                    m |= BR[(1, dy)]
             try:
-                scr.addstr(y, x, ch, curses.color_pair(color) | curses.A_BOLD)
+                if m:
+                    scr.addstr(cy, cx, chr(0x2800 + m), pick(s.pal, (t + (cx + cy) / (s.w + s.h) * 0.5) % 1.0) | BOLD)
+                else:
+                    scr.addstr(cy, cx, " ", 0)
             except curses.error:
                 pass
+        s.dirty = set()
+
+    def step(s, dt):
+        s.acc = min(s.acc + dt * 10, 3.0)
+        n = int(s.acc)
+        s.acc -= n
+        for _ in range(n):
+            ch = s.advance()
+            s.quiet = s.quiet + 1 if ch < max(6, s.W * s.H // 3000) else 0
+        s.render()
+        if s.quiet > 25 or time.monotonic() - s.born > 150:
+            s.seed()
+
+
+class Ant:
+    fps = 12
+    RULES = ("RL", "RLR", "LLRR", "LRRRRRLLR", "RRLLLRLLLRRR", "RLLR", "LRRL", "RRLL", "LLRRRLRLRLLR")
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pal = mkpal(RAIN, GREEN)
+        s.reset()
+
+    def reset(s):
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        s.gw, s.gh = max(8, w // 2), max(8, h)
+        s.grid = [0] * (s.gw * s.gh)
+        rule = random.choice(s.RULES)
+        s.turn = [1 if ch == "R" else 3 for ch in rule]
+        n = len(rule)
+        off = random.random()
+        s.attr = [0] + [pick(s.pal, (off + i / n) % 1.0) | BOLD for i in range(1, n)]
+        s.x, s.y, s.d = s.gw // 2, s.gh // 2, 0
+        s.rate = 250.0
+        s.born = time.monotonic()
+
+    def step(s, dt):
+        if time.monotonic() - s.born > 110:
+            s.reset()
+        s.rate = min(9000.0, s.rate * (1 + dt * 0.4))
+        n = int(s.rate * dt)
+        grid, gw, gh, turn, attr = s.grid, s.gw, s.gh, s.turn, s.attr
+        nst = len(turn)
+        x, y, d = s.x, s.y, s.d
+        addstr = s.scr.addstr
+        dxs, dys = (0, 1, 0, -1), (-1, 0, 1, 0)
+        for _ in range(n):
+            i = y * gw + x
+            st = grid[i]
+            d = (d + turn[st]) & 3
+            ns = st + 1
+            if ns == nst:
+                ns = 0
+            grid[i] = ns
+            try:
+                addstr(y, x * 2, "██" if ns else "  ", attr[ns])
+            except curses.error:
+                pass
+            x = (x + dxs[d]) % gw
+            y = (y + dys[d]) % gh
+        s.x, s.y, s.d = x, y, d
+
+
+class Automata:
+    fps = 15
+    RULES = (30, 90, 110, 150, 18, 22, 126, 60, 105, 45, 73, 129, 193, 54)
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.h, s.w = scr.getmaxyx()
+        s.W = max(8, s.w - 1)
+        s.mask = (1 << s.W) - 1
+        s.pal = mkpal(RAIN, GREEN)
+        scr.erase()
+        scr.scrollok(True)
+        scr.idlok(True)
+        s.acc = 0.0
+        s.lines = 0
+        s.reseed()
+
+    def reseed(s):
+        s.rule = random.choice(s.RULES)
+        if random.random() < 0.6:
+            s.x = 1 << (s.W // 2)
+        else:
+            s.x = random.getrandbits(s.W)
+        s.limit = random.randint(s.h * 2, s.h * 5)
+        s.count = 0
+
+    def evolve(s):
+        x, W, mask, rule = s.x, s.W, s.mask, s.rule
+        l = ((x << 1) | (x >> (W - 1))) & mask
+        r = (x >> 1) | ((x & 1) << (W - 1))
+        out = 0
+        for p in range(8):
+            if rule >> p & 1:
+                out |= (l if p & 4 else ~l & mask) & (x if p & 2 else ~x & mask) & (r if p & 1 else ~r & mask)
+        s.x = out
+        return out
+
+    def step(s, dt):
+        s.acc = min(s.acc + dt * 12, 6.0)
+        fmt = "0%db" % s.W
+        a = pick(s.pal, (time.monotonic() * 0.05) % 1.0) | BOLD
+        while s.acc >= 1:
+            s.acc -= 1
+            top = format(s.evolve(), fmt)
+            bot = format(s.evolve(), fmt)
+            line = "".join(" ▄▀█"[(t == "1") * 2 + (b == "1")] for t, b in zip(top, bot))
+            s.scr.scroll(1)
+            try:
+                s.scr.addstr(s.h - 1, 0, line, a)
+            except curses.error:
+                pass
+            s.count += 1
+            if s.count > s.limit:
+                s.reseed()
+
+
+class Pipes:
+    fps = 15
+    CH = {frozenset((0, 2)): "┃", frozenset((1, 3)): "━", frozenset((2, 1)): "┏",
+          frozenset((2, 3)): "┓", frozenset((0, 1)): "┗", frozenset((0, 3)): "┛"}
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pal = mkpal(PIPEC, GREEN)
+        s.table = {(d, nd): s.CH[frozenset(((d + 2) & 3, nd))] for d in range(4) for nd in range(4) if nd != (d + 2) & 3}
+        s.reset()
+
+    def reset(s):
+        s.scr.erase()
+        h, w = s.scr.getmaxyx()
+        s.h, s.w = h, w
+        n = max(2, min(7, w // 24))
+        s.pipes = [[random.randrange(w), random.randrange(h), random.randrange(4),
+                    s.pal[i % len(s.pal)] | BOLD] for i in range(n)]
+        s.steps = 0
+        s.acc = 0.0
+        s.until = None
+
+    def step(s, dt):
+        h, w = s.h, s.w
+        if s.until is not None:
+            if time.monotonic() > s.until:
+                s.reset()
+            return 0.3
+        s.acc = min(s.acc + dt * 24, 40)
+        n = int(s.acc)
+        s.acc -= n
+        addstr = s.scr.addstr
+        table = s.table
+        dxs, dys = (0, 1, 0, -1), (-1, 0, 1, 0)
+        for _ in range(n):
+            for p in s.pipes:
+                d = p[2]
+                nd = d
+                if random.random() < 0.1:
+                    nd = (d + random.choice((1, 3))) & 3
+                try:
+                    addstr(p[1], p[0], table[(d, nd)], p[3])
+                except curses.error:
+                    pass
+                p[0] = (p[0] + dxs[nd]) % w
+                p[1] = (p[1] + dys[nd]) % h
+                p[2] = nd
+            s.steps += len(s.pipes)
+        if s.steps > w * h * 1.1:
+            s.until = time.monotonic() + 4
+
+
+class Starfield:
+    fps = 20
+
+    def __init__(s, scr):
+        s.scr = scr
+        h, w = scr.getmaxyx()
+        s.pals = [mkpal(GRAYS, WHITE), mkpal(GRAYS, WHITE), mkpal(ICE, CYAN), mkpal(GOLD, YELLOW)]
+        s.n = min(450, max(120, w * h // 12))
+        s.stars = [s.new(True) for _ in range(s.n)]
+        s.t = random.uniform(0, 50)
+        s.ang = 0.0
+
+    def new(s, first=False):
+        return [random.uniform(-2.0, 2.0), random.uniform(-1.1, 1.1),
+                random.uniform(0.05, 1.0) if first else 1.0, random.randrange(4)]
+
+    def step(s, dt):
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        cv = Canvas(w, h)
+        s.t += dt
+        s.ang += dt * 0.04
+        speed = 0.3 + 0.2 * math.sin(s.t * 0.15)
+        K = cv.H * 0.32
+        ca, sa = math.cos(s.ang), math.sin(s.ang)
+        W2, H2 = cv.W / 2.0, cv.H / 2.0
+        for st in s.stars:
+            z1 = st[2]
+            z0 = z1 + speed * 0.12
+            st[2] = z1 - speed * dt
+            if st[2] <= 0.03:
+                st[:] = s.new()
+                continue
+            xr = st[0] * ca - st[1] * sa
+            yr = st[0] * sa + st[1] * ca
+            px, py = W2 + xr / st[2] * K, H2 + yr / st[2] * K
+            if px < -4 or px > cv.W + 4 or py < -4 or py > cv.H + 4:
+                st[:] = s.new()
+                continue
+            pal = s.pals[st[3]]
+            a = pick(pal, 1.0 - st[2]) | (BOLD if st[2] < 0.5 else 0)
+            if st[2] < 0.6:
+                cv.line(W2 + xr / z0 * K, H2 + yr / z0 * K, px, py, a)
+            else:
+                cv.dot(int(px), int(py), a)
+        scr.erase()
+        cv.flush(scr)
+
+
+class Spiro:
+    fps = 14
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pal = mkpal(RAIN, GREEN)
+        s.attrs = [pick(s.pal, i / 32.0) | BOLD for i in range(32)]
+        s.new()
+
+    def new(s):
+        pool = [-7, -6, -5, -4, -3, -2, 2, 3, 4, 5, 6, 7]
+        s.fs = (1, random.choice(pool), random.choice([f for f in range(-13, 14) if abs(f) >= 3]))
+        s.amp = (1.0, random.uniform(0.35, 0.8), random.uniform(0.15, 0.5))
+        s.norm = sum(s.amp)
+        s.ph = (0.0, random.uniform(0, 6.28), random.uniform(0, 6.28))
+        s.t = 0.0
+        s.trail = deque(maxlen=2400)
+        s.spin = 0.0
+        s.born = time.monotonic()
+        s.shift = random.randrange(32)
+
+    def step(s, dt):
+        if time.monotonic() - s.born > 28:
+            s.new()
+        n = int(min(dt, 0.2) * 420)
+        fs, amp, ph, norm = s.fs, s.amp, s.ph, s.norm
+        for _ in range(n):
+            s.t += 0.0026
+            t = s.t
+            s.trail.append((sum(a * math.cos(f * t + p) for a, f, p in zip(amp, fs, ph)) / norm,
+                            sum(a * math.sin(f * t + p) for a, f, p in zip(amp, fs, ph)) / norm))
+        s.spin += dt * 0.12
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        cv = Canvas(w, h)
+        S = 0.46 * min(cv.W, cv.H)
+        ca, sa = math.cos(s.spin), math.sin(s.spin)
+        W2, H2 = cv.W / 2.0, cv.H / 2.0
+        m = len(s.trail)
+        attrs = s.attrs
+        for i, (x, y) in enumerate(s.trail):
+            cv.dot(int(W2 + (x * ca - y * sa) * S), int(H2 + (x * sa + y * ca) * S), attrs[(i * 22 // max(1, m) + s.shift) % 32])
+        scr.erase()
+        cv.flush(scr)
+
+
+class Maze:
+    fps = 20
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pal_a = mkpal(RAIN, GREEN)
+        s.pal_b = mkpal(WARM, RED)
+        s.alt = 0
+        s.start()
+
+    def start(s):
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        s.cw, s.chh = max(3, (w // 2 - 1) // 2), max(3, (h - 1) // 2)
+        s.pw, s.ph = 2 * s.cw + 1, 2 * s.chh + 1
+        s.ox, s.oy = max(0, (w - s.pw * 2) // 2), max(0, (h - s.ph) // 2)
+        s.open = [[False] * s.pw for _ in range(s.ph)]
+        s.wall = c256(237, WHITE) | DIM
+        for y in range(s.ph):
+            put(scr, s.oy + y, s.ox, "██" * s.pw, s.wall)
+        s.total = s.cw * s.chh
+        s.carved = 0
+        s.shift = random.random()
+        s.gen = (s.backtrack if s.alt == 0 else s.prim)()
+        s.alt ^= 1
+        s.phase = "carve"
+        s.acc = 0.0
+        s.rate = max(30.0, s.total / 6.0)
+
+    def paint(s, x, y, a):
+        try:
+            s.scr.addstr(s.oy + y, s.ox + 2 * x, "██", a)
+        except curses.error:
+            pass
+
+    def carve(s, x0, y0, x1, y1):
+        a = pick(s.pal_a, (s.shift + s.carved / s.total) % 1.0) | BOLD
+        s.carved += 1
+        for px, py in (((x0 + x1) + 1, (y0 + y1) + 1), (2 * x1 + 1, 2 * y1 + 1)):
+            s.open[py][px] = True
+            s.paint(px, py, a)
+
+    def backtrack(s):
+        cw, chh = s.cw, s.chh
+        seen = [[False] * cw for _ in range(chh)]
+        seen[0][0] = True
+        s.open[1][1] = True
+        s.paint(1, 1, pick(s.pal_a, s.shift) | BOLD)
+        stack = [(0, 0)]
+        while stack:
+            x, y = stack[-1]
+            nb = [(x + dx, y + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                  if 0 <= x + dx < cw and 0 <= y + dy < chh and not seen[y + dy][x + dx]]
+            if nb:
+                nx, ny = random.choice(nb)
+                seen[ny][nx] = True
+                s.carve(x, y, nx, ny)
+                stack.append((nx, ny))
+                yield
+            else:
+                stack.pop()
+
+    def prim(s):
+        cw, chh = s.cw, s.chh
+        seen = [[False] * cw for _ in range(chh)]
+        sx, sy = random.randrange(cw), random.randrange(chh)
+        seen[sy][sx] = True
+        s.open[2 * sy + 1][2 * sx + 1] = True
+        s.paint(2 * sx + 1, 2 * sy + 1, pick(s.pal_a, s.shift) | BOLD)
+        fr = [(sx, sy, sx + dx, sy + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+              if 0 <= sx + dx < cw and 0 <= sy + dy < chh]
+        while fr:
+            i = random.randrange(len(fr))
+            fr[i], fr[-1] = fr[-1], fr[i]
+            x, y, nx, ny = fr.pop()
+            if seen[ny][nx]:
+                continue
+            seen[ny][nx] = True
+            s.carve(x, y, nx, ny)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                ax, ay = nx + dx, ny + dy
+                if 0 <= ax < cw and 0 <= ay < chh and not seen[ay][ax]:
+                    fr.append((nx, ny, ax, ay))
+            yield
+
+    def begin_solve(s):
+        s.start_p = (1, 1)
+        s.goal = (s.pw - 2, s.ph - 2)
+        s.parent = {s.start_p: None}
+        s.front = [s.start_p]
+        s.dist = 0
+        s.phase = "solve"
+        s.acc = 0.0
+
+    def solve_layer(s):
+        nxt = []
+        a = pick(s.pal_b, (s.dist * 0.012) % 1.0) | BOLD
+        for x, y in s.front:
+            s.paint(x, y, a)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                q = (x + dx, y + dy)
+                if q not in s.parent and 0 <= q[0] < s.pw and 0 <= q[1] < s.ph and s.open[q[1]][q[0]]:
+                    s.parent[q] = (x, y)
+                    nxt.append(q)
+        s.front = nxt
+        s.dist += 1
+
+    def step(s, dt):
+        now = time.monotonic()
+        ph = s.phase
+        if ph == "carve":
+            s.acc = min(s.acc + dt * s.rate, s.rate * 0.4)
+            n = int(s.acc)
+            s.acc -= n
+            for _ in range(n):
+                try:
+                    next(s.gen)
+                except StopIteration:
+                    s.begin_solve()
+                    break
+        elif ph == "solve":
+            s.acc = min(s.acc + dt * 45, 20)
+            n = int(s.acc)
+            s.acc -= n
+            for _ in range(n):
+                if s.goal in s.parent or not s.front:
+                    s.path = []
+                    q = s.goal
+                    while q is not None:
+                        s.path.append(q)
+                        q = s.parent.get(q)
+                    s.phase = "path"
+                    break
+                s.solve_layer()
+        elif ph == "path":
+            hi = c256(231, WHITE) | BOLD
+            for _ in range(max(2, len(s.path) // 40)):
+                if s.path:
+                    x, y = s.path.pop()
+                    s.paint(x, y, hi)
+            if not s.path:
+                s.phase, s.until = "hold", now + 5
+        else:
+            if now > s.until:
+                s.start()
+            return 0.3
+
+
+class Blank:
+    fps = 1
+
+    def __init__(s, scr):
+        scr.erase()
+
+    def step(s, dt):
+        return 30.0
 
 
 SAVERS = {
@@ -1677,78 +2133,74 @@ SAVERS = {
     "sysmon": (SysMon, "live system monitor: cpu, ram, battery, thermal, net, disk, processes"),
     "fractal": (Fractal, "julia morphing, mandelbrot zoom, burning ship zoom"),
     "bootlog": (BootLog, "fake terminal: dmesg, runit, make, xbps, ping, python, git, strace, hexdump"),
-    "attractors": (Attractors, "chaotic attractors in braille with butterfly effect"),
+    "attractors": (Attractors, "chaotic attractors with butterfly effect"),
     "primes": (Primes, "sieve of Eratosthenes, Ulam spiral, Sacks spiral"),
     "sorter": (Sorter, "sorting algorithm visualizer"),
-    "dice": (Dice, "rotating ascii cube"),
+    "dice": (Dice, "tumbling 3D die with pips"),
+    "life": (Life, "Conway's game of life, braille resolution"),
+    "ant": (Ant, "Langton's ant and multi-color turmites"),
+    "automata": (Automata, "scrolling elementary cellular automata"),
+    "pipes": (Pipes, "growing pipes"),
+    "starfield": (Starfield, "warp-speed starfield"),
+    "spiro": (Spiro, "harmonic spirograph curves"),
+    "maze": (Maze, "maze generation and flood-fill solving"),
+    "blank": (Blank, "black screen, zero cpu"),
 }
+DEFAULT_NAMES = [n for n in SAVERS if n != "blank"]
+
+
+def sequence(names):
+    last = None
+    while True:
+        order = list(names)
+        random.shuffle(order)
+        if len(order) > 1 and order[0] == last:
+            order.append(order.pop(0))
+        for n in order:
+            last = n
+            yield n
+
 
 def run(scr, names, cycle):
     try:
         curses.curs_set(0)
     except curses.error:
         pass
-
     init_colors()
-    scr.nodelay(True)
     scr.keypad(True)
-
-    try:
-        curses.mousemask(
-            curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION
-        )
-    except curses.error:
-        pass
-
-    # Ersten Saver zufällig wählen.
-    name = random.choice(names)
-
-    # Alle anderen Saver zufällig mischen.
-    remaining = [n for n in names if n != name]
-    random.shuffle(remaining)
-
+    seq = sequence(names)
+    name = next(seq)
     saver = SAVERS[name][0](scr)
-    tsw = time.time()
-    t0 = tsw
-
+    switched = time.monotonic()
+    last = switched - 1.0 / saver.fps
     while True:
-        t = time.time()
-        ch = scr.getch()
-
-        if ch == curses.KEY_RESIZE:
+        now = time.monotonic()
+        dt = min(now - last, 0.25)
+        last = now
+        if cycle and now - switched > cycle and len(names) > 1:
+            name = next(seq)
+            PAIRS.clear()
+            init_colors()
+            scr.erase()
             saver = SAVERS[name][0](scr)
-            continue
-
-        if ch != -1:
-            if ch == curses.KEY_MOUSE:
-                try:
-                    curses.getmouse()
-                except curses.error:
-                    pass
-                if t - t0 > 1.0:
-                    return
-            else:
-                return
-
-        if cycle and t - tsw > cycle and len(names) > 1:
-            if not remaining:
-                # Alle Saver des bisherigen Zyklus wurden gezeigt.
-                # Neuer Zyklus mit zufälligem Start.
-                name = random.choice(names)
-                remaining = [n for n in names if n != name]
-                random.shuffle(remaining)
-            else:
-                name = remaining.pop()
-
-            saver = SAVERS[name][0](scr)
-            tsw = t
-
-        saver.step()
+            switched = now
+        wait = saver.step(dt)
         scr.refresh()
-        time.sleep(max(
-            0.0,
-            1.0 / saver.fps - (time.time() - t)
-        ))
+        deadline = now + (wait if wait else 1.0 / (saver.fps * (0.5 if ECO else 1.0)))
+        while True:
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            scr.timeout(max(1, int(remain * 1000)))
+            ch = scr.getch()
+            if ch == -1:
+                break
+            if ch == curses.KEY_RESIZE:
+                scr.erase()
+                saver = SAVERS[name][0](scr)
+                break
+            return
+
 
 def main(argv):
     args = argv[1:]
@@ -1761,17 +2213,19 @@ def main(argv):
     cycle = 0
     if args and args[0] == "cycle":
         cycle = float(args[1]) if len(args) > 1 else 60.0
-        names = list(SAVERS)
+        names = list(DEFAULT_NAMES)
     elif not args or args[0] == "random":
-        names = list(SAVERS)
+        names = list(DEFAULT_NAMES)
     else:
         names = args
         for n in names:
             if n not in SAVERS:
                 print("unknown screensaver: %s (try: nerdsaver list)" % n, file=sys.stderr)
                 return 2
+        cycle = 60.0 if len(names) > 1 else 0
     setup_locale()
     os.environ.setdefault("ESCDELAY", "25")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         curses.wrapper(run, names, cycle)
     except KeyboardInterrupt:
