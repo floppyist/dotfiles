@@ -55,6 +55,7 @@ if [[ $- == *i* ]]; then
     alias vim='nvim'
     alias mutt='neomutt'
     alias mpv='mpvim'
+    alias mixer='pulsemixer'
 fi
 
 set -o vi
