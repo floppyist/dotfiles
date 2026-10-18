@@ -29,7 +29,7 @@ exec_always --no-startup-id xsetroot -cursor_name left_ptr
 
 # Screensaver
 for_window [class="nerdsaver"] fullscreen enable
-exec --no-startup-id xautolock -time 10 -detectsleep -locker "nerdsaver-launch cycle 60"
+exec --no-startup-id xautolock -time 1 -detectsleep -locker "nerdsaver-launch cycle 60"
 
 # i3-gaps
 #gaps inner 5
@@ -83,6 +83,9 @@ bindsym $mod+Shift+2 move container to workspace number 2
 bindsym $mod+Shift+3 move container to workspace number 3
 bindsym $mod+Shift+4 move container to workspace number 4
 bindsym $mod+Shift+5 move container to workspace number 5
+
+# Lock
+bindsym Mod4+l exec --no-startup-id i3lock
 
 # Resize
 bindsym $mod+r mode "resize"

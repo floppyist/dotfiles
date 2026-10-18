@@ -66,3 +66,5 @@ fi
 
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.opencode/bin:$PATH"
+
+export NERDSAVER_LOCK=1

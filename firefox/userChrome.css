@@ -4,72 +4,107 @@
     border: none !important;
     border-radius: 0 !important;
     outline: none !important;
-    font-family: "JetBrainsMono Nerd Font";
+    font-family: "JetBrainsMono Nerd Font", monospace;
     color: #ebdbb2 !important;
     background-color: #191c1c !important;
     box-shadow: none !important;
 }
 
-/* --- 1. TOOLBAR & TAB CONTAINER (ERZWINGT 100% BREITE) --- */
-:root {
+:root,
+#tabbrowser-tabs,
+.tabbrowser-tab {
     --tab-min-width: 0px !important;
+    --tab-max-width: none !important;
+    --tab-min-inline-size: 0px !important;
+    --tab-max-inline-size: none !important;
 }
 
 #TabsToolbar,
+#TabsToolbar-customization-target,
 #tabbrowser-tabs,
 #tabbrowser-arrowscrollbox {
-    width: 100% !important;
-    max-width: 100% !important;
-    min-width: 0 !important;
-    height: 35px !important;
+    display: flex !important;
     flex: 1 1 auto !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
 }
 
-/* Shadow DOM Scrollbox: Verhindert Rechtsbündigkeit & Lücken */
+#TabsToolbar {
+    width: 100vw !important;
+}
+
+#tabbrowser-tabs {
+    min-width: 100% !important;
+}
+
+#tabbrowser-arrowscrollbox::part(scrollbox-clip),
 #tabbrowser-arrowscrollbox::part(scrollbox),
 #tabbrowser-arrowscrollbox scrollbox {
     display: flex !important;
+    flex: 1 1 auto !important;
     width: 100% !important;
+    max-width: none !important;
     justify-content: flex-start !important;
-    margin: 0 !important;
-    padding: 0 !important;
 }
 
-/* Alle Firefox-Spacer & Störelemente ausblenden */
+#tabbrowser-arrowscrollbox-periphery,
+#tabbrowser-arrowscrollbox-perma-box {
+    display: none !important;
+}
+
+.closing-tabs-spacer {
+    display: none !important;
+    width: 0 !important;
+    flex: 0 0 0 !important;
+}
+
 .titlebar-spacer,
+.titlebar-buttonbox-container,
 #alltabs-button,
 #new-tab-button,
 #tabs-newtab-button,
 #scrollbutton-up,
 #scrollbutton-down,
-#tabbrowser-arrowscrollbox-perma-box,
-spacer {
+spacer,
+toolbarbutton,
+.urlbar-searchmode-switcher,
+.tab-close-button,
+.tab-icon-image,
+.tab-icon-stack,
+.close-icon,
+#back-button,
+#forward-button,
+#home-button,
+#tracking-protection-icon-container,
+#identity-box,
+#translations-button,
+#star-button,
+#star-button-box,
+#reader-mode-button-icon {
     display: none !important;
 }
 
-/* Geschlossene & animierte Tabs sofort komplett entfernen */
 .tabbrowser-tab[closing],
 .tabbrowser-tab[animating] {
     display: none !important;
     flex: 0 0 0px !important;
     width: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    max-width: 0 !important;
 }
 
-/* Tabs gleichmäßig auf die gesamte Leiste verteilen */
 .tabbrowser-tab:not([pinned]) {
     flex: 1 1 0px !important;
     min-width: 0 !important;
     max-width: none !important;
-    width: auto !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    width: 0px !important;
+    min-inline-size: 0px !important;
+    max-inline-size: none !important;
     transition: none !important;
     background-color: transparent !important;
 }
 
-/* --- 2. TAB CONTENT & ZENTRIERUNG --- */
+
 .tab-background,
 .tab-line {
     display: none !important;
@@ -89,11 +124,10 @@ spacer {
     height: 100% !important;
     padding: 0 5px !important;
     background-color: #2b2b2b !important;
-    border-bottom: 5px solid #ebdbb2 !important;
+    border-bottom: 3px solid #ebdbb2 !important;
     box-sizing: border-box !important;
 }
 
-/* Tab-Titel exakt in der Mitte ausrichten */
 .tab-label-container,
 .tab-label,
 .tab-text {
@@ -108,13 +142,12 @@ spacer {
     font-weight: bold !important;
 }
 
-/* Aktiver Tab: Unterer Balken rot (#cc241d) */
-.tabbrowser-tab[selected="true"] .tab-content,
 .tabbrowser-tab[selected] .tab-content {
-    border-bottom: 5px solid #cc241d !important;
+    border-bottom: 3px solid #cc241d !important;
+    background-color: #32302f !important;
 }
 
-/* --- 3. URLBAR & UI CLEANUP --- */
+
 .urlbar-container {
     height: 15px !important;
     text-align: center !important;
@@ -124,27 +157,135 @@ spacer {
     background-color: #2b2b2b !important;
 }
 
-/* Hide elements */
-toolbarbutton {
+#urlbar[breakout][breakout-extend] {
+    top: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+}
+
+panel,
+#appMenu-popup,
+#widget-overflow-view,
+.panel-arrowcontent {
+    background-color: #191c1c !important;
+    border: 1px solid #2b2b2b !important;
+    color: #ebdbb2 !important;
+    padding: 4px !important;
+}
+
+toolbarbutton.subviewbutton,
+.panel-subview-body,
+panelview {
+    background-color: transparent !important;
+    color: #ebdbb2 !important;
+}
+
+toolbarbutton.subviewbutton:hover {
+    background-color: #2b2b2b !important;
+    color: #cc241d !important;
+}
+
+menubar,
+menu,
+menuitem,
+menupopup,
+menuseparator {
+    appearance: none !important;
+}
+
+menupopup {
+    background-color: #191c1c !important;
+    color: #ebdbb2 !important;
+    border: 1px solid #2b2b2b !important;
+    padding: 4px 0 !important;
+}
+
+menupopup::part(arrowscrollbox),
+menupopup::part(content),
+menupopup::part(scrollbox),
+menupopup::part(scrollbox-clip) {
+    background-color: #191c1c !important;
+    color: #ebdbb2 !important;
+}
+
+menu,
+menuitem {
+    padding: 5px 12px !important;
+    background-color: transparent !important;
+    color: #ebdbb2 !important;
+}
+
+menu:hover,
+menuitem:hover,
+menu[_moz-menuactive="true"],
+menuitem[_moz-menuactive="true"] {
+    background-color: #2b2b2b !important;
+    color: #cc241d !important;
+}
+
+menuitem[disabled="true"],
+menu[disabled="true"] {
+    color: #928374 !important;
+}
+
+menuseparator {
+    margin: 4px 0 !important;
+    border-top: 1px solid #2b2b2b !important;
+}
+
+
+#urlbar-view {
+    background-color: #191c1c !important;
+    border: 1px solid #2b2b2b !important;
+    color: #ebdbb2 !important;
+    padding: 4px !important;
+}
+
+#urlbar-view * {
+    background-color: transparent !important;
+    color: inherit !important;
+}
+
+.urlbarView-row {
+    padding: 6px 10px !important;
+    border-bottom: 1px solid #2b2b2b !important;
+}
+
+.urlbarView-row-inner,
+.urlbarView-no-wrap {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 10px !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+}
+
+.urlbarView-favicon,
+.urlbarView-type-icon,
+.urlbarView-icon {
     display: none !important;
 }
 
-.urlbar-searchmode-switcher,
-.tab-close-button,
-.tab-icon-image,
-.tab-icon-stack,
-.close-icon {
+.urlbarView-button,
+.urlbarView-button-menu,
+.urlbarView-button-result-menu {
     display: none !important;
 }
 
-#back-button,
-#forward-button,
-#home-button,
-#tracking-protection-icon-container,
-#identity-box,
-#translations-button,
-#star-button,
-#star-button-box,
-#reader-mode-button-icon {
-    display: none !important;
+.urlbarView-row[selected],
+.urlbarView-row:hover {
+    background-color: #32302f !important;
+    color: #cc241d !important;
+}
+
+#urlbar-view .urlbarView-url {
+    color: #d79921 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+
+#urlbar-view .urlbarView-title {
+    white-space: nowrap !important;
 }
