@@ -1,0 +1,973 @@
+#!/usr/bin/env python3
+"""mpvim - Vim-gesteuertes Terminal-Frontend fuer mpv (Audio).
+
+Installation:
+    install -Dm755 mpvim ~/.local/bin/mpvim
+    echo "alias mpv='mpvim'" >> ~/.bashrc        # oder z.B. alias m='mpvim'
+
+Benutzung:
+    cd audio && mpvim .        # Ordner (rekursiv)
+    mpvim *                    # Dateien / Ordner
+    mpvim --shuffle *.flac     # Optionen mit -- werden an mpv durchgereicht
+
+Hilfe im Programm: F1 oder :help
+"""
+import curses
+import json
+import locale
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unicodedata
+
+os.environ.setdefault("ESCDELAY", "25")  # Esc soll sich "vim-artig" sofort anfuehlen
+
+AUDIO_EXT = {".mp3", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".m4b", ".aac", ".wav",
+             ".wma", ".ape", ".alac", ".aiff", ".aif", ".mka", ".wv", ".mpc", ".mp2",
+             ".tta", ".dsf", ".dff", ".webm"}
+
+OBSERVE = ["pause", "time-pos", "duration", "volume", "mute", "speed", "loop-file",
+           "loop-playlist", "playlist", "media-title", "metadata", "audio-codec-name",
+           "audio-params", "audio-bitrate", "file-format", "idle-active", "path"]
+
+HELP = [
+    "Navigation",
+    ("j k  / Down Up", "Cursor runter / hoch        (5j = 5 Zeilen)"),
+    ("gg  G", "Anfang / Ende                  (5G = Zeile 5)"),
+    ("Ctrl-d  Ctrl-u", "halbe Seite runter / hoch"),
+    ("Ctrl-f  Ctrl-b", "ganze Seite runter / hoch"),
+    ("gc", "Cursor auf laufenden Titel"),
+    "Wiedergabe",
+    ("Enter", "ausgewaehlten Titel abspielen"),
+    ("Space  p", "Pause / Weiter"),
+    ("h l  / Left Right", "Spulen -5s / +5s          (3l = 15s)"),
+    ("H  L", "Spulen -30s / +30s"),
+    ("0", "Titel von vorn"),
+    ("50%", "auf 50 % des Titels springen"),
+    ("> <   Ctrl-n Ctrl-p", "naechster / vorheriger Titel (3> = 3 vor)"),
+    ("+ -   m", "Lautstaerke +5 / -5   /  Stumm"),
+    ("{ }", "Geschwindigkeit -0.1 / +0.1"),
+    ("s  S", "Shuffle / Shuffle rueckgaengig"),
+    ("r", "Wiederholen: aus > Playlist > Titel"),
+    "Playlist",
+    ("dd", "Eintrag aus Playlist entfernen"),
+    ("J  K", "Eintrag nach unten / oben schieben"),
+    ("i", "Sofortfilter (Enter = abspielen, Esc = dort bleiben)"),
+    ("/  ?   n  N", "Suche vorwaerts / rueckwaerts, naechster / voriger Treffer"),
+    ("F1", "diese Hilfe"),
+    ("q  ZZ  ZQ  Ctrl-c", "Beenden"),
+    "Kommandozeile (:)",
+    (":vol 50 | +10 | -10", "Lautstaerke"),
+    (":seek 1:30 | +10 | 50%", "Position"),
+    (":12", "Cursor auf Zeile 12       :play [N]  Titel abspielen"),
+    (":next :prev :pause :mute", ""),
+    (":shuffle :unshuffle", ""),
+    (":loop off|playlist|file", "Wiederholungsmodus"),
+    (":speed 1.25", "Geschwindigkeit"),
+    (":add PFAD...", "Dateien / Ordner anhaengen"),
+    (":noh  :clear  :help  :q", "Suchmarkierung aus / Log leeren / Hilfe / Ende"),
+]
+
+
+# ---------------------------------------------------------------- Helfer
+def cw(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+
+
+def sw(s):
+    return sum(cw(c) for c in s)
+
+
+def clip(s, w):
+    out, n = [], 0
+    for c in s:
+        k = cw(c)
+        if n + k > w:
+            break
+        out.append(c)
+        n += k
+    return "".join(out)
+
+
+def trunc(s, w):
+    if sw(s) <= w:
+        return s
+    return clip(s, max(0, w - 1)) + "\u2026" if w > 0 else ""
+
+
+def clean(s):
+    return "".join(c if c.isprintable() else "?" for c in s)
+
+
+def fmt_time(t):
+    if t is None:
+        return "--:--"
+    t = int(t)
+    h, r = divmod(t, 3600)
+    m, s = divmod(r, 60)
+    return f"{h}:{m:02}:{s:02}" if h else f"{m:02}:{s:02}"
+
+
+def natkey(s):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+
+def is_url(p):
+    return re.match(r"^[a-zA-Z][\w+.-]*://", p) is not None
+
+
+def collect(paths):
+    out = []
+    for p in paths:
+        p = os.path.expanduser(p)
+        if is_url(p):
+            out.append(p)
+        elif os.path.isdir(p):
+            for root, dirs, files in os.walk(p):
+                dirs[:] = sorted((d for d in dirs if not d.startswith(".")), key=natkey)
+                for f in sorted(files, key=natkey):
+                    if not f.startswith(".") and os.path.splitext(f)[1].lower() in AUDIO_EXT:
+                        out.append(os.path.abspath(os.path.join(root, f)))
+        elif os.path.exists(p):
+            out.append(os.path.abspath(p))
+    return out
+
+
+def disp(fn):
+    if is_url(fn):
+        return clean(fn)
+    rp = os.path.relpath(fn)
+    if rp.startswith(".."):
+        rp = os.path.join(os.path.basename(os.path.dirname(fn)), os.path.basename(fn))
+    return clean(os.path.splitext(rp)[0])
+
+
+def on(v):
+    return v not in (None, False, "no", 0, "0")
+
+
+def match(name, query):
+    nl = name.lower()
+    return all(w in nl for w in query.lower().split())
+
+
+# ---------------------------------------------------------------- Zeichnen
+def put(s, y, x, text, attr=0):
+    h, w = s.getmaxyx()
+    if y < 0 or y >= h or x < 0 or x >= w or not text:
+        return
+    try:
+        s.addstr(y, x, clip(text, w - x), attr)
+    except curses.error:
+        pass  # rechte untere Ecke wirft Fehler, Zeichen wird trotzdem gesetzt
+
+
+def draw_box(s, y, x, h, w, segs, battr):
+    if h < 2 or w < 6:
+        return
+    put(s, y, x, "\u250c\u2500 ", battr)
+    cx = x + 3
+    for text, attr in segs:
+        put(s, y, cx, text, attr)
+        cx += sw(text)
+    put(s, y, cx, " ", battr)
+    cx += 1
+    rem = x + w - 1 - cx
+    if rem > 0:
+        put(s, y, cx, "\u2500" * rem, battr)
+    put(s, y, x + w - 1, "\u2510", battr)
+    for r in range(1, h - 1):
+        put(s, y + r, x, "\u2502", battr)
+        put(s, y + r, x + w - 1, "\u2502", battr)
+    put(s, y + h - 1, x, "\u2514" + "\u2500" * (w - 2) + "\u2518", battr)
+
+
+def make_attrs():
+    curses.start_color()
+    curses.use_default_colors()
+    cols = {"border": 244, "title": 245, "orange": 215, "text": 252, "dim": 240,
+            "red": 167, "teal": 79, "blue": 110, "bright": 255, "active": 252}
+    A = {}
+    n = 0
+    for name, fg in cols.items():
+        n += 1
+        curses.init_pair(n, fg, -1)
+        A[name] = curses.color_pair(n)
+    for name, fg, bg in (("sel", 255, 237), ("selplay", 215, 237), ("hit", 234, 215)):
+        n += 1
+        curses.init_pair(n, fg, bg)
+        A[name] = curses.color_pair(n)
+    A["bold"] = A["bright"] | curses.A_BOLD
+    A["play"] = A["orange"] | curses.A_BOLD
+    A["selplay"] |= curses.A_BOLD
+    A["sel"] |= curses.A_BOLD
+    A["cursor"] = A["teal"] | curses.A_REVERSE
+    A["dimcursor"] = A["dim"] | curses.A_REVERSE
+    return A
+
+
+# ---------------------------------------------------------------- mpv IPC
+class MPV:
+    def __init__(self, path):
+        self.path = path
+        self.sock = None
+        self.props = {}
+        self.events = []
+        self.alive = True
+
+    def connect(self, proc, timeout=10):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return False
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                s.connect(self.path)
+                self.sock = s
+                break
+            except OSError:
+                s.close()
+                time.sleep(0.05)
+        else:
+            return False
+        threading.Thread(target=self._reader, daemon=True).start()
+        for i, name in enumerate(OBSERVE, 1):
+            self.send("observe_property", i, name)
+        return True
+
+    def send(self, *cmd):
+        if not self.sock:
+            return
+        try:
+            self.sock.sendall((json.dumps({"command": list(cmd)}) + "\n").encode())
+        except OSError:
+            self.alive = False
+
+    def _reader(self):
+        buf = b""
+        while True:
+            try:
+                chunk = self.sock.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                try:
+                    self._handle(json.loads(line))
+                except ValueError:
+                    continue
+        self.alive = False
+
+    def _handle(self, m):
+        ev = m.get("event")
+        if ev == "property-change":
+            self.props[m.get("name")] = m.get("data")
+        elif ev == "file-loaded":
+            self.events.append(("loaded", None))
+        elif ev == "end-file" and m.get("reason") == "error":
+            self.events.append(("error", m.get("file_error") or "playback error"))
+
+    def get(self, name, default=None):
+        v = self.props.get(name)
+        return default if v is None else v
+
+
+# ---------------------------------------------------------------- App
+SPECIAL = {curses.KEY_UP: "UP", curses.KEY_DOWN: "DOWN", curses.KEY_LEFT: "LEFT",
+           curses.KEY_RIGHT: "RIGHT", curses.KEY_HOME: "HOME", curses.KEY_END: "END",
+           curses.KEY_PPAGE: "PGUP", curses.KEY_NPAGE: "PGDN", curses.KEY_BACKSPACE: "BS",
+           curses.KEY_ENTER: "ENTER", curses.KEY_F1: "F1", curses.KEY_DC: "DEL"}
+CHARS = {"\n": "ENTER", "\r": "ENTER", "\x1b": "ESC", "\x7f": "BS", "\b": "BS"}
+
+
+class App:
+    def __init__(self, scr, mpv):
+        self.scr, self.mpv = scr, mpv
+        self.A = make_attrs()
+        self.mode = "NORMAL"
+        self.buf = ""
+        self.cur = self.top = 0
+        self.count = self.pend = ""
+        self.search, self.sdir, self.hl = "", 1, False
+        self.saved_cur = 0
+        self.log, self.hist, self.hist_i = [], [], None
+        self.flash = ("", 0)
+        self.help, self.help_top = False, 0
+        self.running = True
+        self.names = {}
+        self.last_play = -2
+        self.page_h = 10
+        self.say("Type :help or press F1 for key bindings.")
+        self.say("Enter plays, Space pauses, h/l seeks, / searches, i filters, q quits.")
+
+    # ----- Zustand
+    def say(self, text, err=False):
+        self.log.append((time.strftime("%H:%M:%S"), text, err))
+        del self.log[:-300]
+        if err:
+            self.flash = (text, time.time() + 4)
+
+    def pl(self):
+        return self.mpv.props.get("playlist") or []
+
+    def name(self, i):
+        fn = self.pl()[i].get("filename", "")
+        n = self.names.get(fn)
+        if n is None:
+            n = self.names[fn] = disp(fn)
+        return n
+
+    def playing(self):
+        for i, e in enumerate(self.pl()):
+            if e.get("current"):
+                return i
+        return -1
+
+    def vis(self):
+        n = len(self.pl())
+        if self.mode == "INSERT" and self.buf.strip():
+            return [i for i in range(n) if match(self.name(i), self.buf)]
+        return list(range(n))
+
+    def real_cur(self):
+        v = self.vis()
+        return v[self.cur] if 0 <= self.cur < len(v) else None
+
+    def move(self, d):
+        self.cur = max(0, min(self.cur + d, len(self.vis()) - 1))
+
+    def goto(self, i):
+        self.cur = max(0, min(i, len(self.vis()) - 1))
+
+    def take_count(self):
+        n = int(self.count) if self.count else None
+        self.count = ""
+        return n
+
+    def tick(self):
+        p = self.playing()
+        if p != self.last_play:
+            if self.mode == "NORMAL" and p >= 0 and (self.cur == self.last_play or self.last_play < 0):
+                self.cur = p
+            self.last_play = p
+        while self.mpv.events:
+            kind, data = self.mpv.events.pop(0)
+            if kind == "loaded":
+                md = {str(k).lower(): v for k, v in (self.mpv.get("metadata") or {}).items()}
+                title = md.get("title") or self.mpv.get("media-title") or "?"
+                artist = md.get("artist")
+                self.say("\u25b6 " + (f"{artist} \u2013 {title}" if artist else str(title)))
+            else:
+                self.say(f"Error: {data}", True)
+
+    # ----- Aktionen
+    def play(self):
+        i = self.real_cur()
+        if i is None:
+            return
+        self.mpv.send("playlist-play-index", i)
+        self.mpv.send("set_property", "pause", False)
+
+    def remove(self):
+        i = self.real_cur()
+        if i is None:
+            return
+        self.say("removed: " + self.name(i))
+        self.mpv.send("playlist-remove", i)
+
+    def move_item(self, d):
+        n, i = len(self.pl()), self.cur
+        if d > 0 and i < n - 1:
+            self.mpv.send("playlist-move", i, i + 2)
+            self.cur += 1
+        elif d < 0 and i > 0:
+            self.mpv.send("playlist-move", i, i - 1)
+            self.cur -= 1
+
+    def set_repeat(self, mode):
+        self.mpv.send("set_property", "loop-file", "inf" if mode == "file" else "no")
+        self.mpv.send("set_property", "loop-playlist", "inf" if mode == "playlist" else "no")
+        self.say(f"repeat: {mode}")
+
+    def repeat_state(self):
+        if on(self.mpv.props.get("loop-file")):
+            return "file"
+        if on(self.mpv.props.get("loop-playlist")):
+            return "playlist"
+        return "off"
+
+    def find(self, q, start, d, inclusive=False):
+        v = self.vis()
+        n = len(v)
+        for step in (range(0, n) if inclusive else range(1, n + 1)):
+            j = (start + d * step) % n
+            if match(self.name(v[j]), q):
+                return j
+        return None
+
+    def jump_match(self, direction):
+        if not self.search:
+            self.say("No previous search pattern", True)
+            return
+        self.hl = True
+        j = self.find(self.search, self.cur, direction * self.sdir)
+        if j is None:
+            self.say(f"Pattern not found: {self.search}", True)
+        else:
+            self.cur = j
+
+    def seek_cmd(self, arg):
+        m = re.fullmatch(r"([+-]?)(\d+(?::\d+){0,2}(?:\.\d+)?)(%?)", arg.strip())
+        if not m:
+            self.say("usage: :seek 1:30 | +10 | -10 | 50%", True)
+            return
+        sign, ts, pct = m.groups()
+        secs = sum(float(p) * 60 ** i for i, p in enumerate(reversed(ts.split(":"))))
+        if pct:
+            self.mpv.send("seek", secs, "absolute-percent")
+        elif sign:
+            self.mpv.send("seek", secs if sign == "+" else -secs, "relative")
+        else:
+            self.mpv.send("seek", secs, "absolute")
+
+    def command(self, line):
+        line = line.strip()
+        if not line:
+            return
+        self.hist.append(line)
+        if line.isdigit():
+            self.goto(int(line) - 1)
+            return
+        cmd, _, arg = line.partition(" ")
+        arg = arg.strip()
+        send = self.mpv.send
+        if cmd in ("q", "quit", "qa", "q!", "wq", "x"):
+            self.running = False
+        elif cmd in ("vol", "volume"):
+            if re.fullmatch(r"[+-]\d+", arg):
+                send("add", "volume", int(arg))
+            elif arg.isdigit():
+                send("set_property", "volume", int(arg))
+            else:
+                self.say("usage: :vol 50 | +10 | -10", True)
+        elif cmd == "seek":
+            self.seek_cmd(arg)
+        elif cmd == "play":
+            if arg.isdigit():
+                self.goto(int(arg) - 1)
+            self.play()
+        elif cmd == "pause":
+            send("cycle", "pause")
+        elif cmd == "next":
+            send("playlist-next")
+        elif cmd in ("prev", "previous"):
+            send("playlist-prev")
+        elif cmd == "mute":
+            send("cycle", "mute")
+        elif cmd == "shuffle":
+            send("playlist-shuffle")
+            self.say("shuffled")
+        elif cmd == "unshuffle":
+            send("playlist-unshuffle")
+            self.say("unshuffled")
+        elif cmd == "loop":
+            mode = {"off": "off", "no": "off", "none": "off", "playlist": "playlist",
+                    "all": "playlist", "file": "file", "track": "file", "one": "file"}.get(arg)
+            if mode:
+                self.set_repeat(mode)
+            else:
+                self.say("usage: :loop off|playlist|file", True)
+        elif cmd == "speed":
+            try:
+                send("set_property", "speed", float(arg))
+            except ValueError:
+                self.say("usage: :speed 1.25", True)
+        elif cmd == "add":
+            try:
+                files = collect(shlex.split(arg))
+            except ValueError:
+                files = []
+            for f in files:
+                send("loadfile", f, "append-play")
+            self.say(f"added {len(files)} file(s)" if files else "nothing to add", not files)
+        elif cmd == "noh":
+            self.hl = False
+        elif cmd == "clear":
+            self.log.clear()
+        elif cmd in ("help", "h"):
+            self.help = True
+        else:
+            self.say(f"Not an editor command: {line}", True)
+
+    # ----- Eingabe
+    def on_key(self, k):
+        if isinstance(k, int):
+            k = SPECIAL.get(k)
+            if k is None:
+                return
+        else:
+            k = CHARS.get(k, k)
+        if self.help:
+            if k in ("j", "DOWN"):
+                self.help_top += 1
+            elif k in ("k", "UP"):
+                self.help_top -= 1
+            elif k in ("\x04", "PGDN", " "):
+                self.help_top += 10
+            elif k in ("\x15", "PGUP"):
+                self.help_top -= 10
+            elif k == "\x03":
+                self.running = False
+            elif k in ("q", "ESC", "F1", "ENTER", "?"):
+                self.help = False
+            return
+        if self.mode == "NORMAL":
+            self.normal(k)
+        else:
+            self.text_mode(k)
+
+    def enter_mode(self, mode):
+        self.mode, self.buf, self.hist_i = mode, "", None
+        self.saved_cur = self.cur
+
+    def normal(self, k):
+        k = {"UP": "k", "DOWN": "j", "LEFT": "h", "RIGHT": "l",
+             "PGUP": "\x02", "PGDN": "\x06"}.get(k, k)
+        if k == "HOME":
+            self.pend = ""
+            self.count = ""
+            self.goto(0)
+            return
+        if k == "END":
+            self.goto(len(self.vis()) - 1)
+            return
+        if k == "F1":
+            self.help = True
+            return
+        if k == "ESC":
+            self.count = self.pend = ""
+            return
+        if k == "\x03":
+            self.running = False
+            return
+        if self.pend:
+            seq, self.pend = self.pend + k, ""
+            n = self.take_count()
+            if seq == "gg":
+                self.goto(n - 1 if n else 0)
+            elif seq == "gc":
+                if self.playing() >= 0:
+                    self.goto(self.playing())
+            elif seq == "dd":
+                self.remove()
+            elif seq in ("ZZ", "ZQ"):
+                self.running = False
+            return
+        if k in ("g", "d", "Z"):
+            self.pend = k
+            return
+        if len(k) == 1 and k.isdigit() and (k != "0" or self.count):
+            self.count += k
+            return
+        n = self.take_count()
+        c = n or 1
+        send = self.mpv.send
+        if k == "j":
+            self.move(c)
+        elif k == "k":
+            self.move(-c)
+        elif k == "G":
+            self.goto(n - 1 if n else len(self.vis()) - 1)
+        elif k == "\x04":
+            self.move(max(1, self.page_h // 2))
+        elif k == "\x15":
+            self.move(-max(1, self.page_h // 2))
+        elif k == "\x06":
+            self.move(self.page_h)
+        elif k == "\x02":
+            self.move(-self.page_h)
+        elif k == "ENTER":
+            self.play()
+        elif k in (" ", "p"):
+            if self.mpv.props.get("idle-active"):
+                self.play()
+            else:
+                send("cycle", "pause")
+        elif k == "h":
+            send("seek", -5 * c)
+        elif k == "l":
+            send("seek", 5 * c)
+        elif k == "H":
+            send("seek", -30 * c)
+        elif k == "L":
+            send("seek", 30 * c)
+        elif k == "0":
+            send("seek", 0, "absolute")
+        elif k == "%":
+            if n is not None:
+                send("seek", min(n, 100), "absolute-percent")
+        elif k in (">", "\x0e"):
+            for _ in range(c):
+                send("playlist-next")
+        elif k in ("<", "\x10"):
+            for _ in range(c):
+                send("playlist-prev")
+        elif k in ("+", "="):
+            send("add", "volume", 5 * c)
+        elif k == "-":
+            send("add", "volume", -5 * c)
+        elif k == "m":
+            send("cycle", "mute")
+        elif k == "{":
+            send("add", "speed", -0.1 * c)
+        elif k == "}":
+            send("add", "speed", 0.1 * c)
+        elif k == "s":
+            send("playlist-shuffle")
+            self.say("shuffled")
+        elif k == "S":
+            send("playlist-unshuffle")
+            self.say("unshuffled")
+        elif k == "r":
+            nxt = {"off": "playlist", "playlist": "file", "file": "off"}[self.repeat_state()]
+            self.set_repeat(nxt)
+        elif k == "J":
+            self.move_item(1)
+        elif k == "K":
+            self.move_item(-1)
+        elif k == "i":
+            self.enter_mode("INSERT")
+        elif k == ":":
+            self.enter_mode("COMMAND")
+        elif k in ("/", "?"):
+            self.sdir = 1 if k == "/" else -1
+            self.enter_mode("SEARCH")
+        elif k == "n":
+            self.jump_match(1)
+        elif k == "N":
+            self.jump_match(-1)
+        elif k == "q":
+            self.running = False
+        elif k == "\x0c":
+            self.scr.clearok(True)
+
+    def edit(self, k):
+        if k == "BS":
+            self.buf = self.buf[:-1]
+        elif k == "\x17":
+            self.buf = re.sub(r"\S*\s*$", "", self.buf)
+        elif k == "\x15":
+            self.buf = ""
+        elif len(k) == 1 and k.isprintable():
+            self.buf += k
+        else:
+            return False
+        return True
+
+    def leave_insert(self, play):
+        real = self.real_cur()
+        self.mode, self.buf = "NORMAL", ""
+        if real is not None:
+            self.cur = real
+            if play:
+                self.play()
+
+    def hist_step(self, d):
+        if not self.hist:
+            return
+        i = len(self.hist) if self.hist_i is None else self.hist_i
+        i = max(0, min(len(self.hist), i + d))
+        self.hist_i = None if i == len(self.hist) else i
+        self.buf = "" if self.hist_i is None else self.hist[self.hist_i]
+
+    def text_mode(self, k):
+        m = self.mode
+        if k in ("ESC", "\x03") or (k == "BS" and not self.buf and m != "INSERT"):
+            if m == "SEARCH":
+                self.cur = self.saved_cur
+            if m == "INSERT":
+                self.leave_insert(False)
+            else:
+                self.mode, self.buf = "NORMAL", ""
+            return
+        if k == "ENTER":
+            if m == "INSERT":
+                self.leave_insert(True)
+            elif m == "COMMAND":
+                line, self.mode, self.buf = self.buf, "NORMAL", ""
+                self.command(line)
+            else:
+                if self.buf:
+                    self.search, self.hl = self.buf, True
+                else:
+                    self.cur = self.saved_cur
+                self.mode, self.buf = "NORMAL", ""
+            return
+        if k in ("UP", "DOWN", "\x10", "\x0e"):
+            d = -1 if k in ("UP", "\x10") else 1
+            if m == "INSERT":
+                self.move(d)
+            elif m == "COMMAND":
+                self.hist_step(d)
+            return
+        if self.edit(k):
+            if m == "INSERT":
+                self.cur = 0
+            elif m == "SEARCH":
+                j = self.find(self.buf, self.saved_cur, self.sdir, True) if self.buf else None
+                self.cur = self.saved_cur if j is None else j
+
+    # ----- Zeichnen
+    def draw(self):
+        s, A = self.scr, self.A
+        s.erase()
+        H, W = s.getmaxyx()
+        if H < 14 or W < 60:
+            put(s, 0, 0, "Terminal too small (min 60x14)", A["red"])
+            s.refresh()
+            return
+        lw = int(W * 0.72)
+        rw = W - lw
+        mh = H - 3
+        h1 = h2 = mh // 3
+        h3 = mh - h1 - h2
+        if self.help:
+            self.draw_help(0, 0, mh, lw)
+        else:
+            self.draw_playlist(0, 0, mh, lw)
+        self.draw_now(0, lw, h1, rw)
+        self.draw_props(h1, lw, h2, rw)
+        self.draw_log(h1 + h2, lw, h3, rw)
+        self.draw_input(mh, 0, 3, W)
+        s.refresh()
+
+    def draw_playlist(self, y, x, h, w):
+        s, A = self.scr, self.A
+        pl, v = self.pl(), self.vis()
+        n = len(v)
+        self.cur = max(0, min(self.cur, n - 1))
+        title = [("Playlist", A["title"])]
+        if self.mode == "INSERT" and self.buf.strip():
+            title.append((f"  filter {n}/{len(pl)}", A["dim"]))
+        draw_box(s, y, x, h, w, title, A["border"])
+        ih = h - 2
+        self.page_h = ih
+        so = min(3, (ih - 1) // 2)
+        if self.cur < self.top + so:
+            self.top = max(0, self.cur - so)
+        elif self.cur > self.top + ih - 1 - so:
+            self.top = self.cur - ih + 1 + so
+        self.top = max(0, min(self.top, max(0, n - ih)))
+        if not pl:
+            put(s, y + 1, x + 2, "(empty)", A["dim"])
+        playing = self.playing()
+        paused = self.mpv.props.get("pause")
+        numw = len(str(len(pl)))
+        q = self.buf if self.mode in ("INSERT", "SEARCH") else (self.search if self.hl else "")
+        words = q.lower().split()
+        for r in range(min(ih, n - self.top)):
+            vi = self.top + r
+            i = v[vi]
+            sel, isp = vi == self.cur, i == playing
+            attr = (A["selplay"] if isp else A["sel"]) if sel else (A["play"] if isp else A["text"])
+            yy = y + 1 + r
+            if sel:
+                put(s, yy, x + 1, " " * (w - 2), attr)
+            mark = ("\u2016" if paused else "\u25b6") if isp else " "
+            prefix = f" {mark} {i + 1:>{numw}}  "
+            put(s, yy, x + 1, prefix, attr if (isp or sel) else A["dim"])
+            nm = self.name(i)
+            avail = w - 2 - sw(prefix) - 1
+            px = x + 1 + sw(prefix)
+            put(s, yy, px, trunc(nm, avail), attr)
+            nl = nm.lower()
+            for wd in words:
+                idx = nl.find(wd)
+                if idx >= 0 and sw(nm[:idx + len(wd)]) <= avail:
+                    put(s, yy, px + sw(nm[:idx]), nm[idx:idx + len(wd)], A["hit"])
+        ruler = f" {self.cur + 1 if n else 0}/{n} "
+        put(s, y + h - 1, x + w - 2 - len(ruler), ruler, A["border"])
+
+    def draw_help(self, y, x, h, w):
+        s, A = self.scr, self.A
+        draw_box(s, y, x, h, w, [("Help", A["title"]), ("  j/k scroll, q/Esc close", A["dim"])], A["border"])
+        ih = h - 2
+        self.help_top = max(0, min(self.help_top, max(0, len(HELP) - ih)))
+        for r, item in enumerate(HELP[self.help_top:self.help_top + ih]):
+            yy = y + 1 + r
+            if isinstance(item, str):
+                put(s, yy, x + 2, item, A["orange"] | curses.A_BOLD)
+            else:
+                put(s, yy, x + 3, item[0], A["teal"])
+                put(s, yy, x + 26, trunc(item[1], w - 28), A["text"])
+
+    def meta(self):
+        return {str(k).lower(): v for k, v in (self.mpv.get("metadata") or {}).items()}
+
+    def draw_now(self, y, x, h, w):
+        s, A, P = self.scr, self.A, self.mpv.props.get
+        draw_box(s, y, x, h, w, [("Now Playing", A["title"])], A["border"])
+        md = self.meta()
+        pos, dur = P("time-pos"), P("duration")
+        if not P("path"):
+            state = "\u25a0 stopped"
+        else:
+            state = "\u2016 paused" if P("pause") else "\u25b6 playing"
+        vol = P("volume")
+        vols = f"{round(vol)}%" if vol is not None else "-"
+        if P("mute"):
+            vols += " (muted)"
+        sp = P("speed")
+        rows = [("Title", md.get("title") or P("media-title") or "-"),
+                ("Artist", md.get("artist") or "-"),
+                ("Album", md.get("album") or "-"),
+                ("State", state),
+                ("Time", f"{fmt_time(pos)} / {fmt_time(dur)}"),
+                None,
+                ("Volume", vols),
+                ("Speed", f"{sp:.2f}x" if sp else "-"),
+                ("Repeat", self.repeat_state())]
+        iw = w - 5
+        for r, row in enumerate(rows[:h - 2]):
+            yy = y + 1 + r
+            if row is None:
+                bw = max(1, w - 6)
+                ratio = min(1.0, max(0.0, pos / dur)) if pos and dur else 0
+                f = int(ratio * bw)
+                put(s, yy, x + 2, "\u2588" * f, A["orange"])
+                put(s, yy, x + 2 + f, "\u2591" * (bw - f), A["dim"])
+            else:
+                put(s, yy, x + 2, trunc(clean(f"{row[0]:<7}= {row[1]}"), iw), A["orange"])
+
+    def draw_props(self, y, x, h, w):
+        s, A, P = self.scr, self.A, self.mpv.props.get
+        draw_box(s, y, x, h, w, [("Properties", A["title"])], A["border"])
+        md = self.meta()
+        ap = P("audio-params") or {}
+        br = P("audio-bitrate")
+        pi, n = self.playing(), len(self.pl())
+        rows = [("Position", f"{pi + 1} / {n}" if pi >= 0 else f"- / {n}"),
+                ("Codec", P("audio-codec-name") or "-"),
+                ("Format", P("file-format") or "-"),
+                ("Rate", f"{ap['samplerate']} Hz" if ap.get("samplerate") else "-"),
+                ("Channels", ap.get("hr-channels") or ap.get("channels") or "-"),
+                ("Bitrate", f"{br / 1000:.0f} kbps" if br else "-"),
+                ("Genre", md.get("genre") or "-"),
+                ("Date", md.get("date") or md.get("year") or "-"),
+                ("Track", md.get("track") or "-")]
+        for r, (k, val) in enumerate(rows[:h - 2]):
+            put(s, y + 1 + r, x + 2, trunc(clean(f"{k:<9}= {val}"), w - 5), A["text"])
+
+    def draw_log(self, y, x, h, w):
+        s, A = self.scr, self.A
+        draw_box(s, y, x, h, w, [("Log", A["title"])], A["border"])
+        ih = h - 2
+        for r, (ts, text, err) in enumerate(self.log[-ih:] if ih > 0 else []):
+            yy = y + 1 + r
+            put(s, yy, x + 1, f"[{ts}]", A["dim"])
+            put(s, yy, x + 11, trunc(clean(text), w - 13), A["red"] if err else A["text"])
+
+    def draw_input(self, y, x, h, w):
+        s, A = self.scr, self.A
+        mc = {"NORMAL": "blue", "INSERT": "red", "COMMAND": "orange", "SEARCH": "orange"}[self.mode]
+        segs = [("Input", A["bold"]), ("  ", 0), ("[", A["bold"]),
+                (self.mode, A[mc] | curses.A_BOLD), ("]", A["bold"])]
+        draw_box(s, y, x, h, w, segs, A["active"])
+        prompt = {"NORMAL": ">", "INSERT": ">", "COMMAND": ":",
+                  "SEARCH": "/" if self.sdir > 0 else "?"}[self.mode]
+        put(s, y + 1, x + 2, prompt, A["teal"] | curses.A_BOLD)
+        if self.mode == "NORMAL":
+            typed = self.count + self.pend
+            put(s, y + 1, x + 4, typed, A["text"])
+            cx = x + 4 + len(typed)
+            msg, until = self.flash
+            if msg and time.time() < until:
+                m = trunc(clean(msg), w - 12 - len(typed))
+                put(s, y + 1, x + w - 3 - sw(m), m, A["red"])
+            put(s, y + 1, cx, " ", A["dimcursor"])
+        else:
+            shown = self.buf
+            avail = w - 8
+            while sw(shown) > avail:
+                shown = shown[1:]
+            put(s, y + 1, x + 4, shown, A["text"])
+            put(s, y + 1, x + 4 + sw(shown), " ", A["cursor"])
+
+    def run(self):
+        s = self.scr
+        curses.curs_set(0)
+        curses.raw()
+        s.keypad(True)
+        s.timeout(100)
+        while self.running and self.mpv.alive:
+            self.tick()
+            self.draw()
+            try:
+                k = s.get_wch()
+            except curses.error:
+                continue
+            self.on_key(k)
+
+
+# ---------------------------------------------------------------- main
+def usage():
+    print(__doc__)
+    sys.exit(0)
+
+
+def main():
+    locale.setlocale(locale.LC_ALL, "")
+    args = sys.argv[1:]
+    if any(a in ("-h", "--help") for a in args):
+        usage()
+    if shutil.which("mpv") is None:
+        sys.exit("mpvim: mpv not found in PATH")
+    opts = [a for a in args if a.startswith("--") and a != "--"]
+    paths = [a for a in args if not a.startswith("--")]
+    files = collect(paths or ["."])
+    if not files:
+        sys.exit("mpvim: no audio files found")
+    if not os.environ.get("TERM", "").endswith("256color") and "kitty" not in os.environ.get("TERM", ""):
+        print("mpvim: warning: TERM is not a 256-color terminal", file=sys.stderr)
+
+    sock_path = os.path.join(tempfile.gettempdir(), f"mpvim-{os.getpid()}.sock")
+    cmd = (["mpv", "--idle=yes", "--no-video", "--audio-display=no", "--force-window=no",
+            "--no-terminal", "--input-ipc-server=" + sock_path] + opts + ["--"] + files)
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    mpv = MPV(sock_path)
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
+    signal.signal(signal.SIGHUP, lambda *a: sys.exit(0))
+    try:
+        if not mpv.connect(proc):
+            sys.exit("mpvim: could not connect to mpv")
+        curses.wrapper(lambda scr: App(scr, mpv).run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        mpv.send("quit")
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        try:
+            os.unlink(sock_path)
+        except OSError:
+            pass
+
+
+if __name__ == "__main__":
+    main()

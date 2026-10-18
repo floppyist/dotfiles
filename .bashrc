@@ -54,6 +54,7 @@ if [[ $- == *i* ]]; then
     alias grep='rg --color=auto'
     alias vim='nvim'
     alias mutt='neomutt'
+    alias mpv='mpvim'
 fi
 
 set -o vi
