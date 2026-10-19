@@ -8,12 +8,17 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 > Especially the Firefox configuration isn't in a production-ready state!
 
 <p align="center">
-    <img src="screenshots/screenshot_000.png" />
+    <img src="screenshots/general.png" />
 </p>
 
 <p align="center">
-    <img src="screenshots/screenshot_001.png" />
+    <img src="screenshots/browser.png" />
 </p>
+
+<p align="center">
+    <img src="screenshots/mpv-wrapper.png" />
+</p>
+
 
 ## Components
 

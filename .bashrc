@@ -70,3 +70,4 @@ export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.opencode/bin:$PATH"
 
 export NERDSAVER_LOCK=1
+export NERDSAVER_TERM=alacritty
