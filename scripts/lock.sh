@@ -1,23 +1,23 @@
 #!/bin/bash
 
 i3lock \
---inside-color=282828ff \
---ring-color=282828ff \
+--inside-color=00000000 \
+--ring-color=00000000 \
 --line-color=00000000 \
---separator-color=282828ff \
+--separator-color=00000000 \
 --keyhl-color=cc241dff \
 --bshl-color=cc241dff \
---insidever-color=282828ff \
+--insidever-color=00000000 \
 --ringver-color=cc241dff \
---insidewrong-color=282828ff \
+--insidewrong-color=00000000 \
 --ringwrong-color=cc241dff \
---time-color=a89984ff \
---date-color=a89984ff \
---verif-color=a89984ff \
---wrong-color=cc241dff \
---layout-color=a89984ff \
+--time-color=a89984 \
+--date-color=a89984 \
+--verif-color=00000000 \
+--wrong-color=00000000 \
+--layout-color=00000000 \
 --noinput-text="" \
---blur 4 \
+--blur 3 \
 --clock \
 --indicator \
 --time-str="%H:%M" \
@@ -27,4 +27,4 @@ i3lock \
 --time-size=46 \
 --date-size=16 \
 --radius 160 \
---ring-width 25
+--ring-width 32

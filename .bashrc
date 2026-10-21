@@ -56,6 +56,8 @@ if [[ $- == *i* ]]; then
     alias mutt='neomutt'
     alias mpv='mpvim'
     alias mixer='pulsemixer'
+    alias calc='calculus'
+    alias cb='xclip -selection clipboard'
 fi
 
 set -o vi
@@ -69,5 +71,5 @@ fi
 export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.opencode/bin:$PATH"
 
-export NERDSAVER_LOCK=1
 export NERDSAVER_TERM=alacritty
+export CALCULUS_STATE=~/.calculus
