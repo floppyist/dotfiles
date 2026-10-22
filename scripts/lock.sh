@@ -1,6 +1,15 @@
 #!/bin/bash
 
+pgrep -x i3lock >/dev/null && exit 0
+
+command -v dunstctl >/dev/null && dunstctl set-paused true
+
 i3lock \
+-c 191c1c \
+--nofork \
+--ignore-empty-password \
+--pass-media-keys \
+--pass-volume-keys \
 --inside-color=00000000 \
 --ring-color=00000000 \
 --line-color=00000000 \
@@ -17,7 +26,6 @@ i3lock \
 --wrong-color=00000000 \
 --layout-color=00000000 \
 --noinput-text="" \
---blur 3 \
 --clock \
 --indicator \
 --time-str="%H:%M" \
@@ -28,3 +36,7 @@ i3lock \
 --date-size=16 \
 --radius 160 \
 --ring-width 32
+|| i3lock --nofork -c ${bg}
+
+command -v dunstctl >/dev/null && dunstctl set-paused false
+exit 0

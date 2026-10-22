@@ -1,0 +1,26 @@
+# nerdsaver-launch configuration (copy to ~/.config/nerdsaver/config)
+# background opacity of the saver windows: 0.0 = fully transparent, 1.0 = opaque (alacritty, kitty)
+opacity = 0.8
+# matrix glyphs: safe (works in nearly every font), katakana, ascii
+glyphs = safe
+# terminal emulator: auto, alacritty, kitty, xterm, st
+terminal = auto
+# all = saver on every monitor, primary = saver on primary and black windows elsewhere, focused = only focused monitor
+monitors = all
+# lock the screen after this many idle seconds (0 = never lock)
+lock_after = 300
+# empty = ~/.local/bin/lock.sh if present, otherwise i3lock
+lock_cmd =
+# do not start while a fullscreen window is visible on any monitor
+inhibit_fullscreen = yes
+# do not start while a pulseaudio/pipewire sink is playing
+inhibit_audio = no
+# do not start while one of these processes runs, e.g. mpv vlc
+inhibit_procs =
+# halve the frame rate on battery
+eco_on_battery = yes
+# i3 binding mode that is active while the saver runs (must exist in the i3 config)
+mode = nerdsaver
+# shell commands before / after the saver, e.g. polybar-msg cmd hide / polybar-msg cmd show
+pre_cmd =
+post_cmd =

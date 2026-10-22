@@ -72,4 +72,5 @@ export PATH="$HOME/.local/bin:$PATH"
 export PATH="$HOME/.opencode/bin:$PATH"
 
 export NERDSAVER_TERM=alacritty
-export CALCULUS_STATE=~/.calculus
+export NERDSAVER_LOCK=0
+export CALCULUS_STATE=~/.cache/calculus

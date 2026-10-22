@@ -1,32 +1,604 @@
-#!/bin/sh
-# nerdsaver-launch [SAVER|random|cycle [sek]]
-# Startet nerdsaver vollbild in einem eigenen Terminalfenster (WM_CLASS "nerdsaver").
-# i3 braucht dafür:   for_window [class="nerdsaver"] fullscreen enable
-#
-# Umgebungsvariablen:
-#   NERDSAVER_TERM=xterm|alacritty|kitty|st   Terminal erzwingen
-#   NERDSAVER_LOCK=1                           nach dem Beenden i3lock starten
+#!/usr/bin/env python3
+import ctypes
+import ctypes.util
+import fcntl
+import glob
+import json
+import os
+import shlex
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
 
-# nur eine Instanz gleichzeitig
-exec 9>"${XDG_RUNTIME_DIR:-/tmp}/nerdsaver.lock"
-flock -n 9 || exit 0
+HOME = os.path.expanduser("~")
+RUN = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+LOCKFILE = os.path.join(RUN, "nerdsaver.lock")
+LOGFILE = os.path.join(RUN, "nerdsaver.log")
+CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "nerdsaver", "config")
 
-DIR="$(dirname "$(readlink -f "$0")")"
-if [ -x "$DIR/nerdsaver" ]; then SAVER="$DIR/nerdsaver"; else SAVER="$DIR/nerdsaver.py"; fi
-[ $# -eq 0 ] && set -- random
+USAGE = """usage: nerdsaver-launch [--now] [--status] [SAVER ARGS...]
 
-TERMS="${NERDSAVER_TERM:-alacritty kitty xterm st}"
-for t in $TERMS; do
-    command -v "$t" >/dev/null 2>&1 || continue
-    case "$t" in
-        alacritty) alacritty --class nerdsaver,nerdsaver -e "$SAVER" "$@" ;;
-        kitty)     kitty --class nerdsaver "$SAVER" "$@" ;;
-        st)        st -c nerdsaver -e "$SAVER" "$@" ;;
-        xterm)     xterm -class nerdsaver -name nerdsaver -bg black -fg green \
-                         -fa Monospace -fs 11 +sb -e "$SAVER" "$@" ;;
-    esac
-    break
-done
+  --now      start immediately (ignores inhibitors, short input grace period)
+  --status   print configuration, monitors, inhibitors and idle time
 
-[ -n "$NERDSAVER_LOCK" ] && command -v ~/.local/bin/lock.sh >/dev/null 2>&1 && ~/.local/bin/lock.sh -n -c 000000
-exit 0
+SAVER ARGS are passed to nerdsaver, default: cycle 60
+Configuration file: ~/.config/nerdsaver/config (key = value)"""
+
+DEFAULTS = {
+    "opacity": "0.0",
+    "glyphs": "safe",
+    "terminal": "auto",
+    "monitors": "all",
+    "lock_cmd": "",
+    "lock_after": "300",
+    "inhibit_fullscreen": "yes",
+    "inhibit_audio": "no",
+    "inhibit_procs": "",
+    "mode": "nerdsaver",
+    "hide_cursor": "yes",
+    "eco_on_battery": "yes",
+    "nice": "10",
+    "pre_cmd": "",
+    "post_cmd": "",
+}
+
+VERBOSE = False
+
+
+def log(msg):
+    line = time.strftime("%H:%M:%S ") + msg
+    if VERBOSE:
+        print(line, file=sys.stderr, flush=True)
+    try:
+        if os.path.exists(LOGFILE) and os.path.getsize(LOGFILE) > 100000:
+            open(LOGFILE, "w").close()
+        with open(LOGFILE, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def yes(v):
+    return str(v).strip().lower() in ("1", "yes", "true", "on")
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONF) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip().strip('"')
+    except OSError:
+        pass
+    return cfg
+
+
+class SSInfo(ctypes.Structure):
+    _fields_ = [("window", ctypes.c_ulong), ("state", ctypes.c_int), ("kind", ctypes.c_int),
+                ("til_or_since", ctypes.c_ulong), ("idle", ctypes.c_ulong), ("event_mask", ctypes.c_ulong)]
+
+
+class X:
+    def __init__(s):
+        s.ok = False
+        s.xss = s.fixes = s.ext = None
+        s.hidden = False
+        try:
+            s.x11 = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+            s.x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            s.x11.XOpenDisplay.restype = ctypes.c_void_p
+            s.x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            s.x11.XDefaultRootWindow.restype = ctypes.c_ulong
+            s.x11.XFlush.argtypes = [ctypes.c_void_p]
+            s.x11.XResetScreenSaver.argtypes = [ctypes.c_void_p]
+            s.dpy = s.x11.XOpenDisplay(None)
+            if not s.dpy:
+                return
+            s.root = s.x11.XDefaultRootWindow(s.dpy)
+            s.ok = True
+        except Exception as e:
+            log("libX11 unavailable: %s" % e)
+            return
+        try:
+            s.xss = ctypes.CDLL(ctypes.util.find_library("Xss") or "libXss.so.1")
+            s.xss.XScreenSaverAllocInfo.restype = ctypes.POINTER(SSInfo)
+            s.xss.XScreenSaverQueryInfo.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(SSInfo)]
+            s.xss.XScreenSaverQueryInfo.restype = ctypes.c_int
+            s.info = s.xss.XScreenSaverAllocInfo()
+        except Exception as e:
+            log("libXss unavailable: %s" % e)
+            s.xss = None
+        try:
+            s.fixes = ctypes.CDLL(ctypes.util.find_library("Xfixes") or "libXfixes.so.3")
+            s.fixes.XFixesHideCursor.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            s.fixes.XFixesShowCursor.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        except Exception:
+            s.fixes = None
+        try:
+            s.ext = ctypes.CDLL(ctypes.util.find_library("Xext") or "libXext.so.6")
+            s.ext.DPMSInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ushort), ctypes.POINTER(ctypes.c_ubyte)]
+            s.ext.DPMSInfo.restype = ctypes.c_int
+        except Exception:
+            s.ext = None
+
+    def idle(s):
+        if s.ok and s.xss:
+            try:
+                s.xss.XScreenSaverQueryInfo(s.dpy, s.root, s.info)
+                return s.info.contents.idle / 1000.0
+            except Exception:
+                pass
+        try:
+            out = subprocess.run(["xprintidle"], capture_output=True, text=True, timeout=2).stdout.strip()
+            return int(out) / 1000.0
+        except Exception:
+            return None
+
+    def reset_saver(s):
+        if s.ok:
+            s.x11.XResetScreenSaver(s.dpy)
+            s.x11.XFlush(s.dpy)
+
+    def hide_cursor(s):
+        if s.ok and s.fixes and not s.hidden:
+            s.fixes.XFixesHideCursor(s.dpy, s.root)
+            s.x11.XFlush(s.dpy)
+            s.hidden = True
+
+    def show_cursor(s):
+        if s.ok and s.fixes and s.hidden:
+            s.fixes.XFixesShowCursor(s.dpy, s.root)
+            s.x11.XFlush(s.dpy)
+            s.hidden = False
+
+    def dpms_level(s):
+        if not (s.ok and s.ext):
+            return 0
+        lvl, st = ctypes.c_ushort(), ctypes.c_ubyte()
+        try:
+            if s.ext.DPMSInfo(s.dpy, ctypes.byref(lvl), ctypes.byref(st)) and st.value:
+                return lvl.value
+        except Exception:
+            pass
+        return 0
+
+
+class I3:
+    def __init__(s):
+        path = os.environ.get("I3SOCK")
+        if not path:
+            path = subprocess.check_output(["i3", "--get-socketpath"], text=True, timeout=3).strip()
+        s.sock = socket.socket(socket.AF_UNIX)
+        s.sock.settimeout(3)
+        s.sock.connect(path)
+
+    def close(s):
+        try:
+            s.sock.close()
+        except OSError:
+            pass
+
+    def recv(s, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = s.sock.recv(n - len(buf))
+            if not chunk:
+                raise OSError("i3 socket closed")
+            buf += chunk
+        return buf
+
+    def read(s):
+        head = s.recv(14)
+        ln, typ = struct.unpack("=II", head[6:])
+        body = s.recv(ln) if ln else b"null"
+        return typ, json.loads(body)
+
+    def request(s, typ, payload=b""):
+        s.sock.settimeout(3)
+        s.sock.sendall(b"i3-ipc" + struct.pack("=II", len(payload), typ) + payload)
+        while True:
+            t, data = s.read()
+            if not t & 0x80000000:
+                return data
+
+    def command(s, cmd):
+        return s.request(0, cmd.encode())
+
+    def workspaces(s):
+        return s.request(1)
+
+    def outputs(s):
+        return s.request(3)
+
+    def tree(s):
+        return s.request(4)
+
+    def subscribe(s, events):
+        return s.request(2, json.dumps(events).encode())
+
+    def wait_event(s, timeout, pred):
+        end = time.monotonic() + timeout
+        while True:
+            remain = end - time.monotonic()
+            if remain <= 0:
+                return None
+            s.sock.settimeout(remain)
+            try:
+                t, data = s.read()
+            except socket.timeout:
+                return None
+            if t & 0x80000000 and pred(data):
+                return data
+
+
+def command_ok(reply):
+    return isinstance(reply, list) and all(isinstance(r, dict) and r.get("success") for r in reply)
+
+
+def children(node):
+    return node.get("nodes", []) + node.get("floating_nodes", [])
+
+
+def find_focused(node):
+    if node.get("focused"):
+        return node
+    for c in children(node):
+        r = find_focused(c)
+        if r:
+            return r
+    return None
+
+
+def is_saver_window(node):
+    return "nerdsaver" in json.dumps(node.get("window_properties") or {}).lower()
+
+
+def fullscreen_windows(tree, visible):
+    found = []
+
+    def walk(n, ws):
+        if n.get("type") == "workspace":
+            ws = n.get("name")
+        if n.get("window") and n.get("fullscreen_mode") and ws in visible and not is_saver_window(n):
+            found.append(n)
+        for c in children(n):
+            walk(c, ws)
+
+    walk(tree, None)
+    return found
+
+
+def pgrep(pattern):
+    try:
+        return subprocess.run(["pgrep", "-x", pattern], capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+def audio_playing():
+    try:
+        out = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any(line.split("\t")[-1].strip() == "RUNNING" for line in out.splitlines() if line.strip())
+
+
+def on_battery():
+    for d in glob.glob("/sys/class/power_supply/BAT*"):
+        try:
+            if open(d + "/status").read().strip() == "Discharging":
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def inhibited(cfg):
+    if yes(cfg["inhibit_fullscreen"]):
+        try:
+            i3 = I3()
+            vis = {w["name"] for w in i3.workspaces() if w.get("visible")}
+            wins = fullscreen_windows(i3.tree(), vis)
+            i3.close()
+            if wins:
+                return "fullscreen window"
+        except Exception as e:
+            log("fullscreen check failed: %s" % e)
+    if yes(cfg["inhibit_audio"]) and audio_playing():
+        return "audio playing"
+    procs = cfg["inhibit_procs"].split()
+    if procs and pgrep("|".join(procs)):
+        return "inhibiting process running"
+    return None
+
+
+def locker_running():
+    return pgrep("i3lock|slock|xsecurelock|xtrlock|betterlockscreen")
+
+
+def lock_command(cfg):
+    cmd = cfg["lock_cmd"]
+    if not cmd:
+        script = os.path.join(HOME, ".local", "bin", "lock.sh")
+        cmd = script if os.access(script, os.X_OK) else "i3lock -n -c 282828"
+    return [os.path.expanduser(a) for a in shlex.split(cmd)]
+
+
+def start_lock(cfg):
+    if locker_running():
+        return True
+    try:
+        subprocess.Popen(lock_command(cfg), start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        log("lock failed: %s" % e)
+        return False
+    for _ in range(50):
+        time.sleep(0.05)
+        if locker_running():
+            break
+    time.sleep(0.3)
+    return True
+
+
+def find_terminal(cfg):
+    want = cfg["terminal"]
+    for t in ([want] if want != "auto" else ["alacritty", "kitty", "xterm", "st", "urxvt"]):
+        path = shutil.which(t)
+        if path:
+            return path
+    return None
+
+
+def term_cmd(term, opacity, argv):
+    base = os.path.basename(term)
+    if base == "alacritty":
+        return [term, "--class", "nerdsaver,nerdsaver", "-o", "window.opacity=%s" % opacity, "-e"] + argv
+    if base == "kitty":
+        return [term, "--class", "nerdsaver", "-o", "background_opacity=%s" % opacity,
+                "-o", "hide_window_decorations=yes", "-o", "confirm_os_window_close=0"] + argv
+    if base == "xterm":
+        return [term, "-class", "nerdsaver", "-name", "nerdsaver", "-bg", "black", "-fg", "green",
+                "-fa", "Monospace", "-fs", "11", "+sb", "-e"] + argv
+    if base == "st":
+        return [term, "-c", "nerdsaver", "-e"] + argv
+    return [term, "-e"] + argv
+
+
+def saver_path():
+    here = os.path.dirname(os.path.realpath(__file__))
+    for p in (os.path.join(here, "nerdsaver"), shutil.which("nerdsaver")):
+        if p and os.path.exists(p):
+            return p
+    raise RuntimeError("nerdsaver executable not found")
+
+
+def pick_targets(cfg, i3):
+    outs = [o for o in i3.outputs() if o.get("active") and not o.get("name", "").startswith("xroot")]
+    if not outs:
+        return [(None, "saver")]
+    mode = cfg["monitors"]
+    if mode == "focused":
+        ws = [w for w in i3.workspaces() if w.get("focused")]
+        return [(ws[0]["output"] if ws else outs[0]["name"], "saver")]
+    if mode == "primary":
+        prim = [o["name"] for o in outs if o.get("primary")] or [outs[0]["name"]]
+        return [(o["name"], "saver" if o["name"] in prim else "blank") for o in outs]
+    return [(o["name"], "saver") for o in outs]
+
+
+class Session:
+    def __init__(s, cfg, x, args, eco):
+        s.cfg, s.x, s.args, s.eco = cfg, x, args, eco
+        s.procs = []
+        s.focus = None
+        s.mode_set = False
+        s.frozen = False
+
+    def start(s):
+        cfg = s.cfg
+        term = find_terminal(cfg)
+        if not term:
+            raise RuntimeError("no terminal emulator found")
+        saver = saver_path()
+        env = dict(os.environ)
+        env["NERDSAVER_GLYPHS"] = cfg["glyphs"]
+        if s.eco:
+            env["NERDSAVER_ECO"] = "1"
+        if cfg["pre_cmd"]:
+            subprocess.run(cfg["pre_cmd"], shell=True)
+        targets = [(None, "saver")]
+        i3 = ev = None
+        try:
+            i3 = I3()
+            focused = find_focused(i3.tree())
+            s.focus = focused["id"] if focused else None
+            targets = pick_targets(cfg, i3)
+            s.mode_set = command_ok(i3.command('mode "%s"' % cfg["mode"]))
+            if not s.mode_set:
+                log('i3 binding mode "%s" is not defined: keybindings stay active' % cfg["mode"])
+            ev = I3()
+            ev.subscribe(["window"])
+        except Exception as e:
+            log("i3 unavailable, using a single plain window: %s" % e)
+            i3 = ev = None
+        nice = int(cfg["nice"] or 0)
+        windows = []
+        for out, kind in targets:
+            argv = [saver] + (s.args if kind == "saver" else ["blank"])
+            p = subprocess.Popen(term_cmd(term, cfg["opacity"], argv), env=env, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                                 preexec_fn=(lambda: os.nice(nice)) if nice else None)
+            s.procs.append(p)
+            if ev:
+                data = ev.wait_event(5.0, lambda d: d.get("change") == "new" and is_saver_window(d.get("container", {})))
+                if data:
+                    windows.append((data["container"]["id"], out))
+                else:
+                    log("saver window did not appear in time")
+        if i3:
+            for cid, out in windows:
+                chain = "[con_id=%d] fullscreen disable, floating enable, border none" % cid
+                if out:
+                    chain += ', move to output "%s"' % out
+                chain += ", fullscreen enable"
+                i3.command(chain)
+            i3.close()
+        if ev:
+            ev.close()
+        if yes(cfg["hide_cursor"]):
+            s.x.hide_cursor()
+
+    def alive(s):
+        return any(p.poll() is None for p in s.procs)
+
+    def signal_all(s, sig):
+        for p in s.procs:
+            if p.poll() is None:
+                try:
+                    os.killpg(p.pid, sig)
+                except OSError:
+                    pass
+
+    def freeze(s):
+        if not s.frozen:
+            s.signal_all(signal.SIGSTOP)
+            s.frozen = True
+
+    def stop(s):
+        s.signal_all(signal.SIGCONT)
+        s.signal_all(signal.SIGTERM)
+        end = time.monotonic() + 1.5
+        while time.monotonic() < end and s.alive():
+            time.sleep(0.05)
+        s.signal_all(signal.SIGKILL)
+        for p in s.procs:
+            try:
+                p.wait(timeout=1)
+            except Exception:
+                pass
+        s.x.show_cursor()
+        try:
+            i3 = I3()
+            i3.command('mode "default"')
+            if s.focus:
+                i3.command("[con_id=%d] focus" % s.focus)
+            i3.close()
+        except Exception:
+            pass
+        if s.cfg["post_cmd"]:
+            subprocess.run(s.cfg["post_cmd"], shell=True)
+
+
+def run_saver(cfg, x, args, grace, check_inhibit):
+    if locker_running():
+        log("screen is already locked, not starting")
+        return 0
+    if check_inhibit:
+        why = inhibited(cfg)
+        if why:
+            log("inhibited: %s" % why)
+            x.reset_saver()
+            return 0
+    eco = yes(cfg["eco_on_battery"]) and on_battery()
+    lock_after = float(cfg["lock_after"] or 0)
+    sess = Session(cfg, x, args, eco)
+    try:
+        log("starting saver (%s)%s" % (" ".join(args), " eco" if eco else ""))
+        sess.start()
+        if grace:
+            time.sleep(grace)
+        base_idle, base_t = x.idle(), time.monotonic()
+        last_dpms = 0.0
+        while True:
+            time.sleep(0.25)
+            now = time.monotonic()
+            idle = x.idle()
+            if idle is not None and base_idle is not None:
+                if idle < base_idle + (now - base_t) - 0.6:
+                    log("activity detected")
+                    break
+            base_idle, base_t = idle, now
+            if not sess.alive():
+                log("saver windows closed")
+                break
+            if lock_after > 0 and idle is not None and idle >= lock_after:
+                log("lock after %ds idle" % lock_after)
+                start_lock(cfg)
+                break
+            if now - last_dpms > 1.5:
+                last_dpms = now
+                if x.dpms_level() > 0:
+                    sess.freeze()
+                elif sess.frozen:
+                    break
+    except Exception as e:
+        log("session error: %r" % e)
+    finally:
+        sess.stop()
+    return 0
+
+
+def status(cfg, x):
+    print("config file:  %s%s" % (CONF, "" if os.path.exists(CONF) else "  (not present, defaults)"))
+    for k in DEFAULTS:
+        print("  %-20s %s" % (k, cfg[k]))
+    print("terminal:     %s" % find_terminal(cfg))
+    print("nerdsaver:    %s" % saver_path())
+    print("X display:    %s (xss=%s fixes=%s dpms=%s)" % (os.environ.get("DISPLAY"), bool(x.xss), bool(x.fixes), bool(x.ext)))
+    print("idle:         %s s" % x.idle())
+    print("dpms level:   %s" % x.dpms_level())
+    print("on battery:   %s" % on_battery())
+    print("lock command: %s" % " ".join(lock_command(cfg)))
+    try:
+        i3 = I3()
+        print("i3 outputs:   %s" % ", ".join("%s(%s)" % (n, k) for n, k in pick_targets(cfg, i3)))
+        i3.close()
+    except Exception as e:
+        print("i3:           unavailable (%s)" % e)
+    print("inhibited:    %s" % (inhibited(cfg) or "no"))
+    print("locker:       %s" % ("running" if locker_running() else "not running"))
+    return 0
+
+
+def main(argv):
+    global VERBOSE
+    args = argv[1:]
+    flags = set()
+    while args and args[0] in ("--now", "--status", "--verbose", "--help", "-h"):
+        flags.add(args.pop(0))
+    if "--help" in flags or "-h" in flags:
+        print(USAGE)
+        return 0
+    VERBOSE = "--verbose" in flags
+    cfg = load_config()
+    x = X()
+    if "--status" in flags:
+        return status(cfg, x)
+    if not x.ok:
+        log("cannot open X display")
+        print("nerdsaver-launch: cannot open X display", file=sys.stderr)
+        return 1
+    fd = os.open(LOCKFILE, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return 0
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, lambda *_: sys.exit(0))
+    if not args:
+        args = ["cycle", "60"]
+    now_mode = "--now" in flags
+    return run_saver(cfg, x, args, 1.2 if now_mode else 0.3, not now_mode)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
