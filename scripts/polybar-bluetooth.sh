@@ -1,119 +1,127 @@
-#!/bin/bash
-# Simple Bluetooth Manager - Static List
+#!/usr/bin/env bash
+# Bluetooth status (polybar) and device menu (rofi)
+# Usage: polybar-bluetooth.sh [--status|--debug]
+set -u
+
+ICON=$'\uf293'
+C_OFF="#a89984"
+C_ON="#458588"
+THEME="$HOME/.config/rofi/config.rasi"
+
+notify() { notify-send "$@" >/dev/null 2>&1; }
+
+powered() { bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; }
+
+# "MAC Name" lines of connected devices
+connected_devices() {
+    bluetoothctl devices Connected 2>/dev/null | sed -n 's/^Device //p'
+}
 
 bt_status() {
-    local connected=$(bluetoothctl info 2>/dev/null | grep "Name:" | cut -d' ' -f2- | head -1)
-    if [[ -z "$connected" ]]; then
-        echo "%{F#a89984}%{F-}"
+    if ! powered; then
+        echo "%{F$C_OFF}$ICON%{F-}"
+        return
+    fi
+    local list count first
+    list=$(connected_devices)
+    if [[ -z "$list" ]]; then
+        echo "%{F$C_OFF}$ICON%{F-}"
+        return
+    fi
+    count=$(wc -l <<< "$list")
+    first=$(head -n1 <<< "$list" | cut -d' ' -f2-)
+    if (( count > 1 )); then
+        echo "%{F$C_ON}$ICON%{F-} $first +$((count - 1))"
     else
-        echo "%{F#458588}%{F-} $connected"
+        echo "%{F$C_ON}$ICON%{F-} $first"
     fi
 }
 
-# List known paired devices - multiple fallback methods
-scan_devices() {
+# Paired devices ("MAC Name"); falls back to a short scan if nothing is known
+list_devices() {
+    local devices
+    devices=$(bluetoothctl devices Paired 2>/dev/null | sed -n 's/^Device //p')
+    if [[ -z "$devices" ]]; then
+        notify "Bluetooth" "No paired devices, scanning for 5s..."
+        bluetoothctl --timeout 5 scan on >/dev/null 2>&1
+        devices=$(bluetoothctl devices 2>/dev/null | sed -n 's/^Device //p')
+    fi
+    printf '%s\n' "$devices" | sed '/^$/d'
+}
+
+wait_connected() {
+    local mac=$1 _
+    for _ in {1..10}; do
+        bluetoothctl info "$mac" 2>/dev/null | grep -q 'Connected: yes' && return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+case "${1:-}" in
+    --status)
+        bt_status
+        exit 0
+        ;;
+    --debug)
+        echo "=== Controller ==="; bluetoothctl show 2>&1 | grep -E 'Powered|Discoverable'
+        echo "=== Paired ===";     bluetoothctl devices Paired 2>&1
+        echo "=== Connected ===";  bluetoothctl devices Connected 2>&1
+        exit 0
+        ;;
+esac
+
+if ! powered; then
     bluetoothctl power on >/dev/null 2>&1
-    
-    # Method 1: Try paired-devices first
-    local devices=$(bluetoothctl paired-devices 2>/dev/null | grep "Device ")
-    
-    # Method 2: Fallback to 'devices' command if paired-devices is empty
-    if [[ -z "$devices" ]]; then
-        devices=$(bluetoothctl devices 2>/dev/null | grep "Device ")
-    fi
-    
-    # Method 3: Last resort - try to list with bluetoothctl list and scan briefly
-    if [[ -z "$devices" ]]; then
-        bluetoothctl scan on >/dev/null 2>&1 &
-        local scan_pid=$!
-        sleep 3  # Quick 3-second scan
-        kill $scan_pid >/dev/null 2>&1
-        bluetoothctl scan off >/dev/null 2>&1
-        sleep 1
-        devices=$(bluetoothctl devices 2>/dev/null | grep "Device ")
-    fi
-    
-    # Process found devices
-    if [[ -n "$devices" ]]; then
-        echo "$devices" | while read -r line; do
-            local mac=$(echo "$line" | cut -d' ' -f2)
-            local name=$(echo "$line" | cut -d' ' -f3-)
-            local connected="disconnected"
-            
-            if bluetoothctl info "$mac" 2>/dev/null | grep -q "Connected: yes"; then
-                connected="connected"
-            fi
-            
-            echo "$name ($mac) [$connected]"
-        done | sort
-    fi
-}
-
-# Simple connect
-connect_device() {
-    local device_info="$1"
-    local name=$(echo "$device_info" | sed 's/ *(.*) \[.*\]//')
-    local mac=$(echo "$device_info" | sed 's/.*(\([^)]*\)).*/\1/')
-    local status=$(echo "$device_info" | sed 's/.*\[\([^]]*\)\].*/\1/')
-    
-    [[ -z "$mac" ]] && return 1
-    
-    # If already connected, do nothing
-    if [[ "$status" == "connected" ]]; then
-        notify-send "Bluetooth" "$name is already connected" >/dev/null 2>&1
-        return 0
-    fi
-    
-    notify-send "Bluetooth" "Connecting to $name..." >/dev/null 2>&1
-    
-    bluetoothctl connect "$mac" >/dev/null 2>&1
-    
-    sleep 3
-    if bluetoothctl info "$mac" 2>/dev/null | grep -q "Connected: yes"; then
-        notify-send "Bluetooth" "Connected to $name" >/dev/null 2>&1
-    else
-        notify-send "Bluetooth Error" "Failed to connect to $name" -u critical >/dev/null 2>&1
-    fi
-}
-
-# Main
-if [[ "${1:-}" == "--status" ]]; then
-    bt_status
-    exit 0
+    sleep 1
+    powered || { notify -u critical "Bluetooth Error" "Bluetooth is off (try bluetooth-toggle.sh)"; exit 1; }
 fi
 
-if [[ "${1:-}" == "--debug" ]]; then
-    echo "=== DEBUG INFO ==="
-    echo "Bluetooth power status:"
-    bluetoothctl show 2>/dev/null | grep -E "(Power|Powered)"
-    echo ""
-    echo "Paired devices:"
-    bluetoothctl paired-devices 2>/dev/null || echo "No paired devices or command failed"
-    echo ""
-    echo "All devices:"
-    bluetoothctl devices 2>/dev/null || echo "No devices or command failed"
-    echo ""
-    echo "=== SCAN RESULT ==="
-    scan_devices
-    exit 0
-fi
-
-# Scan once
-devices=$(scan_devices)
-
-if [[ -z "$devices" ]]; then
-    notify-send "Bluetooth Error" "No devices found" -u critical >/dev/null 2>&1
-    echo "Debug with: $0 --debug"
+mapfile -t DEVICES < <(list_devices)
+if (( ${#DEVICES[@]} == 0 )); then
+    notify -u critical "Bluetooth Error" "No devices found (see: $0 --debug)"
     exit 1
 fi
 
-# Show menu once
-chosen=$(echo -e "$devices" | rofi -dmenu -i -p "" \
-    -mesg "BLUETOOTH MANAGER" \
+CONNECTED=$(connected_devices | cut -d' ' -f1)
+
+LABELS=()
+for line in "${DEVICES[@]}"; do
+    mac=${line%% *}
+    name=${line#* }
+    if grep -qx "$mac" <<< "$CONNECTED"; then
+        LABELS+=("● $name")
+    else
+        LABELS+=("○ $name")
+    fi
+done
+
+IDX=$(printf '%s\n' "${LABELS[@]}" | rofi -dmenu -i -p "" -format i \
+    -theme "$THEME" \
+    -mesg "BLUETOOTH  (● connected: select to disconnect)" \
     -theme-str 'window { width: 30%; }' \
-    -theme-str 'listview { lines: 10; }' \
-    -theme ~/.config/rofi/config.rasi)
+    -theme-str 'listview { lines: 10; }')
 
-[[ -z "$chosen" ]] && exit 0
+[[ -z "$IDX" ]] && exit 0
 
-connect_device "$chosen"
+line=${DEVICES[$IDX]}
+mac=${line%% *}
+name=${line#* }
+
+if grep -qx "$mac" <<< "$CONNECTED"; then
+    if bluetoothctl disconnect "$mac" >/dev/null 2>&1; then
+        notify "Bluetooth" "Disconnected from $name"
+    else
+        notify -u critical "Bluetooth Error" "Failed to disconnect from $name"
+    fi
+    exit 0
+fi
+
+notify "Bluetooth" "Connecting to $name..."
+bluetoothctl connect "$mac" >/dev/null 2>&1
+if wait_connected "$mac"; then
+    notify "Bluetooth" "Connected to $name"
+else
+    notify -u critical "Bluetooth Error" "Failed to connect to $name"
+    exit 1
+fi
