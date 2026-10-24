@@ -9,9 +9,13 @@ import os
 import random
 import re
 import shutil
+import shlex
 import signal
+import subprocess
 import sys
+import threading
 import time
+import unicodedata
 import uuid
 from bisect import bisect_left
 from collections import deque
@@ -21,17 +25,24 @@ try:
 except Exception:
     np = None
 
-USAGE = """usage: nerdsaver [list | random | cycle [seconds] | NAME ...]
+USAGE = """usage: nerdsaver [list | random | cycle [seconds] [NAME ...] | NAME ...]
 
-  list         show all screensavers
-  random       pick one at random (default)
-  cycle [sec]  rotate through all of them (default 60 s)
-  NAME ...     run one, or rotate through the given names
+  list                  show all screensavers
+  random                pick one at random (default)
+  cycle [sec]           rotate through all of them in random order (default 60 s)
+  cycle [sec] NAME ...  loop the given names in exactly this order
+  NAME ...              run one, or loop the given names in this order (60 s each)
 
 Any key ends the screensaver.
+The pixel savers (blackhole planet aurora abyss flyover music) need numpy and look best in a
+truecolor terminal. 'music' captures the speaker output with parec or pw-record, the track title
+comes from playerctl.
 Environment:
   NERDSAVER_ECO=1                       halves the frame rate (battery mode)
-  NERDSAVER_GLYPHS=safe|katakana|ascii  matrix glyph set (default: safe)"""
+  NERDSAVER_GLYPHS=safe|katakana|ascii  matrix glyph set (default: safe)
+  NERDSAVER_COLORS=24bit|256|16         color depth of the pixel savers (default: auto-detect)
+  NERDSAVER_AUDIO=CMD                   audio capture command for 'music' (raw s16le, 44.1 kHz, stereo)
+  NERDSAVER_TRANSPARENT=1               pixel savers show the (transparent) terminal background in black areas"""
 
 ECO = os.environ.get("NERDSAVER_ECO") == "1"
 
@@ -119,6 +130,437 @@ def put(scr, y, x, s, attr=0):
         scr.addstr(y, x, s, attr)
     except curses.error:
         pass
+
+
+def runs(scr, y, x, row, chars, attrs):
+    # draw a row of level codes, batching neighbouring cells with the same attribute into one addstr
+    for a, grp in itertools.groupby(row, attrs.__getitem__):
+        txt = "".join(map(chars.__getitem__, grp))
+        try:
+            scr.addstr(y, x, txt, a)
+        except curses.error:
+            pass
+        x += len(txt)
+
+
+def blit_np(scr, codes, prev, charr, akey, attrs):
+    # numpy variant of runs() for a whole screen of 1-char codes; only redraws rows that changed
+    H, W = codes.shape
+    changed = range(H) if prev is None else np.flatnonzero((codes != prev).any(axis=1)).tolist()
+    keys = akey[codes]
+    for y in changed:
+        txt = "".join(charr[codes[y]].tolist())
+        kr = keys[y]
+        krl = kr.tolist()
+        a = 0
+        for b in (np.flatnonzero(kr[1:] != kr[:-1]) + 1).tolist() + [W]:
+            try:
+                scr.addstr(y, a, txt[a:b], attrs[krl[a]])
+            except curses.error:
+                pass
+            a = b
+    return codes
+
+
+# ---------------------------------------------------------------- pixel engine
+# Pixel savers render an RGB float framebuffer (2*rows x cols x 3, values 0..1) with numpy. Pix turns it
+# into half-block cells (two pixels per cell) and writes raw ANSI escapes, which allows 24-bit color and
+# unlimited fg/bg combinations. Only changed cells are sent. Black is painted explicitly, so the picture
+# stays opaque in a transparent terminal (NERDSAVER_TRANSPARENT=1 uses the terminal background instead).
+
+BAYER4 = (0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
+ANSI16 = ((0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0), (0, 0, 238), (205, 0, 205), (0, 205, 205),
+          (229, 229, 229), (127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0), (92, 92, 255),
+          (255, 0, 255), (0, 255, 255), (255, 255, 255))
+LUTS = {}
+
+
+def color_depth():
+    v = os.environ.get("NERDSAVER_COLORS", "").lower()
+    if v in ("24bit", "256", "16"):
+        return v
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        return "24bit"
+    if re.search(r"kitty|alacritty|wezterm|foot|ghostty|direct", os.environ.get("TERM", "")):
+        return "24bit"
+    return "256" if curses.COLORS >= 256 else "16"
+
+
+def palette_lut(depth):
+    # 15-bit rgb (5 bits per channel) -> terminal color index, 0 = terminal background
+    if depth in LUTS:
+        return LUTS[depth]
+    v = np.arange(32) * 255.0 / 31
+    r, g, b = np.meshgrid(v, v, v, indexing="ij")
+    rgb = np.stack([r.ravel(), g.ravel(), b.ravel()], 1)
+    if depth == "16":
+        pal = np.array(ANSI16, float)
+        idx = np.argmin(((rgb[:, None, :] - pal[None]) ** 2).sum(2), 1)
+    else:
+        lv = np.array([0, 95, 135, 175, 215, 255], float)
+        ci = np.argmin(np.abs(rgb[:, :, None] - lv), 2)
+        gi = np.clip(np.round((rgb.mean(1) - 8) / 10), 0, 23)
+        dc = ((rgb - lv[ci]) ** 2).sum(1)
+        dg = ((rgb - (8 + 10 * gi)[:, None]) ** 2).sum(1)
+        idx = np.where(dg < dc, 232 + gi, 16 + 36 * ci[:, 0] + 6 * ci[:, 1] + ci[:, 2])
+        idx[idx == 16] = 0
+    LUTS[depth] = idx = idx.astype(np.int64)
+    return idx
+
+
+class Pix:
+    def __init__(s, scr, dither=None):
+        scr.erase()
+        scr.refresh()
+        s.scr = scr
+        s.rows, s.cols = scr.getmaxyx()
+        s.H, s.W = 2 * s.rows, s.cols
+        s.depth = color_depth()
+        # code 0 (black) as background: opaque black, or the terminal's own (possibly transparent) background
+        if os.environ.get("NERDSAVER_TRANSPARENT") == "1":
+            s.bg0 = "\x1b[49m"
+        else:
+            s.bg0 = {"24bit": "\x1b[48;2;0;0;0m", "256": "\x1b[48;5;16m", "16": "\x1b[40m"}[s.depth]
+        s.lut = None if s.depth == "24bit" else palette_lut(s.depth)
+        s.lv = 63 if s.lut is None else 31
+        if dither is None:
+            dither = s.lut is not None
+        if dither:
+            yy, xx = np.mgrid[0:s.H, 0:s.W]
+            s.dith = ((np.array(BAYER4).reshape(4, 4)[yy & 3, xx & 3] + 0.5) / 16.0)[..., None]
+        else:
+            s.dith = 0.5
+        s.cut = 4.5 / 255
+        s.prev = None
+        s.txt = {}
+        s.tcol = {}
+        s.fgc, s.bgc = {}, {}
+        s.write("\x1b[0m\x1b[2J")
+
+    def write(s, data):
+        b = data.encode("utf-8", "replace")
+        while b:
+            try:
+                b = b[os.write(1, b):]
+            except BlockingIOError:
+                time.sleep(0.002)
+            except OSError:
+                return
+
+    def close(s):
+        s.write("\x1b[0m\x1b[2J")
+        s.scr.clear()
+
+    def codes(s, rgb, dith=None):
+        lv = s.lv
+        q = np.clip(rgb * lv + (s.dith if dith is None else dith), 0, lv).astype(np.int64)
+        if s.lut is None:
+            c = (q[..., 0] << 12) | (q[..., 1] << 6) | q[..., 2]
+        else:
+            c = s.lut[(q[..., 0] << 10) | (q[..., 1] << 5) | q[..., 2]]
+        return np.where(rgb.max(-1) < s.cut, 0, c)
+
+    def esc(s, c, bg):
+        if s.lut is None:
+            r, g, b = ((c >> 12) * 255 + 31) // 63, (((c >> 6) & 63) * 255 + 31) // 63, ((c & 63) * 255 + 31) // 63
+            e = "\x1b[%d;2;%d;%d;%dm" % (48 if bg else 38, r, g, b)
+        elif s.depth == "256":
+            e = "\x1b[%d;5;%dm" % (48 if bg else 38, c)
+        else:
+            e = "\x1b[%dm" % ((40 if bg else 30) + c if c < 8 else (100 if bg else 90) + c - 8)
+        (s.bgc if bg else s.fgc)[c] = e
+        return e
+
+    def text(s, y, x, txt, rgb):
+        # queue text for the next show(); the cell background is a darkened copy of the pixels below
+        if not 0 <= y < s.rows:
+            return x
+        key = tuple(rgb)
+        fg = s.tcol.get(key)
+        if fg is None:
+            fg = s.tcol[key] = int(s.codes(np.array(rgb, float), 0.5))
+            if len(s.tcol) > 4096:
+                s.tcol.clear()
+        for ch in unicodedata.normalize("NFC", txt):
+            if unicodedata.combining(ch):
+                p = s.txt.get((y, x - 1))
+                if p and p[2] == 1:
+                    s.txt[(y, x - 1)] = (p[0] + ch, p[1], 1)
+                continue
+            if ch < " ":
+                continue
+            w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            if 0 <= x and x + w <= s.cols:
+                s.txt[(y, x)] = (ch, fg, w)
+                if w == 2:
+                    s.txt[(y, x + 1)] = ("\0" + ch, fg, 0)
+            x += w
+        return x
+
+    def show(s, rgb):
+        c = s.codes(rgb)
+        top, bot = c[0::2], c[1::2]
+        key = (top << 20) | bot
+        tx, s.txt = s.txt, {}
+        tcells = {}
+        if tx:
+            ks = list(tx)
+            ys = np.array([k[0] for k in ks])
+            xs = np.array([k[1] - (tx[k][2] == 0) for k in ks])
+            bgs = s.codes((rgb[2 * ys, xs] + rgb[2 * ys + 1, xs]) * 0.3, 0.5).tolist()
+            for k, bgc in zip(ks, bgs):
+                ch, fg, w = tx[k]
+                key[k] = (1 << 62) | ((hash(ch) & 0xFFFFF) << 40) | (fg << 20) | bgc
+                tcells[k[0] * s.cols + k[1]] = (ch, fg, bgc, w)
+        prev, s.prev = s.prev, key
+        diff = np.ones(key.shape, bool) if prev is None or prev.shape != key.shape else key != prev
+        idx = np.flatnonzero(diff.ravel())
+        if not idx.size:
+            return
+        t, b = top.ravel()[idx], bot.ravel()[idx]
+        both0 = (t == 0) & (b == 0)
+        same = (t == b) & ~both0
+        F = np.where(both0, -1, np.where(t != 0, t, b))
+        G = np.where(same, -1, np.where((t == 0) | (b == 0), 0, b))
+        chi = np.where(both0, 0, np.where(same, 1, np.where(t == 0, 3, 2)))
+        wid = np.ones(idx.size, np.int64)
+        chars = [" ", "\u2588", "\u2580", "\u2584"]
+        if tcells:
+            tc = np.array(sorted(tcells))
+            pos = np.searchsorted(idx, tc)
+            pos = pos[(pos < idx.size) & (idx[np.minimum(pos, idx.size - 1)] == tc)]
+            drop = []
+            for i in pos.tolist():
+                ch, fg, bgc, w = tcells[int(idx[i])]
+                if w == 0:
+                    drop.append(i)
+                    continue
+                F[i], G[i], wid[i] = fg, bgc, w
+                chi[i] = len(chars)
+                chars.append(ch)
+            if drop:
+                keep = np.ones(idx.size, bool)
+                keep[drop] = False
+                idx, F, G, chi, wid = idx[keep], F[keep], G[keep], chi[keep], wid[keep]
+        n = idx.size
+        W = s.cols
+        row = idx // W
+        jump = np.ones(n, bool)
+        jump[1:] = (row[1:] != row[:-1]) | (idx[1:] != idx[:-1] + wid[:-1])
+        newrow = np.ones(n, bool)
+        newrow[1:] = row[1:] != row[:-1]
+        ar = np.arange(n)
+
+        def need(V):
+            last = np.maximum.accumulate(np.where(V >= 0, ar, -1))
+            pl = np.empty(n, np.int64)
+            pl[0] = -1
+            pl[1:] = last[:-1]
+            return (V >= 0) & (V != np.where(pl >= 0, V[np.maximum(pl, 0)], -2))
+
+        parts = np.array(chars, dtype=object)[chi]
+        for V, cache, bg in ((G, s.bgc, 1), (F, s.fgc, 0)):
+            sel = np.flatnonzero(need(V))
+            if sel.size:
+                u, inv = np.unique(V[sel], return_inverse=True)
+                es = [cache[k] if k in cache else (s.bg0 if bg and k == 0 else s.esc(k, bg)) for k in u.tolist()]
+                parts[sel] = np.array(es, dtype=object)[inv] + parts[sel]
+        js = np.flatnonzero(jump)
+        if js.size:
+            cols = (idx[js] % W + 1).tolist()
+            rows = (row[js] + 1).tolist()
+            nr = newrow[js].tolist()
+            parts[js] = np.array(["\x1b[%d;%dH" % (r, x) if f else "\x1b[%dG" % x for r, x, f in zip(rows, cols, nr)],
+                                 dtype=object) + parts[js]
+        if len(s.fgc) + len(s.bgc) > 300000:
+            s.fgc.clear()
+            s.bgc.clear()
+        s.write("\x1b[?2026h" + "".join(parts.tolist()) + "\x1b[0m\x1b[?2026l")
+
+
+def box_blur(a, r):
+    # separable box blur with clamped edges (two calls approximate a gaussian)
+    if r < 1:
+        return a
+    n = 2 * r + 1
+    c = np.cumsum(np.pad(a, ((r + 1, r), (0, 0)) + ((0, 0),) * (a.ndim - 2), mode="edge"), 0)
+    a = (c[n:] - c[:-n]) / n
+    c = np.cumsum(np.pad(a, ((0, 0), (r + 1, r)) + ((0, 0),) * (a.ndim - 2), mode="edge"), 1)
+    return (c[:, n:] - c[:, :-n]) / n
+
+
+def bloom(img, thr, r, k):
+    # glow around bright parts: blur a half resolution bright pass and add it back
+    H, W = img.shape[:2]
+    b = np.maximum(img[: H & ~1, : W & ~1] - thr, 0)
+    b = (b[0::2, 0::2] + b[1::2, 0::2] + b[0::2, 1::2] + b[1::2, 1::2]) * 0.25
+    r = max(1, r // 2)
+    b = box_blur(box_blur(b, r), r).repeat(2, 0).repeat(2, 1)
+    out = img.copy()
+    out[: H & ~1, : W & ~1] += k * b
+    return out
+
+
+def soft(img, r):
+    # cheap wide blur: half resolution box blur, upsampled
+    H, W = img.shape[:2]
+    b = img[: H & ~1, : W & ~1]
+    b = (b[0::2, 0::2] + b[1::2, 0::2] + b[0::2, 1::2] + b[1::2, 1::2]) * 0.25
+    r = max(1, r // 2)
+    b = box_blur(box_blur(b, r), r).repeat(2, 0).repeat(2, 1)
+    out = np.zeros_like(img)
+    out[: H & ~1, : W & ~1] = b
+    return out
+
+
+def tonemap(img, exposure=1.0):
+    return 1.0 - np.exp(-np.maximum(img, 0) * exposure)
+
+
+def ntab(seed):
+    return np.random.default_rng(seed).random(4096).astype(np.float32)
+
+
+def _hsh(a, b, c=0):
+    h = a * 374761393 + b * 668265263 + c * 1440662683
+    h = (h ^ (h >> 13)) * 1274126177
+    return (h ^ (h >> 16)) & 4095
+
+
+def noise2(tab, x, y, px=0, py=0):
+    # value noise in [0, 1], optionally periodic with integer periods px / py
+    xi, yi = np.floor(x), np.floor(y)
+    fx, fy = x - xi, y - yi
+    x0, y0 = xi.astype(np.int64), yi.astype(np.int64)
+    x1, y1 = x0 + 1, y0 + 1
+    if px:
+        x0, x1 = x0 % px, x1 % px
+    if py:
+        y0, y1 = y0 % py, y1 % py
+    ux, uy = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy)
+    a, b, c, d = tab[_hsh(x0, y0)], tab[_hsh(x1, y0)], tab[_hsh(x0, y1)], tab[_hsh(x1, y1)]
+    return a + (b - a) * ux + (c - a + (a - b + d - c) * ux) * uy
+
+
+def fbm2(tab, x, y, octaves=5, px=0, py=0, gain=0.5):
+    tot, amp, norm = 0.0, 1.0, 0.0
+    for o in range(octaves):
+        f = 1 << o
+        tot = tot + amp * noise2(tab, x * f + o * 17.3, y * f + o * 9.1, px * f, py * f)
+        norm += amp
+        amp *= gain
+    return tot / norm
+
+
+def noise3(tab, x, y, z):
+    xi, yi, zi = np.floor(x), np.floor(y), np.floor(z)
+    fx, fy, fz = x - xi, y - yi, z - zi
+    x0, y0, z0 = xi.astype(np.int64), yi.astype(np.int64), zi.astype(np.int64)
+    ux, uy, uz = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy), fz * fz * (3 - 2 * fz)
+    r = []
+    for dz in (0, 1):
+        a, b = tab[_hsh(x0, y0, z0 + dz)], tab[_hsh(x0 + 1, y0, z0 + dz)]
+        c, d = tab[_hsh(x0, y0 + 1, z0 + dz)], tab[_hsh(x0 + 1, y0 + 1, z0 + dz)]
+        r.append(a + (b - a) * ux + (c - a + (a - b + d - c) * ux) * uy)
+    return r[0] + (r[1] - r[0]) * uz
+
+
+def fbm3(tab, x, y, z, octaves=5, gain=0.5, ridged=False):
+    tot, amp, norm = 0.0, 1.0, 0.0
+    for o in range(octaves):
+        f = float(1 << o)
+        n = noise3(tab, x * f + o * 3.7, y * f - o * 5.3, z * f + o * 1.9)
+        if ridged:
+            n = 1.0 - np.abs(2.0 * n - 1.0)
+            n = n * n
+        tot = tot + amp * n
+        norm += amp
+        amp *= gain
+    return tot / norm
+
+
+def ramp(stops, t):
+    # piecewise linear color ramp: stops = [(pos, (r, g, b)), ...] sorted by pos, t: array -> (..., 3)
+    pos = np.array([p for p, _ in stops], np.float32)
+    cols = np.array([c for _, c in stops], np.float32)
+    t = np.clip(t, pos[0], pos[-1])
+    return np.stack([np.interp(t, pos, cols[:, i]) for i in range(3)], -1).astype(np.float32)
+
+
+def smooth(e0, e1, x):
+    t = np.clip((x - e0) / (e1 - e0), 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def blackbody(t):
+    # rough color of a black body, t in kelvin / 1000 (array), normalized to max channel 1
+    t = np.clip(t, 1.0, 40.0)
+    hot = np.maximum(t * 10 - 60, 1e-3)
+    r = np.where(t < 6.6, 1.0, np.clip(1.292936 * hot ** -0.1332047, 0, 1))
+    g = np.where(t < 6.6, np.clip(0.390082 * np.log(t * 10) - 0.631841, 0, 1),
+                 np.clip(1.129891 * hot ** -0.0755148, 0, 1))
+    b = np.where(t >= 6.6, 1.0, np.where(t < 1.9, 0.0, np.clip(0.543207 * np.log(np.maximum(t * 10 - 10, 1e-3)) - 1.196254, 0, 1)))
+    return np.stack([r, g, b], -1).astype(np.float32)
+
+
+SPEC_F2 = {}
+
+
+def specnoise(h, w, beta, rng, aniso=1.0, lo=0.0):
+    # gaussian random field with a 1/f^beta power spectrum (periodic), zero mean, unit variance
+    key = (h, w, aniso)
+    f2 = SPEC_F2.get(key)
+    if f2 is None:
+        fy = (np.fft.fftfreq(h) * aniso).astype(np.float32)[:, None]
+        fx = np.fft.rfftfreq(w).astype(np.float32)[None, :]
+        f2 = fx * fx + fy * fy
+        f2[0, 0] = 1.0
+        SPEC_F2.clear()
+        SPEC_F2[key] = f2
+    amp = f2 ** np.float32(-beta / 4.0)
+    if lo:
+        amp *= 1 - np.exp(-f2 / np.float32(lo * lo))
+    amp[0, 0] = 0
+    re_ = rng.standard_normal(amp.shape, dtype=np.float32)
+    im_ = rng.standard_normal(amp.shape, dtype=np.float32)
+    n = np.fft.irfft2((re_ * amp) + 1j * (im_ * amp), s=(h, w))
+    return ((n - n.mean()) / (n.std() + 1e-12)).astype(np.float32)
+
+
+def specnoise1(n, beta, rng):
+    f = np.fft.rfftfreq(n)
+    f[0] = 1.0
+    amp = f ** (-beta / 2.0)
+    amp[0] = 0
+    x = np.fft.irfft(amp * (rng.standard_normal(f.size) + 1j * rng.standard_normal(f.size)), n)
+    return ((x - x.mean()) / (x.std() + 1e-12)).astype(np.float32)
+
+
+def hsv(h, s_, v):
+    # vectorised hsv -> rgb, h in turns
+    h = (np.asarray(h) % 1.0) * 6
+    i = np.floor(h).astype(int) % 6
+    f = h - np.floor(h)
+    p, q, t = v * (1 - s_), v * (1 - s_ * f), v * (1 - s_ * (1 - f))
+    r = np.choose(i, [v, q, p, p, t, v])
+    g = np.choose(i, [t, v, v, q, p, p])
+    b = np.choose(i, [p, p, t, v, v, q])
+    return np.stack([r, g, b], -1).astype(np.float32)
+
+
+def rotx(a):
+    c, s_ = math.cos(a), math.sin(a)
+    return np.array([[1, 0, 0], [0, c, -s_], [0, s_, c]])
+
+
+def rotz(a):
+    c, s_ = math.cos(a), math.sin(a)
+    return np.array([[c, -s_, 0], [s_, c, 0], [0, 0, 1]])
+
+
+def unit(*v):
+    v = np.array(v, float)
+    return v / np.linalg.norm(v)
 
 
 def rd(path):
@@ -1110,23 +1552,6 @@ class Attractors:
         cv.flush(scr)
 
 
-def ulam_positions(N):
-    x = y = 0
-    pos = [(0, 0)]
-    dx, dy, seg = 1, 0, 1
-    while len(pos) < N:
-        for _ in range(2):
-            for _ in range(seg):
-                if len(pos) >= N:
-                    break
-                x += dx
-                y += dy
-                pos.append((x, y))
-            dx, dy = dy, -dx
-        seg += 1
-    return pos
-
-
 def simple_sieve(N):
     s = bytearray([1]) * (N + 1)
     s[0:2] = b"\x00\x00"
@@ -1136,167 +1561,216 @@ def simple_sieve(N):
     return s
 
 
+GAPP = (24, 31, 38, 45, 51, 87, 123, 159, 195, 231, 229, 226, 220, 214, 208, 202, 196)
+GOLDBACH_N = 12000
+GOLDBACH_MAX = 400
+
+
 class Primes:
     fps = 15
+    PHASES = ("sieve", "ulam", "sacks", "polar", "goldbach")
 
     def __init__(s, scr):
         s.scr = scr
-        s.a_prime = c256(46, GREEN) | BOLD
-        s.a_cur = c256(226, YELLOW) | BOLD | REV
-        s.a_hl = c256(196, RED) | BOLD | REV
-        s.a_comp = [c256(n, CYAN) | DIM for n in FACTOR]
-        s.a_unit = col(WHITE) | DIM
-        s.a_cyan = c256(51, CYAN) | BOLD
         s.pal = mkpal(RAIN, GREEN)
-        s.start_sieve()
+        s.gap = [a | BOLD for a in mkpal(GAPP, CYAN)]
+        s.order = list(s.PHASES)
+        random.shuffle(s.order)
+        s.i = -1
+        s.gcache = {}
+        s.next()
 
-    def start_sieve(s):
-        scr = s.scr
-        scr.erase()
-        h, w = scr.getmaxyx()
-        s.cols = max(1, (w - 2) // 5)
-        s.rows = max(2, h - 2)
-        if s.cols * s.rows > 2400:
-            s.rows = max(2, 2400 // s.cols)
-        s.N = s.cols * s.rows
-        s.oy = max(0, (h - s.rows) // 2)
-        s.ox = max(0, (w - s.cols * 5) // 2)
-        s.mark = [0] * (s.N + 1)
-        s.mark[1] = 3
-        s.fac = [0] * (s.N + 1)
-        s.cur = s.hl = 0
-        s.sps = max(40, s.N // 120 * 15)
+    def next(s):
+        s.i = (s.i + 1) % len(s.order)
+        s.scr.erase()
+        s.h, s.w = s.scr.getmaxyx()
+        s.cv = Painter(s.w, s.h)
+        s.until = None
         s.acc = 0.0
-        s.gen = s.sieve()
-        s.phase = "sieve"
-        for n in range(1, s.N + 1):
-            s.paint(n)
-
-    def paint(s, n):
-        r, c = divmod(n - 1, s.cols)
-        m = s.mark[n]
-        if n == s.hl:
-            a = s.a_hl
-        elif n == s.cur:
-            a = s.a_cur
-        elif m == 1:
-            a = s.a_prime
-        elif m == 2:
-            a = s.a_comp[s.fac[n] % len(s.a_comp)]
-        elif m == 3:
-            a = s.a_unit
-        else:
-            a = col(WHITE)
-        put(s.scr, s.oy + r, s.ox + c * 5, "%4d" % n, a)
-
-    def sieve(s):
-        N = s.N
-        p = 2
-        while p * p <= N:
-            if s.mark[p] == 0:
-                old = s.cur
-                s.mark[p] = 1
-                s.cur = p
-                s.paint(p)
-                if old:
-                    s.paint(old)
-                for _ in range(3):
-                    yield 6
-                for m in range(p * p, N + 1, p):
-                    if s.mark[m] == 0:
-                        prev = s.hl
-                        s.mark[m] = 2
-                        s.fac[m] = p
-                        s.hl = m
-                        s.paint(m)
-                        if prev:
-                            s.paint(prev)
-                        yield 1
-                if s.hl:
-                    last, s.hl = s.hl, 0
-                    s.paint(last)
-            p += 1
-
-    def start_ulam(s):
-        scr = s.scr
-        scr.erase()
-        h, w = scr.getmaxyx()
-        size = min(h, (w - 2) // 2)
-        if size % 2 == 0:
-            size -= 1
-        size = max(5, size)
-        s.UN = size * size
-        s.pos = ulam_positions(s.UN)
-        s.isp = simple_sieve(s.UN)
-        s.rev = 0
-        s.cx0, s.cy0 = w // 2, h // 2
-        s.phase = "ulam"
-
-    def start_sacks(s):
-        scr = s.scr
-        scr.erase()
-        h, w = scr.getmaxyx()
-        s.SN = 6000
-        s.isp = simple_sieve(s.SN)
-        s.rev = 0
-        s.cells = {}
-        s.W, s.H = w * 2, h * 4
-        s.k = (min(s.W, s.H) / 2 - 2) / math.sqrt(s.SN)
-        s.phase = "sacks"
+        s.phase = s.order[s.i]
+        getattr(s, "start_" + s.phase)()
 
     def step(s, dt):
+        if s.until is not None:
+            if time.monotonic() > s.until:
+                s.next()
+            return 0.3
+        getattr(s, "run_" + s.phase)(min(dt, 0.2))
+        s.cv.flush(s.scr)
+
+    def start_sieve(s):
+        s.cw = max(4, s.w // 2)
+        s.N = s.cw * s.h
+        s.struck = bytearray(s.N + 2)
+        s.fade = {}
+        s.fattr = {}
+        s.done = False
+        s.gen = s.sieve_gen()
+        s.sps = s.N * 2.4 / 11.0
+        dot = c256(240, WHITE) | DIM
+        for y in range(s.h):
+            put(s.scr, y, 0, "· " * s.cw, dot)
+        put(s.scr, 0, 0, "  ", 0)
+
+    def cell(s, n):
+        y, x = divmod(n - 1, s.cw)
+        return y, 2 * x
+
+    def fl_attrs(s, ci):
+        a = s.fattr.get(ci)
+        if a is None:
+            base = pick(s.pal, (ci * 0.137) % 1.0)
+            a = (base | BOLD, base, base | DIM)
+            s.fattr[ci] = a
+        return a
+
+    def sieve_gen(s):
+        N, st = s.N, s.struck
+        ci = 0
+        for p in range(2, int(N ** 0.5) + 1):
+            if st[p]:
+                continue
+            yield (-p, ci)
+            for m in range(p * p, N + 1, p):
+                if not st[m]:
+                    st[m] = 1
+                    yield (m, ci)
+            ci += 1
+
+    def run_sieve(s, dt):
         now = time.monotonic()
-        ph = s.phase
-        if ph == "sieve":
-            s.acc = min(s.acc + dt * s.sps, s.sps * 0.4)
-            while s.acc > 0:
+        scr = s.scr
+        if not s.done:
+            s.acc = min(s.acc + dt * s.sps, s.sps * 0.3)
+            k = int(s.acc)
+            s.acc -= k
+            for _ in range(k):
                 try:
-                    c = next(s.gen)
+                    m, ci = next(s.gen)
                 except StopIteration:
-                    for i in range(2, s.N + 1):
-                        if s.mark[i] == 0:
-                            s.mark[i] = 1
-                            s.paint(i)
-                    old, s.cur = s.cur, 0
-                    if old:
-                        s.paint(old)
-                    s.phase, s.until = "hold", now + 5
-                    s.after = s.start_ulam
+                    s.done = True
                     break
-                s.acc -= c
-        elif ph == "ulam":
-            new = min(s.UN, s.rev + max(1, int(s.UN * dt / 8)))
-            for n in range(s.rev + 1, new + 1):
-                if s.isp[n]:
-                    x, y = s.pos[n - 1]
-                    put(s.scr, s.cy0 + y, s.cx0 + 2 * x, "●", s.a_prime if n % 4 == 1 else s.a_cyan)
-            s.rev = new
-            if s.rev >= s.UN:
-                s.phase, s.until = "hold", now + 6
-                s.after = s.start_sacks
-        elif ph == "sacks":
-            new = min(s.SN, s.rev + max(1, int(s.SN * dt / 10)))
-            h, w = s.scr.getmaxyx()
-            for n in range(s.rev + 1, new + 1):
-                if s.isp[n]:
-                    r = s.k * math.sqrt(n)
-                    th = 2 * math.pi * math.sqrt(n)
-                    px, py = int(s.W / 2 + r * math.cos(th)), int(s.H / 2 + r * math.sin(th))
-                    cx, cy = px >> 1, py >> 2
-                    if 0 <= px < s.W and 0 <= cy < h:
-                        old = s.cells.get((cx, cy), (0, 0))
-                        m = old[0] | BR[(px & 1, py & 3)]
-                        a = pick(s.pal, n / s.SN) | BOLD
-                        s.cells[(cx, cy)] = (m, a)
-                        put(s.scr, cy, cx, chr(0x2800 + m), a)
-            s.rev = new
-            if s.rev >= s.SN:
-                s.phase, s.until = "hold", now + 7
-                s.after = s.start_sieve
-        else:
-            if now > s.until:
-                s.after()
-            return 0.25
+                y, x = s.cell(abs(m))
+                if m < 0:
+                    put(scr, y, x, "● ", s.fl_attrs(ci)[0])
+                else:
+                    put(scr, y, x, "██", s.fl_attrs(ci)[0])
+                    s.fade[m] = [now, ci, 0]
+        for m, f in list(s.fade.items()):
+            age = now - f[0]
+            lvl = 0 if age < 0.25 else 1 if age < 0.5 else 2 if age < 0.8 else 3
+            if lvl != f[2]:
+                f[2] = lvl
+                y, x = s.cell(m)
+                if lvl == 3:
+                    put(scr, y, x, "  ", 0)
+                    del s.fade[m]
+                else:
+                    put(scr, y, x, "██", s.fl_attrs(f[1])[lvl])
+        if s.done and not s.fade:
+            for n in range(2, s.N + 1):
+                if not s.struck[n]:
+                    y, x = s.cell(n)
+                    put(scr, y, x, "● ", pick(s.pal, n / s.N) | BOLD)
+            s.until = now + 4
+
+    def start_ulam(s):
+        S = min(s.cv.W, s.cv.H) - 2
+        s.UN = S * S
+        s.isp = simple_sieve(s.UN)
+        s.u = [1, 0, 0, 1, 0, 1, 1, 0, 2]
+
+    def run_ulam(s, dt):
+        cv = s.cv
+        W2, H2 = cv.W // 2, cv.H // 2
+        n, x, y, dx, dy, seg, left, turn, pp = s.u
+        isp, gap, UN = s.isp, s.gap, s.UN
+        top = len(gap) - 1
+        for _ in range(int(UN * dt / 14.0) + 1):
+            if n >= UN:
+                break
+            if isp[n]:
+                cv.dot(W2 + x, H2 + y, gap[min(top, (n - pp - 1) // 2)])
+                pp = n
+            n += 1
+            x += dx
+            y += dy
+            left -= 1
+            if left == 0:
+                dx, dy = dy, -dx
+                turn += 1
+                if turn % 2 == 0:
+                    seg += 1
+                left = seg
+        s.u = [n, x, y, dx, dy, seg, left, turn, pp]
+        if n >= UN:
+            s.until = time.monotonic() + 4
+
+    def start_sacks(s):
+        s.SN = 10000
+        s.isp = simple_sieve(s.SN)
+        s.rev = 0
+        s.k = (min(s.cv.W, s.cv.H) / 2.0 - 2) / math.sqrt(s.SN)
+
+    def run_sacks(s, dt):
+        cv = s.cv
+        new = min(s.SN, s.rev + int(s.SN * dt / 9.0) + 1)
+        for n in range(s.rev + 1, new + 1):
+            if s.isp[n]:
+                r, th = s.k * math.sqrt(n), 2 * math.pi * math.sqrt(n)
+                cv.dot(int(cv.W / 2 + r * math.cos(th)), int(cv.H / 2 + r * math.sin(th)), pick(s.pal, n / s.SN) | BOLD)
+        s.rev = new
+        if new >= s.SN:
+            s.until = time.monotonic() + 4
+
+    def start_polar(s):
+        s.PN = 100000
+        s.isp = simple_sieve(s.PN)
+        s.rev = 0
+        s.k = 0.48 * min(s.cv.W, s.cv.H) / s.PN
+
+    def run_polar(s, dt):
+        cv = s.cv
+        new = min(s.PN, s.rev + int(s.PN * dt / 9.0) + 1)
+        W2, H2, k = cv.W / 2.0, cv.H / 2.0, s.k
+        for n in range(s.rev + 1, new + 1):
+            if s.isp[n]:
+                r = k * n
+                cv.dot(int(W2 + r * math.cos(n)), int(H2 + r * math.sin(n)), pick(s.pal, n / s.PN) | BOLD)
+        s.rev = new
+        if new >= s.PN:
+            s.until = time.monotonic() + 4
+
+    def start_goldbach(s):
+        s.gn = 4
+        s.gisp = simple_sieve(GOLDBACH_N)
+        s.gprimes = [p for p in range(2, GOLDBACH_N // 2 + 1) if s.gisp[p]]
+        s.gpals = {0: mkpal((220, 214, 208), YELLOW), 2: mkpal((51, 45, 39), CYAN), 4: mkpal((177, 171, 165), MAGENTA)}
+
+    def run_goldbach(s, dt):
+        cv = s.cv
+        mx = my = 6
+        for _ in range(int((GOLDBACH_N - 4) / 2 * dt / 12.0) + 1):
+            n = s.gn
+            if n > GOLDBACH_N:
+                break
+            g = s.gcache.get(n)
+            if g is None:
+                g, half, isp = 0, n // 2, s.gisp
+                for p in s.gprimes:
+                    if p > half:
+                        break
+                    if isp[n - p]:
+                        g += 1
+                s.gcache[n] = g
+            px = int(mx + n / GOLDBACH_N * (cv.W - 2 * mx))
+            py = int(cv.H - my - g / GOLDBACH_MAX * (cv.H - 2 * my))
+            a = pick(s.gpals[n % 6], random.random()) | BOLD
+            cv.dot(px, py, a)
+            cv.dot(px + 1, py, a)
+            s.gn += 2
+        if s.gn > GOLDBACH_N:
+            s.until = time.monotonic() + 5
 
 
 class Sorter:
@@ -2028,9 +2502,6 @@ class Maze:
         s.pw, s.ph = 2 * s.cw + 1, 2 * s.chh + 1
         s.ox, s.oy = max(0, (w - s.pw * 2) // 2), max(0, (h - s.ph) // 2)
         s.open = [[False] * s.pw for _ in range(s.ph)]
-        s.wall = c256(237, WHITE) | DIM
-        for y in range(s.ph):
-            put(scr, s.oy + y, s.ox, "██" * s.pw, s.wall)
         s.total = s.cw * s.chh
         s.carved = 0
         s.shift = random.random()
@@ -2449,6 +2920,3280 @@ class BinClock:
         return wait
 
 
+class Warp:
+    fps = 15
+    CYCLE = 26.0
+
+    def __init__(s, scr):
+        s.scr = scr
+        h, w = scr.getmaxyx()
+        s.n = min(220, max(100, w * h // 24))
+        s.pals = [mkpal(GRAYS, WHITE), mkpal(ICE, CYAN), mkpal(GOLD, YELLOW)]
+        s.glow = mkpal((17, 18, 19, 20, 21, 27, 33, 39, 45, 51, 87, 123, 159, 195, 231), BLUE)
+        s.stars = [s.new(True) for _ in range(s.n)]
+        s.t = random.uniform(0, s.CYCLE)
+
+    def new(s, first=False):
+        return [random.uniform(-2.4, 2.4), random.uniform(-1.3, 1.3),
+                random.uniform(0.05, 1.0) if first else 1.0, random.randrange(3)]
+
+    @staticmethod
+    def smooth(a, b, x):
+        t = min(1.0, max(0.0, (x - a) / (b - a)))
+        return t * t * (3 - 2 * t)
+
+    def step(s, dt):
+        s.t += dt
+        ph = (s.t % s.CYCLE) / s.CYCLE
+        env = s.smooth(0.12, 0.3, ph) * (1 - s.smooth(0.68, 0.86, ph))
+        v = 0.12 + 2.6 * env
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        cv = Canvas(w, h)
+        K = cv.H * 0.32
+        W2, H2 = cv.W / 2.0, cv.H / 2.0
+        if env > 0.2:
+            for i in range(5):
+                f = ((s.t * 0.8 * env + i / 5.0) % 1.0) ** 2
+                a = pick(s.glow, (0.1 + 0.5 * (1 - f)) * env + 0.1)
+                rx, ry = f * cv.W * 0.55, f * cv.H * 0.55
+                m = int(40 + 50 * f)
+                for j in range(m):
+                    th = 6.2832 * j / m
+                    cv.dot(int(W2 + rx * math.cos(th)), int(H2 + ry * math.sin(th)), a)
+        for st in s.stars:
+            z = st[2] - v * dt * 0.5
+            st[2] = z
+            if z <= 0.04:
+                st[:] = s.new()
+                continue
+            x1, y1 = W2 + st[0] / z * K, H2 + st[1] / z * K
+            if x1 < -4 or x1 > cv.W + 4 or y1 < -4 or y1 > cv.H + 4:
+                st[:] = s.new()
+                continue
+            z0 = min(1.3, z + v * 0.09)
+            x0, y0 = W2 + st[0] / z0 * K, H2 + st[1] / z0 * K
+            ln = math.hypot(x1 - x0, y1 - y0)
+            if ln > 22:
+                x0, y0 = x1 + (x0 - x1) * 22 / ln, y1 + (y0 - y1) * 22 / ln
+            pal = s.glow if env > 0.3 and st[3] != 2 else s.pals[st[3]]
+            a = pick(pal, 1.0 - z) | (BOLD if z < 0.5 else 0)
+            if ln > 1.5:
+                cv.line(x0, y0, x1, y1, a)
+            else:
+                cv.dot(int(x1), int(y1), a)
+        scr.erase()
+        cv.flush(scr)
+
+
+class Lcars:
+    fps = 8
+    LC = (208, 214, 216, 175, 141, 111, 75, 180)
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pal = [c256(n, YELLOW) | BOLD for n in s.LC]
+        s.pale = c256(231, WHITE) | BOLD
+        s.tail = (c256(250, WHITE), c256(244, WHITE) | DIM)
+        s.line = c256(238, WHITE) | DIM
+        s.acc = 0.0
+        s.layout()
+
+    def bar(s, rows, x0, x1):
+        segs = []
+        x = x0
+        while x < x1:
+            ln = min(random.choice((3, 5, 8, 12, 20, 30)), x1 - x)
+            segs.append((x, ln, random.choice(s.pal)))
+            x += ln + random.choice((1, 1, 2))
+        for y in rows:
+            for sx, ln, a in segs:
+                put(s.scr, y, sx, "█" * ln, a)
+
+    def seg_row(s, y, thin):
+        put(s.scr, y, s.x0, " " * (s.x1 - s.x0), 0)
+        ch = "▄" if thin else "█"
+        x = s.x0 + random.randint(0, 3)
+        while x < s.x1:
+            ln = min(random.choice((2, 3, 4, 6, 9, 14, 20)), s.x1 - x)
+            put(s.scr, y, x, ch * ln, random.choice(s.pal))
+            x += ln + random.choice((1, 1, 2, 3))
+
+    def layout(s):
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        s.h, s.w = h, w
+        s.side = max(8, w // 7)
+        s.x0, s.x1 = s.side + 2, max(s.side + 6, w - 2)
+        top, bot = random.choice(s.pal), random.choice(s.pal)
+        ex = s.x0 + max(6, w // 10)
+        for r in range(3):
+            put(scr, r, 0, "█" * s.side, top)
+            put(scr, h - 1 - r, 0, "█" * s.side, bot)
+        for r in (0, 1):
+            put(scr, r, s.side, "█" * (ex - s.side), top)
+            put(scr, h - 1 - r, s.side, "█" * (ex - s.side), bot)
+        put(scr, 0, 0, "▗", top)
+        put(scr, h - 1, 0, "▝", bot)
+        put(scr, 2, s.side, "▛", top)
+        put(scr, h - 3, s.side, "▙", bot)
+        y = 4
+        while y < h - 4:
+            bh = min(random.randint(2, 5), h - 4 - y)
+            a = random.choice(s.pal)
+            for r in range(bh):
+                put(scr, y + r, 0, "█" * s.side, a)
+            y += bh + 1
+        s.bar((0, 1), ex + 2, s.x1)
+        s.bar((h - 2, h - 1), ex + 2, s.x1)
+        ys = list(range(3, h - 3, 2))
+        random.shuffle(ys)
+        s.scan = [[y, float(s.x0), 1.0] for y in ys[:2]]
+        s.rows = sorted(ys[2:])
+        s.thin = {y: random.random() < 0.4 for y in s.rows}
+        for y in s.rows:
+            s.seg_row(y, s.thin[y])
+        s.next_layout = time.monotonic() + 25
+
+    def step(s, dt):
+        if time.monotonic() > s.next_layout:
+            s.layout()
+        s.acc += dt * 6
+        n = int(s.acc)
+        s.acc -= n
+        if s.rows:
+            for _ in range(min(n, 8)):
+                y = random.choice(s.rows)
+                s.seg_row(y, s.thin[y])
+        for sc in s.scan:
+            y, pos, d = sc
+            pos += d * dt * 40
+            if pos >= s.x1 - 6 or pos <= s.x0:
+                sc[2] = -d
+                pos = min(max(pos, s.x0), s.x1 - 6)
+            sc[1] = pos
+            put(s.scr, y, s.x0, "▄" * (s.x1 - s.x0), s.line)
+            p = int(pos)
+            if d > 0:
+                put(s.scr, y, p - 6, "▄▄▄", s.tail[1])
+                put(s.scr, y, p - 3, "▄▄▄", s.tail[0])
+            else:
+                put(s.scr, y, p + 9, "▄▄▄", s.tail[1])
+                put(s.scr, y, p + 6, "▄▄▄", s.tail[0])
+            put(s.scr, y, p, "▄" * 6, s.pale)
+
+
+class Sensors:
+    fps = 15
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.sweep = mkpal((22, 23, 29, 35, 41, 47, 83, 119), GREEN)
+        s.kinds = [mkpal(ICE, CYAN), mkpal(GOLD, YELLOW), mkpal(WARM, RED)]
+        s.ring = c256(24, BLUE) | DIM
+        s.axis = c256(238, WHITE) | DIM
+        s.pale = c256(231, WHITE) | BOLD
+        s.build()
+
+    def build(s):
+        h, w = s.scr.getmaxyx()
+        cv = Canvas(w, h)
+        s.cx, s.cy = cv.W / 2.0, cv.H / 2.0
+        s.R = 0.46 * min(cv.W, cv.H)
+        for f in (0.25, 0.5, 0.75, 1.0):
+            r = s.R * f
+            m = max(60, int(r * 1.6))
+            for j in range(m):
+                th = 6.2832 * j / m
+                cv.dot(int(s.cx + r * math.cos(th)), int(s.cy + r * math.sin(th)), s.ring)
+        for deg in range(0, 360, 15):
+            a = math.radians(deg)
+            ln = 7 if deg % 45 == 0 else 4
+            cv.line(s.cx + (s.R - ln) * math.cos(a), s.cy + (s.R - ln) * math.sin(a),
+                    s.cx + s.R * math.cos(a), s.cy + s.R * math.sin(a), s.ring)
+        cv.line(s.cx - s.R, s.cy, s.cx + s.R, s.cy, s.axis)
+        cv.line(s.cx, s.cy - s.R, s.cx, s.cy + s.R, s.axis)
+        s.static = dict(cv.cells)
+        s.ang = random.uniform(0, 6.2832)
+        s.contacts = [s.spawn(True) for _ in range(10)]
+        s.lock = None
+        s.next_lock = time.monotonic() + 5
+        s.t = 0.0
+
+    def spawn(s, inside=False):
+        a = random.uniform(0, 6.2832)
+        r = s.R * (random.uniform(0.15, 0.95) if inside else 1.0)
+        sp = random.uniform(2, 9)
+        ha = random.uniform(0, 6.2832) if inside else a + 3.1416 + random.uniform(-0.8, 0.8)
+        return {"x": r * math.cos(a), "y": r * math.sin(a), "vx": sp * math.cos(ha), "vy": sp * math.sin(ha),
+                "kind": random.choices((0, 1, 2), (45, 35, 20))[0], "glow": 0.0}
+
+    def shape(s, cv, x, y, kind, a, r=3):
+        if kind == 0:
+            pts = [(x - r, y - r), (x + r, y - r), (x + r, y + r), (x - r, y + r)]
+        elif kind == 1:
+            pts = [(x, y - r - 1), (x + r + 1, y), (x, y + r + 1), (x - r - 1, y)]
+        else:
+            pts = [(x, y - r - 1), (x + r + 1, y + r), (x - r - 1, y + r)]
+        for i in range(len(pts)):
+            cv.line(*pts[i], *pts[(i + 1) % len(pts)], a)
+
+    def step(s, dt):
+        s.t += dt
+        a0 = s.ang
+        sweep = 1.1 * dt
+        s.ang = (a0 + sweep) % 6.2832
+        for i, c in enumerate(s.contacts):
+            c["x"] += c["vx"] * dt
+            c["y"] += c["vy"] * dt
+            if math.hypot(c["x"], c["y"]) > s.R * 1.05:
+                s.contacts[i] = c = s.spawn()
+            phi = math.atan2(c["y"], c["x"]) % 6.2832
+            if (phi - a0) % 6.2832 <= sweep + 0.05:
+                c["glow"] = 1.0
+            c["glow"] *= math.exp(-dt * 0.55)
+        now = time.monotonic()
+        if s.lock is None and now > s.next_lock:
+            s.lock = (random.choice(s.contacts), now + 5)
+        elif s.lock and now > s.lock[1]:
+            s.lock = None
+            s.next_lock = now + 8
+        h, w = s.scr.getmaxyx()
+        cv = Canvas(w, h)
+        cv.cells = dict(s.static)
+        a1 = a0 + sweep
+        for i in range(14):
+            a = a1 - i * 0.05
+            cv.line(s.cx, s.cy, s.cx + s.R * math.cos(a), s.cy + s.R * math.sin(a),
+                    pick(s.sweep, 1 - i / 14.0) | (BOLD if i < 3 else 0))
+        for c in s.contacts:
+            if c["glow"] > 0.05:
+                s.shape(cv, s.cx + c["x"], s.cy + c["y"], c["kind"], pick(s.kinds[c["kind"]], 0.3 + 0.7 * c["glow"]) | BOLD)
+        if s.lock:
+            c = s.lock[0]
+            x, y = s.cx + c["x"], s.cy + c["y"]
+            r = 9 + 2.5 * math.sin(s.t * 5)
+            for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
+                cv.line(x + sx * r, y + sy * r, x + sx * r, y + sy * (r - 4), s.pale)
+                cv.line(x + sx * r, y + sy * r, x + sx * (r - 4), y + sy * r, s.pale)
+        s.scr.erase()
+        cv.flush(s.scr)
+
+
+class WarpCore:
+    fps = 14
+    BLUE = (17, 18, 19, 20, 21, 27, 33, 39, 45, 51, 87, 123, 159, 195, 231)
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pal = mkpal(s.BLUE, BLUE)
+        s.rim = c256(240, WHITE) | DIM
+        s.coil = c256(208, YELLOW)
+        s.coil_hot = c256(222, YELLOW) | BOLD
+        s.pipe = c256(24, BLUE) | DIM
+        s.pipe_hot = c256(51, CYAN) | BOLD
+        s.t = 0.0
+
+    def step(s, dt):
+        s.t += dt
+        t = s.t
+        scr = s.scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        cx = w // 2
+        cw = max(6, (w // 11) // 2 * 2)
+        half = cw // 2
+        p1 = h - ((t * 16) % (h + 24))
+        p2 = ((t * 11) % (h + 24)) - 8
+        px1, px2 = cx - half - 9, cx + half + 9
+        for y in range(h):
+            w1 = 0.5 + 0.5 * math.sin(y * 0.55 + t * 6.0)
+            w2 = 0.5 + 0.5 * math.sin(y * 0.17 - t * 2.3)
+            pulse = max(0.0, 1 - abs(y - p1) / 6.0, 1 - abs(y - p2) / 4.0)
+            inten = min(1.0, 0.12 + 0.5 * w1 * (0.5 + 0.5 * w2) + 0.35 * pulse)
+            put(scr, y, cx - half, "█" * cw, pick(s.pal, inten * 0.8))
+            cw2 = max(2, cw // 3)
+            put(scr, y, cx - cw2 // 2, "█" * cw2, pick(s.pal, min(1.0, inten + 0.25)) | BOLD)
+            put(scr, y, cx - half - 1, "▐", s.rim)
+            put(scr, y, cx + half, "▌", s.rim)
+            if y % 6 == 0:
+                hot = pulse > 0.4
+                put(scr, y, cx - half - 4, "▄" * (cw + 8), s.coil_hot if hot else s.coil)
+            flow = (y + int(t * 20)) % 9 < 3
+            put(scr, y, px1, "┃" if flow else "│", s.pipe_hot if flow else s.pipe)
+            put(scr, y, px2, "┃" if (y - int(t * 20)) % 9 < 3 else "│",
+                s.pipe_hot if (y - int(t * 20)) % 9 < 3 else s.pipe)
+
+
+class Transporter:
+    fps = 16
+    N = 450
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pal = mkpal((94, 136, 178, 220, 226, 229, 231), YELLOW)
+        s.cycle()
+
+    def cycle(s):
+        s.t0 = time.monotonic()
+        s.cxf = random.uniform(0.3, 0.7)
+        s.parts = [[random.random(), math.sqrt(random.random()), random.uniform(0, 6.2832),
+                    random.uniform(1.5, 4.0) * random.choice((-1, 1))] for _ in range(s.N)]
+
+    @staticmethod
+    def prof(u):
+        if u < 0.17:
+            return 0.30 * math.sqrt(max(0.0, math.sin(math.pi * u / 0.17)))
+        if u < 0.21:
+            return 0.12
+        if u < 0.56:
+            return 0.62 + 0.30 * math.sin(math.pi * (u - 0.21) / 0.35) * (1 - (u - 0.21))
+        return 0.42 - 0.08 * (u - 0.56)
+
+    def step(s, dt):
+        t = time.monotonic() - s.t0
+        if t > 14.0:
+            s.cycle()
+            t = 0.0
+        if t < 3.5:
+            alpha, rise = t / 3.5, 1.0
+        elif t < 10.5:
+            alpha, rise = 1.0, 1.0
+        else:
+            alpha, rise = 1 - (t - 10.5) / 3.5, 1.0 + 5.0 * (t - 10.5) / 3.5
+        h, w = s.scr.getmaxyx()
+        cv = Canvas(w, h)
+        cx = cv.W * s.cxf
+        R = cv.H * 0.22
+        count = int(s.N * max(0.0, alpha))
+        pal = s.pal
+        prof = s.prof
+        for p in s.parts[:count]:
+            p[0] -= dt * 0.12 * rise
+            if p[0] < 0:
+                p[0] += 1
+            p[2] += p[3] * dt
+            u = p[0]
+            r = prof(u) * p[1] * R
+            depth = math.sin(p[2])
+            b = 0.35 + 0.65 * (0.5 + 0.5 * depth)
+            if random.random() < 0.06:
+                b = 1.0
+            cv.dot(int(cx + r * math.cos(p[2])), int(cv.H * 0.1 + u * cv.H * 0.8 + r * depth * 0.12), pick(pal, b) | BOLD)
+        s.scr.erase()
+        cv.flush(s.scr)
+
+
+class Borg:
+    fps = 10
+    G = 8
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.t = random.uniform(0, 30)
+        s.grid = mkpal((22, 28, 34), GREEN)
+        s.edge = mkpal((28, 34, 40, 46, 82, 118), GREEN)
+        s.rim = mkpal((82, 118, 154, 190), GREEN)
+        s.levels = [[random.random() ** 2 for _ in range(s.G * s.G)] for _ in FACES]
+
+    def step(s, dt):
+        s.t += dt
+        t = s.t
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        cv = Canvas(w, h)
+        S = 0.2 * min(cv.W, cv.H)
+        cx0, cy0 = cv.W / 2.0, cv.H / 2.0
+        R = rotation(0.21 * t, 0.31 * t, 0.08 * t)
+        D = 5.0
+        G = s.G
+        for _ in range(6):
+            s.levels[random.randrange(len(FACES))][random.randrange(G * G)] = random.random() ** 2
+
+        def proj(n, e1, e2, u, v):
+            p = (n[0] + u * e1[0] + v * e2[0], n[1] + u * e1[1] + v * e2[1], n[2] + u * e1[2] + v * e2[2])
+            q = xform(R, p)
+            f = D / (D - q[2])
+            return cx0 + q[0] * S * f, cy0 - q[1] * S * f
+
+        for fi, (n, e1, e2, _) in enumerate(FACES):
+            nr = xform(R, n)
+            if nr[0] * (0 - nr[0]) + nr[1] * (0 - nr[1]) + nr[2] * (D - nr[2]) <= 0:
+                continue
+            b = max(0.0, min(1.0, nr[2]))
+            ga = pick(s.grid, 0.3 + 0.7 * b)
+            for i in range(G + 1):
+                c = -1 + 2.0 * i / G
+                cv.line(*proj(n, e1, e2, c, -1), *proj(n, e1, e2, c, 1), ga)
+                cv.line(*proj(n, e1, e2, -1, c), *proj(n, e1, e2, 1, c), ga)
+            for idx, lv in enumerate(s.levels[fi]):
+                if lv < 0.55:
+                    continue
+                i, j = divmod(idx, G)
+                u0, v0 = -1 + 2.0 * i / G, -1 + 2.0 * j / G
+                u1, v1 = u0 + 2.0 / G, v0 + 2.0 / G
+                a = pick(s.edge, lv) | BOLD
+                c1, c2, c3, c4 = (proj(n, e1, e2, u0, v0), proj(n, e1, e2, u1, v0),
+                                  proj(n, e1, e2, u1, v1), proj(n, e1, e2, u0, v1))
+                cv.line(*c1, *c2, a)
+                cv.line(*c2, *c3, a)
+                cv.line(*c3, *c4, a)
+                cv.line(*c4, *c1, a)
+                if lv > 0.85:
+                    cv.line(*c1, *c3, a)
+            ra = pick(s.rim, 0.4 + 0.6 * b) | BOLD
+            cs = [proj(n, e1, e2, -1, -1), proj(n, e1, e2, 1, -1), proj(n, e1, e2, 1, 1), proj(n, e1, e2, -1, 1)]
+            for i in range(4):
+                cv.line(*cs[i], *cs[(i + 1) % 4], ra)
+        scr.erase()
+        cv.flush(scr)
+
+
+class Fire:
+    fps = 15
+    PALS = (((52, 88, 124, 160, 196, 202, 208, 214, 220, 226, 227, 229, 231), RED),
+            ((17, 18, 19, 20, 21, 27, 33, 39, 45, 51, 87, 123, 159, 195, 231), CYAN),
+            ((22, 28, 34, 40, 46, 82, 118, 154, 190, 191, 192, 193, 231), GREEN),
+            ((53, 54, 55, 56, 57, 93, 129, 165, 201, 207, 213, 219, 225, 231), MAGENTA))
+    WINDS = ((-1, -1, 0, 0, 0, 0, 1, 1), (-2, -1, -1, -1, 0, 0, 0, 1), (-1, 0, 0, 0, 1, 1, 1, 2))
+
+    def __init__(s, scr):
+        s.scr = scr
+        s.pi = 0
+        if np is None:
+            s.fps = 12
+        s.reset()
+
+    def reset(s):
+        scr = s.scr
+        scr.erase()
+        s.h, s.w = H, W = scr.getmaxyx()
+        s.N = N = max(10, int(H * 0.36))
+        s.f = np.zeros((H, W), dtype=np.int64) if np is not None else [0] * (W * H)
+        s.prev = [None] * H
+        nums, fb = s.PALS[s.pi]
+        s.pi = random.choice([i for i in range(len(s.PALS)) if i != s.pi])
+        pal = mkpal(nums, fb)
+        s.chars, s.attrs = [" "], [0]
+        for v in range(1, N + 1):
+            t = v / N
+            s.chars.append(" \u2591\u2592\u2593\u2588"[min(4, int(t * 5.4))])
+            s.attrs.append(pick(pal, t) | (BOLD if t > 0.6 else 0))
+        if np is not None:
+            s.uattrs = list(dict.fromkeys(s.attrs))
+            s.akey = np.array([s.uattrs.index(a) for a in s.attrs])
+            s.charr = np.array(s.chars)
+            s.prev = None
+        s.fuel = [random.uniform(0.7, 1.0) for _ in range(W)]
+        s.wind = s.WINDS[0]
+        now = time.monotonic()
+        s.windt = now + random.uniform(3, 8)
+        s.state, s.level = "light", 0
+        s.until = now + random.uniform(28, 45)
+        s.outt = 0.0
+
+    def spread_py(s, src):
+        W, H, f, wind = s.w, s.h, s.f, s.wind
+        base = (H - 1) * W
+        f[base:base + W] = src
+        getrandbits = random.getrandbits
+        for y in range(1, H):
+            row = y * W
+            up = row - W
+            r = getrandbits(4 * W)
+            for x in range(W):
+                v = f[row + x]
+                if v:
+                    k = r & 15
+                    xx = x + wind[k >> 1]
+                    if 0 <= xx < W:
+                        f[up + xx] = v - (k & 1)
+                else:
+                    f[up + x] = 0
+                r >>= 4
+        return [f[y * W:(y + 1) * W] for y in range(H)]
+
+    def spread_np(s, src):
+        f = s.f.copy()
+        H, W = f.shape
+        f[H - 1] = src
+        old = f[1:]
+        r = np.random.randint(0, 16, size=old.shape)
+        xs = np.arange(W)[None, :] + np.array(s.wind)[r >> 1]
+        lit = old > 0
+        new = f.copy()
+        new[:-1][~lit] = 0
+        ok = lit & (xs >= 0) & (xs < W)
+        iy, _ = np.nonzero(ok)
+        new[iy, xs[ok]] = old[ok] - (r[ok] & 1)
+        s.f = new
+        return new
+
+    def step(s, dt):
+        now = time.monotonic()
+        W, N = s.w, s.N
+        if now > s.windt:
+            s.wind = random.choice(s.WINDS)
+            s.windt = now + random.uniform(3, 8)
+        if s.state == "light":
+            s.level = min(N, s.level + 1)
+            if s.level >= N:
+                s.state = "burn"
+        elif s.state == "burn":
+            if now > s.until:
+                s.state, s.outt = "out", now
+        else:
+            s.level = max(0, s.level - 1)
+            empty = not s.f.any() if np is not None else not any(s.f)
+            if s.level == 0 and (empty or now - s.outt > 8):
+                s.reset()
+                return
+        fuel = s.fuel
+        for _ in range(max(1, W // 12)):
+            i = random.randrange(W)
+            fuel[i] = min(1.0, max(0.55, fuel[i] + random.uniform(-0.2, 0.2)))
+        lvl = s.level
+        r = random.getrandbits(W)
+        src = [max(0, int(lvl * fuel[x]) - (r >> x & 1)) for x in range(W)]
+        if np is not None:
+            s.prev = blit_np(s.scr, s.spread_np(src), s.prev, s.charr, s.akey, s.uattrs)
+            return
+        rows = s.spread_py(src)
+        scr, prev, chars, attrs = s.scr, s.prev, s.chars, s.attrs
+        for y, row in enumerate(rows):
+            if row != prev[y]:
+                prev[y] = row
+                runs(scr, y, 0, row, chars, attrs)
+
+
+class Donut:
+    fps = 12
+    RAMP = ".,-~:;=!*#$@"
+    PALS = (((89, 125, 161, 162, 168, 205, 211, 212, 218, 225), MAGENTA),
+            ((94, 130, 136, 172, 178, 214, 220, 221, 222, 229), YELLOW),
+            ((23, 29, 30, 36, 37, 43, 79, 115, 158, 195), CYAN))
+    R1, R2, K2 = 1.0, 2.0, 7.0
+
+    def __init__(s, scr):
+        s.scr = scr
+        scr.erase()
+        s.h, s.w = h, w = scr.getmaxyx()
+        s.A, s.B = random.uniform(0, 6.3), random.uniform(0, 6.3)
+        rr = 0.38 * min(h, w / 2.0)
+        if np is None:
+            rr = min(rr, 10.0)
+            s.fps = 10
+        s.K1y = rr * s.K2 / (s.R1 + s.R2)
+        s.K1x = 2.0 * s.K1y
+        nt, nph = int(rr * 6) + 16, int(rr * 18) + 30
+        th = [2 * math.pi * i / nt for i in range(nt)]
+        ph = [2 * math.pi * i / nph for i in range(nph)]
+        if np is not None:
+            s.ct, s.st = np.cos(th)[:, None], np.sin(th)[:, None]
+            s.cp, s.sp = np.cos(ph)[None, :], np.sin(ph)[None, :]
+        else:
+            s.tt = [(math.cos(t), math.sin(t)) for t in th]
+            s.pp = [(math.cos(p), math.sin(p)) for p in ph]
+        s.pi = random.randrange(len(s.PALS))
+        s.setpal()
+
+    def setpal(s):
+        nums, fb = s.PALS[s.pi]
+        pal = mkpal(nums, fb)
+        s.chars = [" "] + list(s.RAMP)
+        s.attrs = [0] + [pick(pal, i / 11.0) | (BOLD if i >= 7 else 0) for i in range(12)]
+        s.prev = [None] * s.h
+        s.palt = time.monotonic() + 20
+
+    def frame_np(s, cA, sA, cB, sB):
+        w, h = s.w, s.h
+        ct, st, cp, sp = s.ct, s.st, s.cp, s.sp
+        cx = s.R2 + s.R1 * ct
+        cy = s.R1 * st
+        x = cx * (cB * cp + sA * sB * sp) - cy * cA * sB
+        y = cx * (sB * cp - sA * cB * sp) + cy * cA * cB
+        ooz = 1.0 / (s.K2 + cA * cx * sp + cy * sA)
+        xp = np.floor(w / 2.0 + s.K1x * ooz * x).astype(np.int64)
+        yp = np.floor(h / 2.0 - s.K1y * ooz * y).astype(np.int64)
+        L = ct * (cp * sB - cA * sp - cB * sA * sp) + st * (cB * cA - sA)
+        ok = (xp >= 0) & (xp < w) & (yp >= 0) & (yp < h)
+        idx = (yp * w + xp)[ok]
+        z = ooz[ok]
+        lum = np.clip((L[ok] * 8).astype(np.int64), 0, 11) + 1
+        order = np.argsort(idx - z)  # ooz < 1: groups by cell, nearest point first
+        idx, lum = idx[order], lum[order]
+        first = np.ones(idx.size, dtype=bool)
+        first[1:] = idx[1:] != idx[:-1]
+        out = np.zeros(w * h, dtype=np.int64)
+        out[idx[first]] = lum[first]
+        return out.tolist()
+
+    def frame_py(s, cA, sA, cB, sB):
+        w, h = s.w, s.h
+        R1, R2, K2, k1x, k1y = s.R1, s.R2, s.K2, s.K1x, s.K1y
+        hx, hy = w / 2.0, h / 2.0
+        zb = [0.0] * (w * h)
+        out = [0] * (w * h)
+        P = [(cB * cp + sA * sB * sp, sB * cp - sA * cB * sp, cA * sp, cp * sB - cA * sp - cB * sA * sp)
+             for cp, sp in s.pp]
+        lk = cB * cA - sA
+        for ct, st in s.tt:
+            cx = R2 + R1 * ct
+            cy = R1 * st
+            ox, oy, oz, lt = -cy * cA * sB, cy * cA * cB, K2 + cy * sA, st * lk
+            for a1, a2, a3, l1 in P:
+                ooz = 1.0 / (oz + cx * a3)
+                xp = int(hx + k1x * ooz * (cx * a1 + ox))
+                if 0 <= xp < w:
+                    yp = int(hy - k1y * ooz * (cx * a2 + oy))
+                    if 0 <= yp < h:
+                        i = yp * w + xp
+                        if ooz > zb[i]:
+                            zb[i] = ooz
+                            L = ct * l1 + lt
+                            out[i] = 1 + (int(L * 8) if L > 0 else 0)
+        return out
+
+    def step(s, dt):
+        if time.monotonic() > s.palt:
+            s.pi = (s.pi + 1) % len(s.PALS)
+            s.setpal()
+        s.A += dt * 0.8
+        s.B += dt * 0.4
+        args = (math.cos(s.A), math.sin(s.A), math.cos(s.B), math.sin(s.B))
+        out = s.frame_np(*args) if np is not None else s.frame_py(*args)
+        w, scr, prev = s.w, s.scr, s.prev
+        for y in range(s.h):
+            row = out[y * w:(y + 1) * w]
+            if row != prev[y]:
+                prev[y] = row
+                runs(scr, y, 0, row, s.chars, s.attrs)
+
+
+class Boids:
+    fps = 20
+
+    def __init__(s, scr):
+        s.scr = scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        s.W, s.H = W, H = w * 2, h * 4
+        m = min(W, H)
+        s.vmax = 40.0 + 0.12 * m
+        s.vmin = 0.45 * s.vmax
+        s.vis = 12.0 + 0.07 * m
+        s.sep = 0.4 * s.vis
+        s.margin = 0.12 * m
+        n = max(25, min(130, w * h // 100))
+        s.boids = [s.spawn(random.uniform(0, W), random.uniform(0, H)) for _ in range(n)]
+        s.pal = mkpal(RAIN, CYAN)
+        s.hawk_a = c256(196, RED) | BOLD
+        s.flash_a = c256(226, YELLOW) | BOLD
+        s.hawk = None
+        s.hawk_t = time.monotonic() + random.uniform(6, 12)
+        s.flashes = []
+
+    def spawn(s, x, y, ang=None):
+        a = random.uniform(0, 2 * math.pi) if ang is None else ang
+        v = random.uniform(s.vmin, s.vmax)
+        return [x, y, math.cos(a) * v, math.sin(a) * v]
+
+    def edge_spawn(s):
+        W, H = s.W, s.H
+        side = random.randrange(4)
+        if side == 0:
+            return s.spawn(0.0, random.uniform(0, H), random.uniform(-0.6, 0.6))
+        if side == 1:
+            return s.spawn(W - 1.0, random.uniform(0, H), math.pi + random.uniform(-0.6, 0.6))
+        if side == 2:
+            return s.spawn(random.uniform(0, W), 0.0, math.pi / 2 + random.uniform(-0.6, 0.6))
+        return s.spawn(random.uniform(0, W), H - 1.0, -math.pi / 2 + random.uniform(-0.6, 0.6))
+
+    def clamp(s, b, vmin, vmax):
+        sp = math.hypot(b[2], b[3]) or 1e-6
+        f = vmax / sp if sp > vmax else (vmin / sp if sp < vmin else 1.0)
+        b[2] *= f
+        b[3] *= f
+
+    def step(s, dt):
+        now = time.monotonic()
+        W, H, B = s.W, s.H, s.boids
+        vis2, sep2, cell = s.vis ** 2, s.sep ** 2, s.vis
+        vmax, margin = s.vmax, s.margin
+        turn = vmax * 4.0
+        grid = {}
+        for i, b in enumerate(B):
+            grid.setdefault((int(b[0] // cell), int(b[1] // cell)), []).append(i)
+        hawk = s.hawk
+        fear = (2.5 * s.vis) ** 2
+        acc = []
+        for i, b in enumerate(B):
+            x, y, vx, vy = b
+            gx, gy = int(x // cell), int(y // cell)
+            n = 0
+            cx = cy = ax = ay = sx = sy = 0.0
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    for j in grid.get((gx + ox, gy + oy), ()):
+                        if j == i:
+                            continue
+                        o = B[j]
+                        dx, dy = o[0] - x, o[1] - y
+                        d2 = dx * dx + dy * dy
+                        if d2 < vis2:
+                            n += 1
+                            cx += dx
+                            cy += dy
+                            ax += o[2]
+                            ay += o[3]
+                            if d2 < sep2:
+                                k = 1.0 - d2 / sep2
+                                sx -= dx * k
+                                sy -= dy * k
+            fx = sx * 25.0 + random.uniform(-1, 1) * vmax * 0.4
+            fy = sy * 25.0 + random.uniform(-1, 1) * vmax * 0.4
+            if n:
+                fx += cx / n * 1.2 + (ax / n - vx) * 1.8
+                fy += cy / n * 1.2 + (ay / n - vy) * 1.8
+            if x < margin:
+                fx += turn * (margin - x) / margin
+            elif x > W - margin:
+                fx -= turn * (x - W + margin) / margin
+            if y < margin:
+                fy += turn * (margin - y) / margin
+            elif y > H - margin:
+                fy -= turn * (y - H + margin) / margin
+            if hawk:
+                dx, dy = x - hawk[0], y - hawk[1]
+                d2 = dx * dx + dy * dy
+                if d2 < fear:
+                    d = math.sqrt(d2) or 1e-6
+                    k = vmax * 9.0 * (1.0 - d2 / fear)
+                    fx += dx / d * k
+                    fy += dy / d * k
+            acc.append((fx, fy))
+        for b, (fx, fy) in zip(B, acc):
+            b[2] += fx * dt
+            b[3] += fy * dt
+            s.clamp(b, s.vmin, vmax * (1.35 if hawk else 1.0))
+            b[0] = min(W - 1.0, max(0.0, b[0] + b[2] * dt))
+            b[1] = min(H - 1.0, max(0.0, b[1] + b[3] * dt))
+        s.move_hawk(now, dt)
+        s.draw(now)
+
+    def move_hawk(s, now, dt):
+        hawk, B = s.hawk, s.boids
+        if hawk is None:
+            if now > s.hawk_t:
+                b = s.edge_spawn()
+                s.hawk = [b[0], b[1], b[2], b[3], now + random.uniform(9, 16)]
+            return
+        x, y = hawk[0], hawk[1]
+        hv = s.vmax * 1.3
+        if now < hawk[4]:
+            bi, bd = 0, 1e18
+            for i, b in enumerate(B):
+                d2 = (b[0] - x) ** 2 + (b[1] - y) ** 2
+                if d2 < bd:
+                    bi, bd = i, d2
+            t = B[bi]
+            d = math.sqrt(bd) or 1e-6
+            hawk[2] += ((t[0] - x) / d * hv - hawk[2]) * 2.2 * dt
+            hawk[3] += ((t[1] - y) / d * hv - hawk[3]) * 2.2 * dt
+            if bd < 16:
+                s.flashes.append((t[0], t[1], now))
+                B[bi] = s.edge_spawn()
+        s.clamp(hawk, s.vmin, hv)
+        hawk[0] += hawk[2] * dt
+        hawk[1] += hawk[3] * dt
+        if now >= hawk[4] and not (-30 < hawk[0] < s.W + 30 and -30 < hawk[1] < s.H + 30):
+            s.hawk = None
+            s.hawk_t = now + random.uniform(10, 20)
+
+    def draw(s, now):
+        scr = s.scr
+        h, w = scr.getmaxyx()
+        cv = Canvas(w, h)
+        pal, tau = s.pal, 2 * math.pi
+        for x, y, vx, vy in s.boids:
+            sp = math.hypot(vx, vy) or 1e-6
+            a = pick(pal, (math.atan2(vy, vx) / tau) % 1.0) | BOLD
+            cv.line(x, y, x - vx / sp * 3.5, y - vy / sp * 3.5, a)
+        hk = s.hawk
+        if hk:
+            sp = math.hypot(hk[2], hk[3]) or 1e-6
+            ux, uy = hk[2] / sp, hk[3] / sp
+            hx, hy = hk[0] + ux * 5, hk[1] + uy * 5
+            bx, by = hk[0] - ux * 4, hk[1] - uy * 4
+            lx, ly, rx, ry = bx - uy * 5, by + ux * 5, bx + uy * 5, by - ux * 5
+            for p, q in (((hx, hy), (lx, ly)), ((hx, hy), (rx, ry)), ((hx, hy), (bx, by)), ((lx, ly), (bx, by)),
+                         ((rx, ry), (bx, by))):
+                cv.line(*p, *q, s.hawk_a)
+        live = []
+        for fx, fy, t in s.flashes:
+            age = now - t
+            if age < 0.6:
+                live.append((fx, fy, t))
+                rad = 2 + age * 30
+                for j in range(20):
+                    th = j * tau / 20
+                    cv.dot(int(fx + math.cos(th) * rad), int(fy + math.sin(th) * rad), s.flash_a)
+        s.flashes = live
+        scr.erase()
+        cv.flush(scr)
+
+
+TETRO = (((0, 0), (1, 0), (2, 0), (3, 0)), ((0, 0), (1, 0), (0, 1), (1, 1)), ((0, 0), (1, 0), (2, 0), (1, 1)),
+         ((1, 0), (2, 0), (0, 1), (1, 1)), ((0, 0), (1, 0), (1, 1), (2, 1)), ((0, 0), (0, 1), (1, 1), (2, 1)),
+         ((2, 0), (0, 1), (1, 1), (2, 1)))
+TETRO_COL = ((51, CYAN), (226, YELLOW), (129, MAGENTA), (46, GREEN), (196, RED), (27, BLUE), (208, WHITE))
+
+
+def tetro_rots(cells):
+    shapes, cur = [], list(cells)
+    for _ in range(4):
+        mx, my = min(x for x, _ in cur), min(y for _, y in cur)
+        norm = tuple(sorted((x - mx, y - my) for x, y in cur))
+        if norm not in shapes:
+            shapes.append(norm)
+        cur = [(-y, x) for x, y in cur]
+    out = []
+    for cs in shapes:
+        masks = [0] * (max(y for _, y in cs) + 1)
+        for x, y in cs:
+            masks[y] |= 1 << x
+        out.append((cs, masks, max(x for x, _ in cs) + 1))
+    return out
+
+
+class Tetris:
+    fps = 30
+    WEIGHTS = (-0.510066, 0.760666, -0.35663, -0.184483)
+    SCORE = (0, 100, 300, 500, 800)
+
+    def __init__(s, scr):
+        s.scr = scr
+        scr.erase()
+        h, w = scr.getmaxyx()
+        s.C = C = 10
+        s.R = R = max(8, min(20, h - 1))
+        s.full = (1 << C) - 1
+        s.k = k = max(1, min((h - 1) // R, (w - 19) // (2 * C)))
+        s.ox = max(1, (w - (2 * k * C + 19)) // 2 + 1)
+        s.oy = max(0, (h - (R * k + 1)) // 2)
+        s.rots = [tetro_rots(c) for c in TETRO]
+        cols = [c256(n, fb) | BOLD for n, fb in TETRO_COL]
+        s.chars = ["  " * k] + ["\u2588\u2588" * k] * 7 + ["\u2591\u2591" * k] * 7 + ["\u2588\u2588" * k, "\u2593\u2593" * k]
+        s.attrs = [0] + cols + cols + [c256(231, WHITE) | BOLD, c256(88, RED)]
+        s.frame = c256(67, BLUE)
+        s.label = c256(75, CYAN) | BOLD
+        s.value = c256(231, WHITE) | BOLD
+        s.best = 0
+        s.new_game()
+
+    def new_game(s):
+        s.rows = [0] * s.R
+        s.grid = [[0] * s.C for _ in range(s.R)]
+        s.bag = []
+        s.next = s.draw_bag()
+        s.score = s.lines = 0
+        s.state, s.timer, s.acc = "spawn", 0.0, 0.0
+
+    def draw_bag(s):
+        if not s.bag:
+            s.bag = list(range(7))
+            random.shuffle(s.bag)
+        return s.bag.pop()
+
+    def fits(s, masks, x, y, rows=None):
+        rows = s.rows if rows is None else rows
+        if x < 0 or y < 0 or y + len(masks) > s.R:
+            return False
+        C = s.C
+        for i, m in enumerate(masks):
+            mm = m << x
+            if mm >> C or rows[y + i] & mm:
+                return False
+        return True
+
+    def drop_y(s, masks, x, y, rows=None):
+        while s.fits(masks, x, y + 1, rows):
+            y += 1
+        return y
+
+    def evaluate(s, rows):
+        kept = [r for r in rows if r != s.full]
+        lines, n = len(rows) - len(kept), len(kept)
+        heights = [0] * s.C
+        seen = holes = 0
+        for i, r in enumerate(kept):
+            new = r & ~seen
+            while new:
+                low = new & -new
+                heights[low.bit_length() - 1] = n - i
+                new ^= low
+            seen |= r
+            holes += popcount(seen & ~r)
+        bump = sum(abs(heights[c] - heights[c + 1]) for c in range(s.C - 1))
+        a, b, c, d = s.WEIGHTS
+        return a * sum(heights) + b * lines + c * holes + d * bump
+
+    def plan(s, p):
+        opts = []
+        for ri, (_, masks, wid) in enumerate(s.rots[p]):
+            for x in range(s.C - wid + 1):
+                if not s.fits(masks, x, 0):
+                    continue
+                y = s.drop_y(masks, x, 0)
+                new = s.rows[:]
+                for i, m in enumerate(masks):
+                    new[y + i] |= m << x
+                opts.append((s.evaluate(new), ri, x))
+        if not opts:
+            return None
+        opts.sort(reverse=True)
+        if random.random() < 0.05 and len(opts) > 3:
+            return opts[random.randrange(1, min(len(opts), 6))][1:]
+        return opts[0][1:]
+
+    def speeds(s):
+        lv = s.lines // 10
+        return max(0.02, 0.05 - lv * 0.003), max(0.006, 0.022 - lv * 0.0015)
+
+    def move_one(s):
+        rots = s.rots[s.p]
+        n = len(rots)
+        if s.ri != s.tr:
+            d = (s.tr - s.ri) % n
+            nr = (s.ri + (-1 if n > 2 and d == n - 1 else 1)) % n
+            nx = min(s.x, s.C - rots[nr][2])
+            if s.fits(rots[nr][1], nx, s.y):
+                s.ri, s.x = nr, nx
+                return
+        elif s.x != s.tx:
+            nx = s.x + (1 if s.tx > s.x else -1)
+            if s.fits(rots[s.ri][1], nx, s.y):
+                s.x = nx
+                return
+        else:
+            s.state, s.acc = "drop", 0.0
+            return
+        s.ri, s.x = s.tr, s.tx
+
+    def lock(s):
+        cs, masks, _ = s.rots[s.p][s.ri]
+        for cx, cy in cs:
+            s.grid[s.y + cy][s.x + cx] = s.p + 1
+        for i, m in enumerate(masks):
+            s.rows[s.y + i] |= m << s.x
+        s.clear = [r for r in range(s.R) if s.rows[r] == s.full]
+        s.state, s.timer = ("clear" if s.clear else "spawn"), 0.0
+
+    def collapse(s):
+        n = len(s.clear)
+        keep = [r for r in range(s.R) if r not in s.clear]
+        s.rows = [0] * n + [s.rows[r] for r in keep]
+        s.grid = [[0] * s.C for _ in range(n)] + [s.grid[r] for r in keep]
+        s.score += s.SCORE[min(n, 4)] * (s.lines // 10 + 1)
+        s.lines += n
+        s.best = max(s.best, s.score)
+
+    def step(s, dt):
+        s.timer += dt
+        move_dt, drop_dt = s.speeds()
+        if s.state == "spawn":
+            p = s.next
+            s.next = s.draw_bag()
+            s.p, s.ri, s.y = p, 0, 0
+            s.x = (s.C - s.rots[p][0][2]) // 2
+            target = s.plan(p) if s.fits(s.rots[p][0][1], s.x, 0) else None
+            if target is None:
+                s.state, s.timer = "over", 0.0
+            else:
+                s.tr, s.tx = target
+                s.state, s.acc = "move", -0.08
+        elif s.state == "move":
+            s.acc += dt
+            while s.acc >= move_dt and s.state == "move":
+                s.acc -= move_dt
+                s.move_one()
+        elif s.state == "drop":
+            s.acc += dt
+            masks = s.rots[s.p][s.ri][1]
+            while s.acc >= drop_dt and s.state == "drop":
+                s.acc -= drop_dt
+                if s.fits(masks, s.x, s.y + 1):
+                    s.y += 1
+                else:
+                    s.lock()
+        elif s.state == "clear":
+            if s.timer > 0.36:
+                s.collapse()
+                s.state = "spawn"
+        elif s.timer > 3.0:
+            s.new_game()
+        s.draw()
+
+    def draw(s):
+        scr = s.scr
+        scr.erase()
+        C, R, k, ox, oy = s.C, s.R, s.k, s.ox, s.oy
+        cells = [row[:] for row in s.grid]
+        if s.state == "clear" and int(s.timer / 0.06) % 2 == 0:
+            for r in s.clear:
+                cells[r] = [15] * C
+        elif s.state == "over":
+            for r in range(max(0, R - int(s.timer / 0.05)), R):
+                cells[r] = [16] * C
+        elif s.state in ("move", "drop"):
+            cs, masks, _ = s.rots[s.p][s.ri]
+            gy = s.drop_y(masks, s.x, s.y)
+            for cx, cy in cs:
+                if not cells[gy + cy][s.x + cx]:
+                    cells[gy + cy][s.x + cx] = s.p + 8
+            for cx, cy in cs:
+                cells[s.y + cy][s.x + cx] = s.p + 1
+        for r in range(R):
+            for j in range(k):
+                runs(scr, oy + r * k + j, ox, cells[r], s.chars, s.attrs)
+        bw = 2 * k * C
+        for yy in range(oy, oy + R * k):
+            put(scr, yy, ox - 1, "\u2502", s.frame)
+            put(scr, yy, ox + bw, "\u2502", s.frame)
+        put(scr, oy + R * k, ox - 1, "\u2514" + "\u2500" * bw + "\u2518", s.frame)
+        if s.state == "over" and s.timer > 0.8:
+            put(scr, oy + R * k // 2, ox + bw // 2 - 4, " GAME OVER ", s.value)
+        px, py = ox + bw + 4, oy
+        put(scr, py, px, "NEXT", s.label)
+        for cx, cy in s.rots[s.next][0][0]:
+            put(scr, py + 2 + cy, px + 2 * cx, "\u2588\u2588", s.attrs[s.next + 1])
+        for i, (lab, val) in enumerate((("SCORE", s.score), ("LINES", s.lines), ("LEVEL", s.lines // 10),
+                                        ("BEST", s.best))):
+            put(scr, py + 5 + i * 3, px, lab, s.label)
+            put(scr, py + 6 + i * 3, px, str(val), s.value)
+
+
+class Ripple:
+    fps = 15
+    RAMP = " .:-=+*#%@"
+    MODES = ((1.5, 3.0, 1), (6.0, 2.4, 1), (18.0, 1.8, 1), (0.5, 7.0, 2))
+    KX, KY, DAMP = 0.5, 0.125, 0.99
+
+    def __init__(s, scr):
+        s.scr = scr
+        scr.erase()
+        s.h, s.w = h, w = scr.getmaxyx()
+        if np is not None:
+            s.u, s.o = np.zeros((h, w)), np.zeros((h, w))
+        else:
+            s.fps = 10
+            s.u = [[0.0] * w for _ in range(h)]
+            s.o = [[0.0] * w for _ in range(h)]
+        s.zero = [0.0] * w
+        s.prev = [None] * h
+        s.n = n = len(s.RAMP) - 1
+        lit = mkpal((24, 31, 38, 45, 51, 87, 123, 159, 195, 231), CYAN)
+        deep = mkpal((17, 18, 19, 20, 21, 26, 27, 32, 33, 39), BLUE)
+        s.chars = [" "] + list(s.RAMP[1:]) * 2
+        s.attrs = ([0] + [pick(lit, i / n) | (BOLD if i > n // 2 else 0) for i in range(1, n + 1)]
+                   + [pick(deep, i / n) for i in range(1, n + 1)])
+        M = 64
+        tbl = [0] * (2 * M)
+        for q in range(1, M):
+            tbl[q] = min(q, n)
+            tbl[2 * M - q] = n + min(q, n)
+        s.tbl, s.M = tbl, M
+        s.gain = 10.0
+        s.acc = 0.0
+        s.newmode()
+
+    def newmode(s):
+        s.rate, s.amp, s.rad = random.choice(s.MODES)
+        s.modet = time.monotonic() + random.uniform(8, 16)
+
+    def drop(s, x, y, amp, rad):
+        u = s.u
+        for dy in range(-rad, rad + 1):
+            for dx in range(-2 * rad, 2 * rad + 1):
+                yy, xx = y + dy, x + dx
+                if 0 <= yy < s.h and 0 <= xx < s.w:
+                    u[yy][xx] -= amp * math.exp(-(dx * dx / 4.0 + dy * dy) * 1.5 / rad)
+
+    def wave_py(s):
+        u, o, zero, H = s.u, s.o, s.zero, s.h
+        kx, ky, damp = s.KX, s.KY, s.DAMP
+        k0 = 2.0 - 2 * kx - 2 * ky
+        new = []
+        for y in range(H):
+            c = u[y]
+            up = u[y - 1] if y else zero
+            dn = u[y + 1] if y < H - 1 else zero
+            new.append([(k0 * cc + kx * (l + r) + ky * (a + b) - oo) * damp
+                        for cc, l, r, a, b, oo in zip(c, [0.0] + c[:-1], c[1:] + [0.0], up, dn, o[y])])
+        s.o, s.u = u, new
+
+    def wave_np(s):
+        u, kx, ky = s.u, s.KX, s.KY
+        new = (2.0 - 2 * kx - 2 * ky) * u - s.o
+        new[:, 1:] += kx * u[:, :-1]
+        new[:, :-1] += kx * u[:, 1:]
+        new[1:] += ky * u[:-1]
+        new[:-1] += ky * u[1:]
+        new *= s.DAMP
+        s.o, s.u = u, new
+
+    def codes_py(s):
+        u, zero, H, n, M, tbl = s.u, s.zero, s.h, s.n, s.M, s.tbl
+        gx, gy = 0.5 * s.gain, 0.25 * s.gain
+        out = []
+        for y in range(H):
+            c = u[y]
+            up = u[y - 1] if y else zero
+            dn = u[y + 1] if y < H - 1 else zero
+            qs = [int((l - r) * gx + (a - b) * gy) for l, r, a, b in zip([0.0] + c[:-1], c[1:] + [0.0], up, dn)]
+            out.append([tbl[q] if -M < q < M else (n if q > 0 else 2 * n) for q in qs])
+        return out
+
+    def codes_np(s):
+        u, n = s.u, s.n
+        p = np.pad(u, 1)
+        sv = (p[1:-1, :-2] - p[1:-1, 2:]) * (0.5 * s.gain) + (p[:-2, 1:-1] - p[2:, 1:-1]) * (0.25 * s.gain)
+        q = np.clip(np.trunc(sv), -n, n).astype(np.int64)
+        return np.where(q >= 0, q, n - q).tolist()
+
+    def step(s, dt):
+        now = time.monotonic()
+        if now > s.modet:
+            s.newmode()
+        s.acc += dt * s.rate * max(0.5, s.w * s.h / 10000.0)
+        while s.acc >= 1:
+            s.acc -= 1
+            s.drop(random.randrange(s.w), random.randrange(s.h), s.amp * random.uniform(0.6, 1.2), s.rad)
+        for _ in range(2):
+            s.wave_np() if np is not None else s.wave_py()
+        rows = s.codes_np() if np is not None else s.codes_py()
+        scr, prev = s.scr, s.prev
+        for y, row in enumerate(rows):
+            if row != prev[y]:
+                prev[y] = row
+                runs(scr, y, 0, row, s.chars, s.attrs)
+
+
+class BlackHole:
+    # Schwarzschild black hole (G = M = c = 1, horizon at r = 2). Every pixel is a light ray that is traced
+    # backwards through curved spacetime once at startup. Per frame only the textures move: the disk
+    # rotates differentially (Kepler), the camera orbits the axis, so stars stream around the shadow.
+    fps = 15
+    NR, NP = 160, 1024
+    SH, SW = 512, 1024
+    NAMES = ("GARGANTUA", "SGR A*", "M87*", "CYGNUS X-1", "GAIA BH1", "V404 CYGNI", "PHOENIX A", "MAW-7")
+    QUASARS = ("3C 273", "TON 618", "OJ 287", "APM 08279", "J0529-4351")
+
+    def __init__(s, scr):
+        s.px = px = Pix(scr)
+        H, W = s.H, s.W = px.H, px.W
+        R = random.uniform
+        s.kind = random.choice(("gargantua", "gargantua", "quasar", "ember", "exotic"))
+        s.el = math.radians(R(3.5, 15) if random.random() < 0.75 else R(18, 36))
+        s.D = R(23, 30)
+        s.rin, s.rout = R(3.2, 6.0), R(12.5, 17.0)
+        s.spin = random.choice((-1, 1))
+        s.speed = R(9, 13)
+        s.orbit = 2 * math.pi / R(380, 460) * random.choice((-1, 1))
+        T0, dopk, gp = {"gargantua": (4.3, 0.45, 2.2), "quasar": (14.0, 1.0, 3.2),
+                        "ember": (2.7, 0.75, 2.6), "exotic": (6.0, 0.9, 2.6)}[s.kind]
+        s.T0, s.dopk, s.gp = T0 * R(0.85, 1.15), dopk, gp
+        s.name = random.choice(s.QUASARS if s.kind == "quasar" else s.NAMES)
+        s.mass = "%.1f\u00d710%s M\u2609" % (R(1, 9.9), "\u2076\u2077\u2078\u2079"[random.randrange(4)])
+        tan_w = s.rout * R(1.05, 1.3) / s.D
+        s.k = k = max(tan_w / (W / 2.0), (9.5 / s.D) / max(1.0, H / 2.0))
+        se, ce = math.sin(s.el), math.cos(s.el)
+        s.cam = np.array([0.0, s.D * se, -s.D * ce])
+        ys, xs = np.mgrid[0:H, 0:W]
+        u = ((xs - W / 2.0 + 0.5) * k).ravel()
+        v = ((H / 2.0 - ys - 0.5) * k).ravel()
+        d = np.stack([u, -se + v * ce, ce + v * se], 1)
+        s.dirs = d / np.linalg.norm(d, axis=1)[:, None]
+        N = s.N = H * W
+        s.hits = np.zeros(N, np.int64)
+        s.hr, s.hp = np.zeros((N, 3)), np.zeros((N, 3))
+        s.hd = np.zeros((N, 3, 3))
+        s.cap = np.zeros(N, bool)
+        s.eth, s.eph = np.zeros(N), np.zeros(N)
+        s.row = 0
+        s.layers = []
+        s.t = 0.0
+        s.tex = s.make_disk()
+        s.sky = s.make_sky()
+        s.jet = s.kind == "quasar"
+        s.eye = (ys - H / 2.0 + 0.5, xs - W / 2.0 + 0.5)
+
+    def make_disk(s):
+        tab = ntab(random.randrange(1 << 30))
+        NR, NP = s.NR, s.NP
+        y, x = np.mgrid[0:NR, 0:NP].astype(np.float32)
+        P = random.choice((6, 8, 10))
+        x = x * (P / float(NP))
+        y = y * (30.0 / NR)
+        warp = fbm2(tab, x * 0.5, y * 0.2, 3, px=P // 2) * 4.0
+        n = fbm2(tab, x, y + warp, 4, px=P, gain=0.55)
+        xp = np.arange(0, NR + 3, 3)
+        rings = np.interp(np.arange(NR), xp, np.random.random(xp.size) ** 1.5)
+        streak = fbm2(tab, x * 3.0 + 50, y * 4.0, 3, px=P * 3)
+        t = np.clip((n - 0.3) * 2.2, 0, 1) * (0.35 + 0.65 * rings[:, None]) * (0.6 + 0.6 * streak)
+        return np.clip(t, 0, 1).astype(np.float32)
+
+    def make_sky(s):
+        SH, SW = s.SH, s.SW
+        q = 4
+        th = (np.arange(SH // q) + 0.5) / (SH // q) * math.pi
+        ph = (np.arange(SW // q) + 0.5) / (SW // q) * 2 * math.pi
+        TH, PH = np.meshgrid(th, ph, indexing="ij")
+        vx, vy, vz = np.sin(TH) * np.cos(PH), np.cos(TH), np.sin(TH) * np.sin(PH)
+        a, b = random.uniform(0, 2 * math.pi), random.uniform(0.3, 1.3)
+        nx, ny, nz = math.sin(b) * math.cos(a), math.cos(b), math.sin(b) * math.sin(a)
+        dist = vx * nx + vy * ny + vz * nz
+        tab = ntab(random.randrange(1 << 30))
+        cloud = fbm3(tab, vx * 2.5, vy * 2.5, vz * 2.5, 5)
+        dust = fbm3(tab, vx * 6 + 9, vy * 6, vz * 6, 4)
+        mw = np.exp(-(dist / 0.2) ** 2) * (0.35 + cloud) * smooth(0.25, 0.62, dust + 0.1)
+        neb = smooth(0.55, 0.8, fbm3(tab, vx * 1.7 - 4, vy * 1.7, vz * 1.7, 4))
+        hue = random.choice(((0.35, 0.12, 0.45), (0.1, 0.25, 0.45), (0.45, 0.15, 0.12)))
+        low = (mw[..., None] * np.array([0.23, 0.2, 0.17]) * 0.5 + neb[..., None] * np.array(hue) * 0.1)
+        sky = box_blur(low.astype(np.float32).repeat(q, 0).repeat(q, 1), q // 2)
+        n = int(SH * SW * 0.005)
+        z = np.random.uniform(-1, 1, n)
+        i = np.clip((np.arccos(z) / math.pi * SH).astype(int), 0, SH - 1)
+        j = np.random.randint(0, SW, n)
+        mag = 0.15 + np.random.random(n) ** 10 * 5.0
+        np.add.at(sky, (i, j), blackbody(np.random.uniform(2.8, 14.0, n)) * mag[:, None])
+        # a bright blue galaxy exactly on the line of sight behind the hole at some moment -> Einstein ring
+        s.te = random.uniform(22, 40)
+        thc = math.pi / 2 + s.el
+        phc = (math.pi / 2 + s.orbit * s.te) % (2 * math.pi)
+        i0, i1 = int((thc - 0.15) / math.pi * SH), int((thc + 0.15) / math.pi * SH)
+        th = (np.arange(i0, i1) + 0.5) / SH * math.pi
+        ph = (np.arange(SW) + 0.5) / SW * 2 * math.pi
+        dth = th[:, None] - thc
+        dph = (ph[None, :] - phc + math.pi) % (2 * math.pi) - math.pi
+        rr = dth ** 2 + (dph * math.sin(thc)) ** 2
+        sky[i0:i1] += np.exp(-rr / 0.0005)[..., None] * np.array([0.8, 1.1, 2.2], np.float32) * 1.3
+        return sky.astype(np.float32)
+
+    def trace(s, sel):
+        n = sel.size
+        p = np.tile(s.cam, (n, 1))
+        v = s.dirs[sel].copy()
+        h = (np.cross(p, v) ** 2).sum(1)
+        ids = np.arange(n)
+        hits, hr, hp, hd = s.hits, s.hr, s.hp, s.hd
+        r = np.sqrt((p * p).sum(1))
+        a = -1.5 * h[:, None] * p / (r ** 5)[:, None]
+        rin, rout, far = s.rin, s.rout, s.D * 1.6
+        for it in range(1500):
+            dt = np.clip(0.06 * r, 0.03, 1.6)[:, None]
+            pn = p + v * dt + 0.5 * a * dt * dt
+            rn = np.sqrt((pn * pn).sum(1))
+            an = -1.5 * h[:, None] * pn / (rn ** 5)[:, None]
+            v = v + 0.5 * (a + an) * dt
+            cr = np.flatnonzero((p[:, 1] > 0) != (pn[:, 1] > 0))
+            if cr.size:
+                y0, y1 = p[cr, 1], pn[cr, 1]
+                q = p[cr] + (pn[cr] - p[cr]) * (y0 / (y0 - y1))[:, None]
+                rq = np.hypot(q[:, 0], q[:, 2])
+                gi = sel[ids[cr]]
+                ok = (rq >= rin) & (rq <= rout) & (hits[gi] < 3)
+                if ok.any():
+                    gi, q, rq, cr = gi[ok], q[ok], rq[ok], cr[ok]
+                    kk = hits[gi]
+                    hr[gi, kk] = rq
+                    hp[gi, kk] = np.arctan2(q[:, 2], q[:, 0])
+                    dd = pn[cr] - p[cr]
+                    hd[gi, kk] = dd / np.linalg.norm(dd, axis=1)[:, None]
+                    hits[gi] += 1
+            p, r, a = pn, rn, an
+            fc = r < 2.02
+            fe = (r > far) & ((p * v).sum(1) > 0)
+            fin = fc | fe
+            if fin.any():
+                s.cap[sel[ids[fc]]] = True
+                e = np.flatnonzero(fe)
+                if e.size:
+                    ve = v[e] / np.linalg.norm(v[e], axis=1)[:, None]
+                    s.eth[sel[ids[e]]] = np.arccos(np.clip(ve[:, 1], -1, 1))
+                    s.eph[sel[ids[e]]] = np.arctan2(ve[:, 2], ve[:, 0])
+                keep = ~fin
+                p, v, h, r, a, ids = p[keep], v[keep], h[keep], r[keep], a[keep], ids[keep]
+                if not ids.size:
+                    break
+        s.cap[sel[ids]] = True
+
+    def shade(s, lo, hi):
+        # static per-pixel data for rows lo..hi: disk hits (color, texture coordinates) and sky lookup
+        W = s.W
+        base = np.arange(lo * W, hi * W)
+        layers = []
+        for k in range(3):
+            sel = base[s.hits[base] > k]
+            if not sel.size:
+                break
+            rr, phi, d = s.hr[sel, k], s.hp[sel, k], s.hd[sel, k]
+            beta = np.minimum(1.0 / np.sqrt(np.maximum(rr - 2.0, 0.3)), 0.8) * s.dopk
+            vx, vz = -np.sin(phi) * s.spin, np.cos(phi) * s.spin
+            cos = -(vx * d[:, 0] + vz * d[:, 2])
+            g = np.sqrt(1 - beta * beta) / (1 - beta * cos) * np.sqrt(1 - 2.0 / rr) ** 0.5
+            x = rr / s.rin
+            prof = x ** -0.75 * np.maximum(1 - x ** -0.5, 0) ** 0.25 / 0.49
+            if s.kind == "exotic":
+                col = ramp([(0.6, (1.0, 0.1, 0.5)), (0.95, (0.7, 0.3, 1.0)), (1.2, (0.3, 0.8, 1.0)),
+                            (1.5, (0.8, 1.0, 1.0))], g)
+            else:
+                col = blackbody(s.T0 * prof * g)
+            inten = (prof ** 2.0 * g ** s.gp * 3.2)[:, None]
+            edge = smooth(s.rin, s.rin * 1.08, rr) * (1 - smooth(s.rout * 0.6, s.rout, rr))
+            ri = np.clip(((np.log(rr) - math.log(s.rin)) / math.log(s.rout / s.rin) * (s.NR - 1)), 0, s.NR - 1)
+            layers.append((sel, np.full(sel.size, k), (col * inten).astype(np.float32), ri.astype(np.int64),
+                           (phi % (2 * math.pi)) * (s.NP / (2 * math.pi)),
+                           rr ** -1.5 * s.speed * s.spin * s.NP / (2 * math.pi), edge.astype(np.float32)))
+        esc = base[~s.cap[base]]
+        si = np.clip((s.eth[esc] / math.pi * s.SH).astype(np.int64), 0, s.SH - 1)
+        sp = s.eph[esc] * (s.SW / (2 * math.pi))
+        s.layers.append((layers, esc, si, sp))
+
+    def merge(s):
+        L = s.layers
+        out = []
+        for k in range(3):
+            parts = [ly[k] for ly, _, _, _ in L if len(ly) > k]
+            if parts:
+                out.append(tuple(np.concatenate([p[i] for p in parts]) for i in range(7)))
+        cat = lambda i: np.concatenate([x[i] for x in L])
+        s.layers = [(out, cat(1), cat(2), cat(3))]
+
+    def step(s, dt):
+        H, W, px = s.H, s.W, s.px
+        if s.row < H:
+            t0 = time.perf_counter()
+            lo = s.row
+            while s.row < H and (time.perf_counter() - t0 < 0.05 or s.row == lo):
+                n = max(1, 2400 // W)
+                hi = min(H, s.row + n)
+                s.trace(np.arange(s.row * W, hi * W))
+                s.row = hi
+            s.shade(lo, s.row)
+            if s.row >= H:
+                s.merge()
+        else:
+            s.t += dt
+        t = s.t
+        acc = np.zeros((s.N, 3), np.float32)
+        trans = np.ones(s.N, np.float32)
+        aoff = s.orbit * t
+        for layers, esc, si, sp in s.layers:
+            for sel, k, col, ri, pidx, om, edge in layers:
+                j = (pidx + aoff * (s.NP / (2 * math.pi)) - om * t).astype(np.int64) % s.NP
+                tex = s.tex[ri, j]
+                al = np.clip(0.25 + 1.5 * tex, 0, 1) * edge
+                tr = trans[sel]
+                acc[sel] += (tr * al)[:, None] * col * (0.15 + 1.5 * tex)[:, None]
+                trans[sel] = tr * (1 - al)
+            if esc.size:
+                j = (sp + aoff * (s.SW / (2 * math.pi))).astype(np.int64) % s.SW
+                acc[esc] += trans[esc][:, None] * s.sky[si, j]
+        img = acc.reshape(H, W, 3)
+        if s.row < H:
+            img[s.row:] = 0
+            if s.row < H:
+                img[s.row] = (0.2, 0.5, 0.8)
+        if s.jet:
+            dy, dx = s.eye
+            ay = np.abs(dy) * s.k * s.D
+            wdt = 0.15 + ay * 0.06
+            knots = 0.55 + 0.45 * np.sin(ay * 1.1 - t * 5.0) ** 2
+            j = np.exp(-(dx * s.k * s.D / wdt) ** 2) * np.exp(-ay / 22.0) * smooth(3.0, 7.0, ay) * knots
+            img += (j * trans.reshape(H, W) * 1.2)[..., None] * np.array([0.5, 0.65, 1.0], np.float32)
+        img = bloom(img, 0.7, max(1, W // 60), 0.5)
+        out = tonemap(img, 1.25)
+        px.show(out)
+        s.hud(t)
+
+    def hud(s, t):
+        px = s.px
+        y = px.rows - 3
+        if s.row < s.H:
+            pct = s.row * 100 // s.H
+            bar = "\u2588" * (pct // 5) + "\u2591" * (20 - pct // 5)
+            px.text(y + 1, 2, "integrating %d null geodesics  %s %3d%%" % (s.N, bar, pct), (0.35, 0.6, 0.9))
+            return
+        f = smooth(1.0, 3.0, t) * (1 - smooth(14.0, 17.0, t))
+        if f > 0.02:
+            c = (0.9 * f, 0.75 * f, 0.5 * f)
+            px.text(y, 3, s.name, c)
+            px.text(y + 1, 3, "M = %s   i = %.1f\u00b0   r_isco = %.1f r_g" % (s.mass, 90 - math.degrees(s.el), s.rin),
+                    (0.5 * f, 0.5 * f, 0.55 * f))
+        if abs(t - s.te) < 5:
+            f = 1 - abs(t - s.te) / 5
+            px.text(1, 3, "EINSTEIN RING", (0.5 * f, 0.7 * f, 1.0 * f))
+
+
+class Planet:
+    # procedurally generated worlds: terrain, oceans with sun glint, clouds, city lights on the night side,
+    # atmosphere, rings with shadows, moons with eclipses. Every visit is a new planet in a new scene.
+    fps = 15
+    PREFIX = ("KEPLER-", "TOI-", "GJ ", "HD ", "WASP-", "KELT-", "LHS ", "ROSS ", "WOLF ", "K2-", "LTT ", "HIP ")
+    POETIC = ("VESPERA", "THALASSA", "ASHFALL", "NOCTIS", "ELYSIA", "KHARON", "MERIDIAN", "OBSIDIAN", "SOLACE",
+              "TEMPEST", "HALCYON", "CINDER", "AURELIA", "NIFLHEIM")
+
+    def __init__(s, scr):
+        s.px = Pix(scr)
+        H, W = s.H, s.W = s.px.H, s.px.W
+        s.rng = np.random.default_rng(random.randrange(1 << 30))
+        s.kind = random.choice(("terran", "terran", "terran", "ocean", "desert", "ice", "lava", "toxic",
+                                "gas", "gas", "gas"))
+        gas = s.kind == "gas"
+        s.scene = random.choice(("approach", "drift", "sunrise") + (() if gas else ("orbit", "orbit")))
+        s.ringed = (random.random() < 0.7) if gas else (random.random() < 0.1)
+        s.ringed = s.ringed and s.scene != "orbit"
+        s.TW = 2048 if s.scene == "orbit" else 1024
+        s.TH = s.TW // 2
+        s.t = 0.0
+        s.make_world()
+        s.make_scene()
+        s.make_sky()
+        s.flash = []
+        yy, xx = np.mgrid[0:H, 0:W]
+        s.yy, s.xx = yy.astype(np.float32), xx.astype(np.float32)
+
+    # ------------------------------------------------------------ world generation
+    def make_world(s):
+        TH, TW, rng, k = s.TH, s.TW, s.rng, s.kind
+        lat = ((0.5 - (np.arange(TH) + 0.5) / TH) * math.pi).astype(np.float32)
+        L = lat[:, None]
+        alb = np.zeros((TH, TW, 3), np.float32)
+        spec = np.zeros((TH, TW), np.float32)
+        lights = np.zeros((TH, TW), np.float32)
+        emis = np.zeros((TH, TW, 3), np.float32)
+        s.speed = np.zeros(TH, np.float32)
+        lo = 3.0 / TW
+        U = random.uniform
+        if k == "gas":
+            pal = random.choice((
+                [(0, (0.55, 0.38, 0.25)), (0.3, (0.85, 0.72, 0.55)), (0.5, (0.95, 0.9, 0.8)), (0.7, (0.7, 0.45, 0.3)),
+                 (1, (0.4, 0.25, 0.18))],
+                [(0, (0.05, 0.12, 0.45)), (0.4, (0.15, 0.35, 0.8)), (0.6, (0.4, 0.7, 0.95)), (0.8, (0.85, 0.95, 1)),
+                 (1, (0.1, 0.2, 0.6))],
+                [(0, (0.75, 0.65, 0.42)), (0.5, (0.93, 0.85, 0.65)), (0.8, (0.85, 0.75, 0.5)), (1, (0.6, 0.5, 0.35))],
+                [(0, (0.3, 0.1, 0.4)), (0.35, (0.75, 0.35, 0.6)), (0.6, (0.95, 0.75, 0.8)), (0.8, (0.3, 0.6, 0.7)),
+                 (1, (0.15, 0.1, 0.3))],
+                [(0, (0.25, 0.04, 0.03)), (0.4, (0.6, 0.15, 0.05)), (0.7, (0.95, 0.5, 0.2)), (1, (0.4, 0.1, 0.05))]))
+            s.atm = np.array(pal[2][1]) * 0.6 + 0.2
+            warp = specnoise(TH, TW, 3.2, rng, aniso=4.0) * 0.06
+            latw = L + warp
+            b = np.zeros_like(latw)
+            for i in range(5):
+                b += math.pow(0.6, i) * np.sin(latw * U(3, 9) * (i + 1) + U(0, 6.3))
+            b = (b - b.min()) / (b.max() - b.min())
+            streak = specnoise(TH, TW, 2.4, rng, aniso=6.0)
+            v = np.clip(b + 0.07 * streak, 0, 1)
+            alb[:] = ramp(pal, v)
+            for _ in range(random.randint(1, 3)):
+                cy, cx = int(TH * U(0.3, 0.7)), int(TW * U(0, 1))
+                ry, rx = int(TH * U(0.025, 0.05)), int(TW * U(0.03, 0.06))
+                ys, xs = np.mgrid[-2 * ry:2 * ry, -2 * rx:2 * rx]
+                d = np.sqrt((ys / ry) ** 2 + (xs / rx) ** 2)
+                m = np.exp(-d ** 3)
+                ring = np.exp(-((d - 0.8) / 0.25) ** 2) * 0.5
+                col = np.array(random.choice(pal)[1]) * U(0.7, 1.3)
+                yi, xi = (cy + ys) % TH, (cx + xs) % TW
+                alb[yi, xi] = alb[yi, xi] * (1 - m[..., None]) + col * m[..., None] + ring[..., None] * 0.15
+            s.speed = (np.sin(lat * U(5, 9)) * U(0.01, 0.03)).astype(np.float32)
+            clouds = np.zeros((TH, TW), np.float32)
+            s.cloudcol = np.zeros(3)
+        else:
+            e = specnoise(TH, TW, 3.1, rng, lo=lo)
+            ridge = (1 - np.abs(specnoise(TH, TW, 2.6, rng))) ** 3
+            moist = specnoise(TH, TW, 2.7, rng)
+            jit = specnoise(TH, TW, 2.2, rng)
+            sea = {"terran": U(0.55, 0.72), "ocean": U(0.9, 0.97), "desert": U(0.0, 0.08), "ice": U(0.1, 0.3),
+                   "lava": U(0.2, 0.35), "toxic": U(0.4, 0.6)}[k]
+            sl = np.quantile(e, sea) if sea > 0.005 else e.min() - 1
+            land = e > sl
+            hgt = np.clip((e - sl) / (e.max() - sl + 1e-6), 0, 1)
+            hgt = np.where(land, np.clip(hgt * 0.75 + ridge * hgt * 0.8, 0, 1), 0)
+            dep = np.clip((sl - e) / (sl - e.min() + 1e-6), 0, 1)
+            temp = np.cos(L) * 1.15 - hgt * 0.8 + 0.06 * jit - 0.12
+            if k in ("terran", "ocean"):
+                water = ramp([(0, (0.06, 0.32, 0.42)), (0.08, (0.03, 0.17, 0.33)), (0.5, (0.01, 0.07, 0.2)),
+                              (1, (0.005, 0.03, 0.1))], dep)
+                dry = smooth(-0.6, 0.6, -moist + 0.4 * np.cos(L * 2.2 + 1.0) - 0.15)
+                green = ramp([(0, (0.05, 0.18, 0.05)), (0.5, (0.22, 0.35, 0.12)), (1, (0.45, 0.42, 0.25))], hgt * 1.4)
+                desert = ramp([(0, (0.78, 0.63, 0.42)), (0.6, (0.6, 0.42, 0.28)), (1, (0.45, 0.38, 0.32))], hgt)
+                ground = green * (1 - dry[..., None]) + desert * dry[..., None]
+                ground = np.where((hgt > 0.55)[..., None], ground * 0.5 + np.array([0.3, 0.27, 0.25]) * 0.5, ground)
+                s.atm = np.array([0.35, 0.6, 1.0])
+                s.cloudcol = np.array([1.0, 1.0, 1.0])
+                icet, cl, cb = 0.08, 0.55 if k == "ocean" else 0.4, 0.9
+            elif k == "desert":
+                water = np.zeros((TH, TW, 3), np.float32) + np.array([0.15, 0.1, 0.08], np.float32)
+                ground = ramp([(0, (0.32, 0.12, 0.06)), (0.3, (0.62, 0.3, 0.14)), (0.6, (0.8, 0.52, 0.3)),
+                               (1, (0.55, 0.4, 0.33))], hgt + 0.15 * moist)
+                ground *= (0.75 + 0.25 * ridge)[..., None]
+                s.atm = np.array([0.95, 0.6, 0.4])
+                s.cloudcol = np.array([0.9, 0.75, 0.6])
+                icet, cl, cb = -0.25, 0.12, 0.6
+            elif k == "ice":
+                water = ramp([(0, (0.1, 0.25, 0.35)), (1, (0.02, 0.06, 0.12))], dep)
+                ground = ramp([(0, (0.7, 0.82, 0.9)), (0.5, (0.88, 0.93, 0.97)), (1, (0.98, 0.99, 1.0))], hgt)
+                crack = smooth(0.82, 0.97, (1 - np.abs(specnoise(TH, TW, 2.0, rng))))
+                ground = ground * (1 - 0.55 * crack[..., None]) + crack[..., None] * np.array([0.1, 0.3, 0.5]) * 0.5
+                s.atm = np.array([0.6, 0.8, 1.0])
+                s.cloudcol = np.array([0.95, 0.97, 1.0])
+                icet, cl, cb = -9, 0.2, 0.5
+            elif k == "lava":
+                water = np.zeros((TH, TW, 3), np.float32) + np.array([0.25, 0.05, 0.0], np.float32)
+                ground = ramp([(0, (0.06, 0.05, 0.05)), (1, (0.22, 0.2, 0.19))], hgt)
+                crack = smooth(0.78, 0.98, (1 - np.abs(specnoise(TH, TW, 2.1, rng))))
+                emis = (crack * land)[..., None] * np.array([1.0, 0.35, 0.06], np.float32) * 1.2
+                emis += (~land)[..., None] * np.array([1.0, 0.3, 0.03], np.float32) * (0.6 + 0.6 * dep[..., None])
+                s.atm = np.array([0.9, 0.4, 0.2])
+                s.cloudcol = np.array([0.3, 0.27, 0.25])
+                icet, cl, cb = -9, 0.25, 0.7
+            else:
+                water = ramp([(0, (0.45, 0.15, 0.5)), (0.3, (0.25, 0.05, 0.3)), (1, (0.08, 0.0, 0.12))], dep)
+                ground = ramp([(0, (0.1, 0.45, 0.4)), (0.5, (0.6, 0.65, 0.2)), (1, (0.85, 0.85, 0.6))], hgt + 0.2 * moist)
+                s.atm = np.array([0.6, 0.95, 0.35])
+                s.cloudcol = np.array([0.85, 0.95, 0.6])
+                icet, cl, cb = 0.0, 0.35, 0.8
+            alb = np.where(land[..., None], ground, water)
+            rel = hgt * (2.5 if k in ("desert", "ice", "lava") else 1.6) + (ridge * 0.4 if k == "desert" else 0)
+            rel = box_blur(box_blur(rel.astype(np.float32), max(1, TW // 700)), max(1, TW // 700))
+            dl = 2 * math.pi / TW
+            gx = (np.roll(rel, -1, 1) - np.roll(rel, 1, 1)) / (2 * dl) / np.maximum(np.cos(L), 0.15)
+            gy = np.zeros_like(rel)
+            gy[1:-1] = (rel[:-2] - rel[2:]) / (2 * dl)
+            s.bump = np.stack([gx, gy], 2) * 0.008
+            ice = smooth(icet + 0.04, icet - 0.04, temp)
+            alb = alb * (1 - ice[..., None]) + ice[..., None] * np.array([0.92, 0.95, 1.0], np.float32)
+            spec = (~land) * (1 - ice) * (0.6 if k != "lava" else 0.2)
+            if k in ("terran", "toxic") and random.random() < 0.85:
+                hf = specnoise(TH, TW, 0.8, rng)
+                cluster = smooth(0.2, 1.4, specnoise(TH, TW, 2.6, rng))
+                ok = land & (hgt < 0.45) & (ice < 0.1) & (np.abs(L) < 1.1)
+                lights = np.clip(smooth(1.0, 2.6, hf) * cluster * ok * 2.0, 0, 1.5)
+                s.civ = float(lights.mean() > 0.002)
+            c = specnoise(TH, TW, 2.9, rng, aniso=1.4) + 0.4 * np.cos(L * 6) * cb
+            c = s.swirl(c, rng)
+            clouds = smooth(1.0 - cl * 1.6, 2.0 - cl * 1.6, c + 0.5 * specnoise(TH, TW, 1.8, rng)).astype(np.float32)
+        bump = getattr(s, "bump", None)
+        if bump is None:
+            bump = np.zeros((TH, TW, 2), np.float32)
+        s.tex = [np.concatenate([alb, spec[..., None], lights[..., None], emis, bump], 2).astype(np.float32)]
+        s.cl = [clouds.astype(np.float32)]
+        while s.tex[-1].shape[1] > 128:
+            t, c = s.tex[-1], s.cl[-1]
+            s.tex.append((t[0::2, 0::2] + t[1::2, 0::2] + t[0::2, 1::2] + t[1::2, 1::2]) * 0.25)
+            s.cl.append((c[0::2, 0::2] + c[1::2, 0::2] + c[0::2, 1::2] + c[1::2, 1::2]) * 0.25)
+
+    def swirl(s, c, rng):
+        TH, TW = c.shape
+        for _ in range(random.randint(0, 3)):
+            cy, cx = int(TH * random.uniform(0.25, 0.75)), random.randrange(TW)
+            r = int(TH * random.uniform(0.03, 0.06))
+            ys, xs = np.mgrid[-3 * r:3 * r, -3 * r:3 * r]
+            d = np.sqrt(ys * ys + xs * xs) / r
+            a = 3.5 * np.exp(-d) * (1 if cy < TH // 2 else -1)
+            ca, sa = np.cos(a), np.sin(a)
+            sy = (cy + (ys * ca - xs * sa)).astype(int) % TH
+            sx = (cx + (ys * sa + xs * ca)).astype(int) % TW
+            c[(cy + ys) % TH, (cx + xs) % TW] = c[sy, sx] + 0.8 * np.exp(-d * d * 0.5) * (d > 0.25)
+        return c
+
+    # ------------------------------------------------------------ scene
+    def make_scene(s):
+        H, W, U = s.H, s.W, random.uniform
+        M = min(H, W)
+        s.spin = U(0.04, 0.08) * random.choice((-1, 1))
+        s.cspin = s.spin * U(1.1, 1.4)
+        s.roll, s.pitch = U(-0.45, 0.45), U(0.1, 0.45)
+        s.sun = None
+        if s.scene == "approach":
+            s.r0, s.r1 = M * U(0.2, 0.28), M * U(0.42, 0.5)
+            s.c0 = s.c1 = (W * U(0.42, 0.58), H * U(0.45, 0.55))
+            a = U(0, 2 * math.pi)
+            s.L = unit(math.cos(a), math.sin(a) * 0.6, U(-0.2, 0.7))
+        elif s.scene == "drift":
+            r = M * U(0.36, 0.46)
+            s.r0 = s.r1 = r
+            side = random.choice((-1, 1))
+            s.c0, s.c1 = (W * (0.5 + side * 0.12), H * 0.52), (W * (0.5 - side * 0.08), H * 0.48)
+            s.L = unit(-side * U(0.6, 1), U(-0.3, 0.5), U(0.0, 0.6))
+        elif s.scene == "sunrise":
+            s.r0 = s.r1 = M * U(0.42, 0.5)
+            s.c0 = s.c1 = (W * 0.5, H * U(0.55, 0.65))
+            a = U(math.pi * 0.15, math.pi * 0.85)
+            s.sun = (math.cos(a), math.sin(a))
+            s.sunt = U(18, 30)
+            s.L = unit(0, 0, -1)
+        else:
+            R = W * U(1.6, 2.4)
+            s.r0 = s.r1 = R
+            s.c0 = s.c1 = (W * 0.5, H * U(0.3, 0.42) + R)
+            s.roll, s.pitch = math.pi / 2 + U(-0.25, 0.25), U(-0.2, 0.2)
+            s.spin = U(0.012, 0.02) * W / R * 3
+            s.cspin = s.spin * 1.15
+            if random.random() < 0.55:
+                s.L = unit(random.choice((-1, 1)), U(-0.12, 0.1), U(-0.1, 0.15))
+            else:
+                s.L = unit(U(-0.8, 0.8), U(0.2, 0.6), U(-0.15, 0.35))
+            s.fps = 12
+        s.Rt = rotz(s.roll) @ rotx(s.pitch)
+        s.axis = s.Rt[:, 1]
+        s.moons = []
+        if s.scene != "orbit":
+            for i in range(random.choice((0, 1, 1, 2))):
+                s.moons.append(dict(r=U(1.7, 3.2), size=U(0.06, 0.16), ph=U(0, 6.3), w=U(0.02, 0.05) * random.choice((-1, 1)),
+                                    inc=U(-0.25, 0.25), col=np.array(random.choice(((0.6, 0.58, 0.55), (0.7, 0.62, 0.5),
+                                                                                    (0.75, 0.8, 0.85))))))
+        if s.ringed:
+            s.rin, s.rout = U(1.25, 1.5), U(2.0, 2.6)
+            n = 512
+            xp = np.linspace(0, 1, 40)
+            dens = np.interp(np.linspace(0, 1, n), xp, np.random.random(40) ** 0.7)
+            dens *= 0.75 + 0.25 * np.interp(np.linspace(0, 1, n), np.linspace(0, 1, 120), np.random.random(120))
+            gap = U(0.45, 0.7)
+            dens *= 1 - 0.9 * np.exp(-((np.linspace(0, 1, n) - gap) / 0.025) ** 2)
+            dens *= smooth(0, 0.05, np.linspace(0, 1, n)) * smooth(1, 0.9, np.linspace(0, 1, n))
+            s.rdens = dens.astype(np.float32)
+            base = np.array(random.choice(((0.85, 0.78, 0.65), (0.75, 0.75, 0.78), (0.7, 0.8, 0.9), (0.8, 0.65, 0.55))))
+            tint = np.interp(np.linspace(0, 1, n), np.linspace(0, 1, 24), np.random.random(24))
+            s.rcol = (base[None, :] * (0.6 + 0.6 * tint[:, None]) * (0.75 + 0.25 * dens[:, None])).astype(np.float32)
+        s.name = (random.choice(s.POETIC) if random.random() < 0.3 else
+                  random.choice(s.PREFIX) + str(random.randint(12, 9999)) + " " + random.choice("bcdefg"))
+
+    def make_sky(s):
+        H, W = s.H, s.W
+        bg = np.zeros((H, W, 3), np.float32)
+        neb = specnoise(H, W, 3.0, s.rng)
+        hue = np.array(random.choice(((0.2, 0.05, 0.3), (0.03, 0.1, 0.25), (0.25, 0.08, 0.05))), np.float32)
+        bg += smooth(0.8, 2.6, neb)[..., None] * hue * 0.25
+        n = int(H * W * 0.006)
+        ys, xs = np.random.randint(0, H, n), np.random.randint(0, W, n)
+        mag = 0.08 + np.random.random(n) ** 12 * 1.2
+        np.add.at(bg, (ys, xs), blackbody(np.random.uniform(3, 12, n)) * mag[:, None])
+        s.bg = bg
+
+    # ------------------------------------------------------------ rendering
+    def step(s, dt):
+        s.t += dt
+        t, H, W = s.t, s.H, s.W
+        f = smooth(0, 60, t)
+        R = s.r0 + (s.r1 - s.r0) * f
+        cx = s.c0[0] + (s.c1[0] - s.c0[0]) * f
+        cy = s.c0[1] + (s.c1[1] - s.c0[1]) * f
+        L = s.L
+        if s.sun is not None:
+            off = 0.82 + 0.4 * (t / s.sunt)
+            sx, sy = s.sun[0] * off, s.sun[1] * off
+            L = unit(sx, sy, -1.4)
+            sunpx = (cx + sx * R, cy - sy * R)
+        img = s.bg.copy()
+        X = (s.xx - cx) / R
+        Y = (cy - s.yy) / R
+        d2 = X * X + Y * Y
+        inside = d2 < 1.0
+        zbuf = np.full((H, W), -1e9, np.float32)
+        hw = 0.035 if s.kind != "gas" else 0.025
+        halo = (d2 >= 1.0) & (d2 < (1 + hw * 6) ** 2)
+        if s.sun is not None:
+            img = s.sunglow(img, sunpx, R, cx, cy, inside)
+        if s.moons:
+            mo = s.moon_pos(t)
+            for m in mo:
+                if m["p"][2] < 0:
+                    s.draw_moon(img, zbuf, m, X, Y, L, R)
+        ii = np.flatnonzero(inside.ravel())
+        if ii.size:
+            col, z = s.surface(X.ravel()[ii], Y.ravel()[ii], d2.ravel()[ii], L, t, R, mo if s.moons else ())
+            img.reshape(-1, 3)[ii] = col
+            zbuf.reshape(-1)[ii] = z
+        hi = np.flatnonzero(halo.ravel())
+        if hi.size:
+            d = np.sqrt(d2.ravel()[hi])
+            nx, ny = X.ravel()[hi] / d, Y.ravel()[hi] / d
+            ndl = nx * L[0] + ny * L[1]
+            lit = smooth(-0.35, 0.45, ndl) + max(0.0, -L[2]) * 1.6 * np.maximum(ndl, 0) ** 1.5
+            a = np.exp(-(d - 1) / hw) * lit
+            img.reshape(-1, 3)[hi] += a[:, None] * s.atm[None, :] * 0.9
+        for fl in s.flash:
+            fx, fy = cx + fl[0] * R, cy - fl[1] * R
+            g = np.exp(-((s.xx - fx) ** 2 + (s.yy - fy) ** 2) / 6.0) * fl[2] * (0.6 + 0.4 * random.random())
+            img += (g * inside)[..., None] * np.array([0.75, 0.8, 1.0], np.float32)
+            fl[2] -= dt * random.uniform(3, 7)
+        s.flash = [fl for fl in s.flash if fl[2] > 0]
+        if s.ringed:
+            s.draw_rings(img, zbuf, X, Y, inside, L)
+        if s.moons:
+            for m in mo:
+                if m["p"][2] >= 0:
+                    s.draw_moon(img, zbuf, m, X, Y, L, R)
+        if s.sun is not None:
+            img = s.sunflare(img, sunpx, R, cx, cy)
+        img = bloom(img, 0.8, max(2, W // 50), 0.35)
+        s.px.show(tonemap(img, 1.35))
+        s.hud(t)
+
+    def surface(s, X, Y, d2, L, t, R, moons):
+        Z = np.sqrt(np.maximum(1 - d2, 0))
+        n = np.stack([X, Y, Z], 1)
+        b = n @ s.Rt
+        clat = np.sqrt(b[:, 0] ** 2 + b[:, 2] ** 2) + 1e-6
+        lat = np.arctan2(b[:, 1], clat)
+        lon = np.arctan2(b[:, 2], b[:, 0])
+        lvl = int(np.clip(math.log2(max(1.0, s.TW / (2 * math.pi * R) * 1.3)), 0, len(s.tex) - 1))
+        tex, cl = s.tex[lvl], s.cl[lvl]
+        th, tw = cl.shape
+        iy = np.clip(((0.5 - lat / math.pi) * th).astype(np.int64), 0, th - 1)
+        u = (lon + s.spin * t) / (2 * math.pi)
+        if s.kind == "gas":
+            u = u + s.speed[np.clip(iy * (s.TH // th), 0, s.TH - 1)] * t
+        ix = (u * tw).astype(np.int64) % tw
+        tx = tex[iy, ix]
+        alb, spec, lights, emis = tx[:, 0:3], tx[:, 3], tx[:, 4], tx[:, 5:8]
+        ndl = n @ L
+        day = smooth(-0.12, 0.18, ndl)
+        w = smooth(-0.05, 0.45, ndl)[:, None]
+        sunc = s.SUNSET * (1 - w) + s.NOON * w
+        diff = ndl
+        if s.kind != "gas":
+            Lb = s.Rt.T @ L
+            cl_, sl_ = b[:, 0] / clat, b[:, 2] / clat
+            eL = -sl_ * Lb[0] + cl_ * Lb[2]
+            nL = -b[:, 1] * (cl_ * Lb[0] + sl_ * Lb[2]) + clat * Lb[1]
+            diff = ndl - (tx[:, 8] * eL + tx[:, 9] * nL) * smooth(0.0, 0.08, ndl)
+        light = sunc * (np.maximum(diff, 0) * 1.25 * day)[:, None] + 0.012
+        if s.kind != "gas":
+            cx_ = ((lon + s.cspin * t) / (2 * math.pi) * tw).astype(np.int64) % tw
+            c = cl[iy, cx_]
+            sx_ = ((lon + s.cspin * t + 0.012 * np.sign(L[0] + 1e-9)) / (2 * math.pi) * tw).astype(np.int64) % tw
+            shadow = 1 - 0.45 * cl[iy, sx_] * day
+        else:
+            c = 0.0
+            shadow = 1.0
+        col = alb * light * shadow[:, None] if s.kind != "gas" else alb * light
+        if s.kind != "gas":
+            hv = unit(L[0], L[1], L[2] + 1.0)
+            sp = np.maximum(n @ hv, 0) ** 70 * spec * day * (1 - c)
+            col += sp[:, None] * sunc * 2.2
+            col = col * (1 - c)[:, None] + (c * 0.95)[:, None] * light * s.cloudcol
+            night = (1 - smooth(-0.25, 0.05, ndl))
+            col += (lights * night * (1 - 0.8 * c))[:, None] * np.array([1.0, 0.72, 0.38], np.float32) * 0.9
+            col += emis * (0.5 + 0.5 * night)[:, None] * (1 - 0.6 * c)[:, None]
+        rim = (1 - Z) ** 2.2
+        atm = smooth(-0.3, 0.4, ndl) + max(0.0, -L[2]) * np.maximum(X * L[0] + Y * L[1], 0) ** 2 * 2
+        col += (rim * atm * 0.55)[:, None] * s.atm
+        if s.ringed:
+            a = s.axis
+            den = float(L @ a)
+            if abs(den) > 1e-3:
+                sd = -(n @ a) / den
+                q = n + sd[:, None] * L[None, :]
+                rho = np.sqrt((q * q).sum(1))
+                ri = ((rho - s.rin) / (s.rout - s.rin) * 511).astype(np.int64)
+                m = (sd > 0) & (ri >= 0) & (ri < 512)
+                col[m] *= (1 - 0.8 * s.rdens[ri[m]])[:, None]
+        for m in moons:
+            p, rm = m["p"], m["size"]
+            v = p[None, :] - n
+            along = v @ L
+            perp = v - along[:, None] * L[None, :]
+            dist = np.sqrt((perp * perp).sum(1))
+            col *= (1 - 0.85 * ((along > 0) * smooth(rm, rm * 0.7, dist)))[:, None]
+        if s.kind in ("terran", "ocean") and random.random() < 0.25:
+            dark = np.flatnonzero((day < 0.03) & (c > 0.5) & (Z > 0.3))
+            if dark.size:
+                i = int(dark[random.randrange(dark.size)])
+                s.flash.append([float(X[i]), float(Y[i]), 1.0])
+        return col.astype(np.float32), Z
+
+    SUNSET = np.array([1.0, 0.38, 0.12], np.float32)
+    NOON = np.array([1.0, 0.96, 0.9], np.float32)
+
+    def moon_pos(s, t):
+        out = []
+        for m in s.moons:
+            a = m["ph"] + m["w"] * t
+            pb = np.array([m["r"] * math.cos(a), m["r"] * math.sin(a) * m["inc"], m["r"] * math.sin(a)])
+            out.append(dict(m, p=s.Rt @ pb))
+        return out
+
+    def draw_moon(s, img, zbuf, m, X, Y, L, R):
+        p, rm = m["p"], m["size"]
+        dx, dy = X - p[0], Y - p[1]
+        dd = dx * dx + dy * dy
+        msk = dd < rm * rm
+        if not msk.any():
+            return
+        z = np.sqrt(np.maximum(rm * rm - dd[msk], 0))
+        zz = p[2] + z
+        vis = zz > zbuf[msk]
+        nx, ny, nz = dx[msk] / rm, dy[msk] / rm, z / rm
+        ndl = nx * L[0] + ny * L[1] + nz * L[2]
+        cr = 0.85 + 0.15 * np.sin(nx * 23 + ny * 11) * np.sin(ny * 19 - nx * 7)
+        q = p + 0
+        sh = 1.0
+        if q @ L < 0:
+            perp = q - (q @ L) * L
+            sh = 1 - smooth(1.0, 0.95, float(np.linalg.norm(perp)))
+        col = m["col"][None, :] * (np.maximum(ndl, 0) * cr * sh)[:, None] + 0.01
+        sel = np.flatnonzero(msk.ravel())[vis]
+        img.reshape(-1, 3)[sel] = col[vis]
+        zbuf.reshape(-1)[sel] = zz[vis]
+
+    def draw_rings(s, img, zbuf, X, Y, inside, L):
+        a = s.axis
+        if abs(a[2]) < 1e-3:
+            return
+        tz = -(X * a[0] + Y * a[1]) / a[2]
+        rho = np.sqrt(X * X + Y * Y + tz * tz)
+        ri = ((rho - s.rin) / (s.rout - s.rin) * 511).astype(np.int64)
+        m = (ri >= 0) & (ri < 512) & (tz > zbuf)
+        if not m.any():
+            return
+        idx = np.flatnonzero(m.ravel())
+        r = ri.ravel()[idx]
+        q = np.stack([X.ravel()[idx], Y.ravel()[idx], tz.ravel()[idx]], 1)
+        along = q @ L
+        perp = q - along[:, None] * L[None, :]
+        sh = np.where((along < 0) & ((perp * perp).sum(1) < 1.0), 0.06, 1.0)
+        lit = (0.35 + 0.65 * abs(float(L @ a))) * sh
+        al = s.rdens[r][:, None]
+        col = s.rcol[r] * lit[:, None] * 0.9
+        flat = img.reshape(-1, 3)
+        flat[idx] = flat[idx] * (1 - al) + col * al
+        zbuf.reshape(-1)[idx] = np.where(al[:, 0] > 0.4, tz.ravel()[idx], zbuf.reshape(-1)[idx])
+
+    def pattern(s, R):
+        # glow and starburst around the sun, twice the screen size so that it can be sliced at any offset
+        if getattr(s, "pat", None) is None:
+            H, W = s.H, s.W
+            yy, xx = np.mgrid[-H:H, -W:W].astype(np.float32)
+            d = np.sqrt(xx * xx + yy * yy) + 1e-3
+            ang = np.arctan2(yy * 2, xx)
+            glow = np.exp(-d / (R * 0.18)) * 0.6 + np.exp(-d / (R * 0.6)) * 0.15
+            core = np.exp(-(d / (R * 0.05)) ** 2) * 6 + np.exp(-d / (R * 0.12)) * 1.2
+            rays = ((np.abs(np.cos(ang * 3)) ** 60 + 0.6 * np.abs(np.cos(ang * 3 + 0.5)) ** 120)
+                    * np.exp(-d / (R * 0.9)) * 1.4)
+            s.pat = (glow.astype(np.float32), (core + rays).astype(np.float32))
+        return s.pat
+
+    def cut(s, a, sp):
+        oy, ox = s.H - int(round(sp[1])), s.W - int(round(sp[0]))
+        oy, ox = min(max(oy, 0), s.H), min(max(ox, 0), s.W)
+        return a[oy:oy + s.H, ox:ox + s.W]
+
+    def sunglow(s, img, sp, R, cx, cy, inside):
+        glow = s.cut(s.pattern(R)[0], sp)
+        return img + (glow * ~inside)[..., None] * np.array([1.0, 0.85, 0.65], np.float32)
+
+    def sunflare(s, img, sp, R, cx, cy):
+        dist = math.hypot(sp[0] - cx, sp[1] - cy) / R
+        vis = smooth(0.985, 1.06, dist)
+        if vis <= 0.001:
+            return img
+        out = img + (s.cut(s.pattern(R)[1], sp) * vis)[..., None] * np.array([1.0, 0.92, 0.8], np.float32)
+        vx, vy = s.W / 2 - sp[0], s.H / 2 - sp[1]
+        for k, rad, col in ((0.5, 0.06, (0.3, 0.6, 1.0)), (1.1, 0.1, (0.4, 1.0, 0.5)), (1.5, 0.04, (1.0, 0.5, 0.3)),
+                            (1.9, 0.14, (0.5, 0.3, 1.0))):
+            gx, gy = sp[0] + vx * k * 2, sp[1] + vy * k * 2
+            rr = R * rad
+            y0, y1 = max(0, int(gy - 2 * rr)), min(s.H, int(gy + 2 * rr) + 1)
+            x0, x1 = max(0, int(gx - 2 * rr)), min(s.W, int(gx + 2 * rr) + 1)
+            if y0 < y1 and x0 < x1:
+                g = np.exp(-(((s.xx[y0:y1, x0:x1] - gx) ** 2 + (s.yy[y0:y1, x0:x1] - gy) ** 2) / rr ** 2) ** 2)
+                out[y0:y1, x0:x1] += (g * 0.18 * vis)[..., None] * np.array(col, np.float32)
+        return out
+
+    def hud(s, t):
+        px = s.px
+        lines = s.facts()
+        shown = int(max(0.0, t - 1.5) * 28)
+        fade = 1 - smooth(22, 26, t)
+        if fade <= 0:
+            return
+        y = 1
+        for i, (k, v) in enumerate(lines):
+            txt = ("%-12s %s" % (k, v)) if k else v
+            n = min(len(txt), shown)
+            shown -= len(txt)
+            if n <= 0:
+                break
+            c = (0.95 * fade, 0.8 * fade, 0.45 * fade) if i == 0 else (0.55 * fade, 0.75 * fade, 0.85 * fade)
+            px.text(y, 3, txt[:n] + ("\u2588" if 0 < shown < 4 and n == len(txt) else ""), c)
+            y += 1
+
+    def facts(s):
+        if getattr(s, "_facts", None):
+            return s._facts
+        k, U = s.kind, random.uniform
+        cls = {"terran": "temperate terrestrial", "ocean": "global ocean world", "desert": "arid desert world",
+               "ice": "frozen world", "lava": "molten lava world", "toxic": "toxic greenhouse world",
+               "gas": "gas giant"}[k]
+        rad = U(6, 14) if k == "gas" else U(0.5, 1.9)
+        atm = {"terran": "N\u2082 %d%% \u00b7 O\u2082 %d%% \u00b7 Ar" % (random.randint(68, 80), random.randint(15, 26)),
+               "ocean": "N\u2082 \u00b7 O\u2082 \u00b7 H\u2082O vapour", "desert": "CO\u2082 %d%% \u00b7 N\u2082" % random.randint(80, 96),
+               "ice": "N\u2082 \u00b7 CH\u2084 traces", "lava": "SO\u2082 \u00b7 Na vapour \u00b7 SiO",
+               "toxic": "CO\u2082 \u00b7 SO\u2082 \u00b7 Cl\u2082", "gas": "H\u2082 %d%% \u00b7 He \u00b7 CH\u2084" % random.randint(82, 92)}[k]
+        temp = {"terran": U(270, 305), "ocean": U(275, 300), "desert": U(220, 330), "ice": U(40, 180),
+                "lava": U(1400, 2600), "toxic": U(420, 740), "gas": U(70, 1400)}[k]
+        note = {"terran": random.choice(("biosignatures: probable", "artificial lights detected on the night side",
+                                         "liquid water: confirmed")),
+                "ocean": "no continents \u00b7 depth ~%d km" % random.randint(40, 300),
+                "desert": random.choice(("ancient riverbeds visible", "dust storms: planet-wide")),
+                "ice": random.choice(("subsurface ocean suspected", "cryovolcanism detected")),
+                "lava": "surface: molten silicates", "toxic": "surface pressure %d bar" % random.randint(60, 120),
+                "gas": "winds up to %d km/h" % random.randint(500, 2400)}[k]
+        if k == "terran" and getattr(s, "civ", 0) and "lights" not in note:
+            note = "artificial lights detected on the night side"
+        s._facts = [("", "\u25c9 SURVEY  " + s.name), ("class", cls), ("radius", "%.2f R\u2295" % rad),
+                    ("gravity", "%.2f g" % (rad * U(0.6, 1.1) if k != "gas" else U(1.1, 3.5))),
+                    ("day", "%.1f h" % U(9, 60)), ("atmosphere", atm), ("surface", "%d K" % temp),
+                    ("moons", str(len(s.moons)) + (" + rings" if s.ringed else "")), ("note", note)]
+        return s._facts
+
+
+class Aurora:
+    # northern lights over a procedurally generated nordic landscape: mountains, pine forest, a lake that
+    # mirrors the sky. The aurora goes through a substorm: quiet arc, growth, breakup with a corona, pulsing.
+    fps = 12
+    PALETTES = {
+        "classic": ((0.12, 1.0, 0.42), (0.75, 0.15, 0.6), (1.0, 0.3, 0.55)),
+        "crimson": ((0.35, 0.9, 0.35), (1.0, 0.08, 0.12), (1.0, 0.25, 0.35)),
+        "violet": ((0.25, 0.75, 1.0), (0.6, 0.2, 1.0), (1.0, 0.4, 0.9)),
+        "emerald": ((0.05, 1.0, 0.55), (0.1, 0.55, 0.65), (0.6, 1.0, 0.6)),
+    }
+
+    def __init__(s, scr):
+        s.px = Pix(scr)
+        H, W = s.H, s.W = s.px.H, s.px.W
+        U = random.uniform
+        s.rng = rng = np.random.default_rng(random.randrange(1 << 30))
+        s.pal = s.PALETTES[random.choice(("classic", "classic", "classic", "crimson", "violet", "emerald"))]
+        s.winter = random.random() < 0.45
+        s.frozen = s.winter and random.random() < 0.5
+        s.hz = hz = int(H * U(0.58, 0.68))
+        s.t = 0.0
+        s.T = U(-6, 4)
+        s.yy, s.xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        # sky
+        g = (s.yy[:hz] / hz)[..., None]
+        sky = np.array([0.004, 0.008, 0.024], np.float32) * (1 - g) + np.array([0.02, 0.035, 0.07], np.float32) * g
+        a = U(-0.6, 0.6)
+        d = (s.xx[:hz] - W / 2) * math.sin(a) + (s.yy[:hz] - hz * 0.4) * math.cos(a)
+        band = np.exp(-(d / (hz * 0.22)) ** 2) * smooth(0.0, 1.6, specnoise(hz, W, 2.6, rng) + 0.6)
+        sky += band[..., None] * np.array([0.03, 0.03, 0.04], np.float32)
+        n = int(hz * W * 0.012)
+        sy, sx = np.random.randint(0, hz - 2, n), np.random.randint(0, W, n)
+        mag = 0.05 + np.random.random(n) ** 10 * 1.4
+        np.add.at(sky, (sy, sx), blackbody(np.random.uniform(3, 12, n)) * mag[:, None])
+        tw = mag > 0.2
+        s.tw = (sy[tw], sx[tw], mag[tw], np.random.uniform(0, 6.3, tw.sum()))
+        s.moon = None
+        if random.random() < 0.55:
+            mr = max(2.0, H / 40.0)
+            s.moon = (U(W * 0.1, W * 0.9), U(hz * 0.12, hz * 0.45), mr, U(0.4, 2.0) * mr)
+        s.sky = sky
+        s.make_land()
+        s.meteors = []
+        s.nextmet = U(4, 12)
+        s.fireball = random.random() < 0.2
+        s.fbt = U(15, 45)
+        s.sat = (U(0, W), U(-0.2, 0.2), U(4, 9), U(5, 40)) if random.random() < 0.6 else None
+        # aurora curtains
+        s.curt = []
+        for i in range(random.randint(2, 4)):
+            s.curt.append(dict(base=hz - U(0.2, 0.55) * hz, amp=U(0.08, 0.22) * hz, hs=U(0.18, 0.4) * hz,
+                               sc=U(0.003, 0.009), v=U(0.01, 0.04) * random.choice((-1, 1)), ph=U(0, 100),
+                               bright=U(0.55, 1.0), tilt=U(-0.25, 0.25), arc=U(-0.5, 0.35) * hz,
+                               xc=U(0.2, 0.8) * W, wid=U(0.35, 0.9) * W, drift=U(-0.6, 0.6)))
+        s.dys = np.arange(-hz, hz + 1, dtype=np.float32)
+        s.persp = (s.xx[:hz] - W / 2) / max(1, W) * 0.5
+        s.cang = np.arctan2(s.xx[:hz] - W * 0.5, s.yy[:hz] + hz * 0.9)
+        s.wave = specnoise1(4096, 1.6, rng)
+        s.rays = specnoise1(4096, 0.9, rng)
+        s.patch = specnoise1(4096, 2.2, rng)
+
+    def make_land(s):
+        H, W, hz, rng, U = s.H, s.W, s.hz, s.rng, random.uniform
+        mask = np.zeros((H, W), np.int8)
+        col = np.zeros((H, W, 3), np.float32)
+        snow = np.zeros((H, W), np.float32)
+        layers = ((U(0.17, 0.3), 2.2, (0.013, 0.018, 0.03), 0.7), (U(0.09, 0.15), 2.0, (0.009, 0.012, 0.02), 0.35),
+                  (U(0.03, 0.06), 1.8, (0.007, 0.009, 0.015), 0.0))
+        sline = hz - hz * layers[0][0] * U(0.55, 0.75)
+        for li, (hgt, beta, c, sn) in enumerate(layers):
+            n = specnoise1(W, beta + 0.4, rng)
+            peaks = np.clip(1 - np.abs(specnoise1(W, 2.4, rng)) * 0.6, 0, 1)
+            prof = hz - hz * hgt * (0.5 + 0.15 * n + 0.55 * peaks ** 2.5 * (li == 0))
+            top = np.clip(prof, 1, hz - 1).astype(int).tolist()
+            slope = np.gradient(prof)
+            side = random.choice((-1, 1))
+            for x in range(W):
+                mask[top[x]:hz, x] = li + 1
+                col[top[x]:hz, x] = c
+                if sn and (s.winter or li == 0):
+                    rows = np.arange(top[x], hz)
+                    lim = sline + (hz - sline) * (0.5 if s.winter else 0) + 2.0 * math.sin(x * 0.7)
+                    lit = 0.45 + 0.55 * (slope[x] * side > 0)
+                    snow[top[x]:hz, x] = (rows < lim) * (0.5 + 0.5 * ((rows - top[x]) < 2)) * sn * lit
+        # pine forest on the shore
+        x = 0.0
+        while x < W:
+            th = U(3, 7) * H / 60.0 * (1.6 if random.random() < 0.15 else 1.0)
+            if random.random() < 0.82:
+                top = hz - th
+                for yy in range(int(top), hz):
+                    f = (yy - top) / th
+                    half = (0.15 + f * 0.55 * th * 0.32) * (0.65 + 0.35 * ((f * 4) % 1))
+                    a, b = int(round(x - half)), int(round(x + half)) + 1
+                    mask[yy, max(0, a):min(W, b)] = 4
+                    col[yy, max(0, a):min(W, b)] = (0.006, 0.008, 0.012)
+                    snow[yy, max(0, a):min(W, b)] *= 0
+                    if s.winter and (f * 4) % 1 < 0.25:
+                        snow[yy, max(0, a):min(W, b)] = 0.25
+            x += U(0.8, 3.5) * H / 60.0
+        s.cabin = None
+        if random.random() < 0.5:
+            cw = max(4, int(W / 30))
+            cx = int(U(0.15, 0.85) * W)
+            chh = max(2, int(H / 30))
+            y0 = hz - chh
+            mask[y0:hz, cx:cx + cw] = 4
+            col[y0:hz, cx:cx + cw] = (0.02, 0.012, 0.01)
+            for i in range(max(2, cw // 2)):
+                yy = y0 - 1 - i
+                if yy >= 0:
+                    mask[yy, cx - 1 + i:cx + cw + 1 - i] = 4
+                    col[yy, cx - 1 + i:cx + cw + 1 - i] = (0.015, 0.012, 0.012)
+                    if s.winter:
+                        snow[yy, cx - 1 + i:cx + cw + 1 - i] = 0.6
+            s.cabin = (cx + cw // 3, hz - max(1, chh // 2), cx + cw - 2, y0 - max(2, cw // 2))
+        s.mask, s.lcol, s.snow = mask, col, snow
+        s.land = mask > 0
+
+    def activity(s, t):
+        # substorm timeline: quiet -> growth -> breakup -> pulsating -> quiet (period 80 s)
+        p = (t + 6) % 80
+        if p < 14:
+            return 0.25 + 0.1 * p / 14, 0.3
+        if p < 26:
+            return 0.35 + 0.45 * smooth(14, 26, p), 0.5
+        if p < 40:
+            return 1.0 + 0.15 * math.sin(p * 1.7), 1.0 + smooth(26, 30, p) * 1.5
+        if p < 62:
+            return 0.45 + 0.25 * (math.sin(p * 2.1) > 0.3), 0.6
+        return 0.45 - 0.2 * smooth(62, 80, p), 0.35
+
+    def lookup(s, arr, x):
+        n = arr.size
+        i = np.floor(x)
+        f = x - i
+        i = i.astype(np.int64) % n
+        return arr[i] * (1 - f) + arr[(i + 1) % n] * f
+
+    def step(s, dt):
+        s.t += dt
+        s.T += dt
+        t, T, H, W, hz = s.t, s.T, s.H, s.W, s.hz
+        act, speed = s.activity(T)
+        img = np.empty((H, W, 3), np.float32)
+        sky = s.sky.copy()
+        ty, tx, tm, tp = s.tw
+        sky[ty, tx] += (tm * 0.35 * np.sin(t * 3 + tp))[:, None] * np.array([0.9, 0.9, 1.0], np.float32)
+        if s.moon:
+            mx, my, mr, off = s.moon
+            d = np.sqrt((s.xx[:hz] - mx) ** 2 + (s.yy[:hz] - my) ** 2)
+            disk = smooth(mr + 0.5, mr - 0.5, d)
+            shadow = smooth(mr - 0.5, mr + 0.5, np.sqrt((s.xx[:hz] - mx + off) ** 2 + (s.yy[:hz] - my) ** 2))
+            sky += (disk * shadow * 1.1)[..., None] * np.array([1.0, 0.97, 0.88], np.float32)
+            sky += (np.exp(-d / (mr * 4)) * 0.08 * off / (2 * mr))[..., None] * np.array([0.6, 0.7, 0.9], np.float32)
+        # aurora
+        yy, xx = s.yy[:hz], s.xx[:hz]
+        aur = np.zeros((hz, W, 3), np.float32)
+        low, high, fringe = (np.array(c, np.float32) for c in s.pal)
+        xs = np.arange(W, dtype=np.float32)
+        glow = 0.0
+        dys = s.dys
+        for c in s.curt:
+            xc = c["xc"] + math.sin(T * 0.05 + c["ph"]) * W * 0.25 * c["drift"]
+            env = smooth(c["wid"] * 0.5, c["wid"] * 0.5 - W * 0.15, np.abs(xs - xc))
+            if env.max() < 0.01:
+                continue
+            u = (xs - xc) / W
+            yb = (c["base"] + c["arc"] * u * u * 4 + c["amp"] * s.lookup(s.wave, xs * c["sc"] * 8 + c["ph"]
+                                                                          + T * c["v"] * 8 * speed))
+            pulse = s.lookup(s.patch, xs * 0.05 + c["ph"] * 3 - T * 0.6 * speed) * 0.6 + 0.5
+            inten = c["bright"] * act * env * (0.3 + 0.7 * np.clip(pulse, 0, 1))
+            hs = c["hs"] * (0.7 + 0.5 * act)
+            v = np.where(dys >= 0, np.exp(-dys / hs) * (0.55 + 0.45 * smooth(0, 3.0, dys)) + 0.6 * np.exp(-dys / 2.0),
+                         np.exp(dys / 1.2))
+            hf = smooth(hs * 0.25, hs * 1.4, dys)[:, None]
+            fr = (np.exp(-np.maximum(dys, 0) / 2.5) * smooth(0.75, 1.1, act) * 0.45)[:, None]
+            tab = (v[:, None] * ((low * (1 - hf) + high * hf) * (1 - fr) + fringe * fr)).astype(np.float32)
+            dy = yb[None, :] - yy
+            di = np.clip(dy + hz, 0, 2 * hz).astype(np.int64)
+            xr = (xx + dy * (c["tilt"] + s.persp)) * 0.9 + c["ph"] * 7 + T * 2.5 * speed
+            ray = 0.4 + 0.6 * np.clip(s.rays[xr.astype(np.int64) % 4096] * 0.5 + 0.5, 0, 1)
+            aur += tab[di] * (ray * inten[None, :])[..., None]
+            glow += float(inten.mean())
+        p = (T + 6) % 80
+        cor = smooth(28, 31, p) * (1 - smooth(37, 41, p))
+        if cor > 0.01:
+            rr = 0.35 + 0.65 * np.clip(s.lookup(s.rays, s.cang * 90 + T * 2) * 0.45 + 0.5, 0, 1)
+            fall = np.exp(-(yy / (hz * 0.5))) * cor
+            aur += (rr * fall * 0.7)[..., None] * (low * 0.55 + high * 0.45)
+        haze = smooth(0, hz, yy)[..., None] * low * (0.025 * glow)
+        sky += aur * 1.1 + haze
+        # meteors
+        if t > s.nextmet:
+            s.nextmet = t + random.uniform(5, 15)
+            a = random.uniform(0.3, 1.2) * random.choice((-1, 1))
+            s.meteors.append([random.uniform(W * 0.1, W * 0.9), random.uniform(0, hz * 0.4), math.sin(a), math.cos(a),
+                              random.uniform(60, 120), 0.0, random.uniform(0.6, 1.0), 0.6])
+        if s.fireball and abs(t - s.fbt) < dt / 2:
+            s.meteors.append([random.uniform(W * 0.2, W * 0.8), 0.0, random.uniform(-0.6, 0.6), 1.0, 45, 0.0, 6.0, 1.8])
+        flash = 0.0
+        for m in s.meteors:
+            m[5] += dt
+            x0, y0, sx, sy, v, age, b, life = m
+            L = v * age
+            for i in range(14):
+                f = i / 14.0
+                px_, py_ = x0 + sx * (L - f * min(L, 30)), y0 + sy * (L - f * min(L, 30))
+                iy, ix = int(py_), int(px_)
+                if 0 <= iy < hz and 0 <= ix < W:
+                    fade = (1 - f) * b * max(0.0, 1 - age / life)
+                    sky[iy, ix] += np.array([0.8, 1.0, 0.85], np.float32) * fade
+            if b > 3:
+                flash += b * max(0.0, 1 - age / life) * 0.04
+        s.meteors = [m for m in s.meteors if m[5] < m[7]]
+        if s.sat:
+            x0, slope, v, t0 = s.sat
+            if t > t0:
+                ix = int(x0 + (t - t0) * v)
+                iy = int(hz * 0.15 + (ix - x0) * slope)
+                if 0 <= ix < W and 0 <= iy < hz:
+                    sky[iy, ix] += 0.35
+        # landscape, lit by aurora + moon
+        amb = (low * 0.6 + high * 0.15) * (0.05 * glow) + flash * np.array([0.6, 1.0, 0.7], np.float32)
+        moonl = 0.12 if s.moon else 0.04
+        lc = s.lcol + s.snow[..., None] * (amb * 3.0 + np.array([0.5, 0.55, 0.65], np.float32) * moonl)
+        upper = np.where(s.land[:hz, :, None], lc[:hz], sky)
+        if s.cabin:
+            wx, wy = s.cabin[:2]
+            upper[wy, wx:wx + 2] = np.array([1.0, 0.62, 0.25], np.float32) * (1.2 + 0.15 * math.sin(t * 7))
+        img[:hz] = upper
+        # lake
+        n = H - hz
+        if n > 0:
+            ly = np.arange(hz, H)
+            src = np.clip(2 * hz - ly - 1, 0, hz - 1)
+            depth = (ly - hz) / max(1.0, n)
+            if s.frozen:
+                base = np.array([0.05, 0.065, 0.09], np.float32) + amb * 1.5 + 0.03 * moonl
+                tex = 0.85 + 0.15 * s.lookup(s.rays, s.xx[hz:] * 0.3 + s.yy[hz:] * 7.3)
+                img[hz:] = base * tex[..., None]
+                img[hz:] += upper[src][:, :, :] * 0.12
+            else:
+                wob = (np.sin(ly * 0.8 + t * 1.6) + 0.5 * np.sin(ly * 2.3 - t * 2.4)) * (0.5 + 3.0 * depth)
+                sx = (np.arange(W)[None, :] + wob[:, None] + 0.6 * np.sin(s.xx[hz:] * 0.21 + t)).astype(np.int64) % W
+                refl = upper[src[:, None], sx]
+                img[hz:] = refl * (0.55 - 0.25 * depth)[:, None, None] + np.array([0.003, 0.008, 0.014], np.float32)
+                if s.moon:
+                    mx = s.moon[0]
+                    path = np.exp(-((s.xx[hz:] - mx) / (2 + 6 * depth[:, None])) ** 2)
+                    sparkle = s.rays[((s.xx[hz:] * 13.7 + ly[:, None] * 71.3 + t * 40) % 4096).astype(np.int64)] > 1.0
+                    img[hz:] += (path * sparkle * 0.25)[..., None] * np.array([1, 0.95, 0.85], np.float32)
+        img = bloom(img, 0.55, max(2, W // 60), 0.6)
+        s.px.show(tonemap(img, 1.6))
+
+
+class Abyss:
+    # a dive from the sunlit surface to the bottom of the Challenger Deep: god rays, marine snow in the
+    # headlights, bioluminescent jellyfish, comb jellies, a siphonophore, an anglerfish, a giant squid and
+    # finally a hydrothermal vent field. Depth gauge and field notes on the side.
+    fps = 15
+    TDIVE = 48.0
+    ZONES = ((0, "EPIPELAGIC"), (200, "MESOPELAGIC"), (1000, "BATHYPELAGIC"), (4000, "ABYSSOPELAGIC"),
+             (6000, "HADOPELAGIC"))
+
+    def __init__(s, scr):
+        s.px = Pix(scr)
+        s.H, s.W = s.px.H, s.px.W
+        s.yy, s.xx = np.mgrid[0:s.H, 0:s.W].astype(np.float32)
+        s.dive()
+
+    def dive(s):
+        H, W, U = s.H, s.W, random.uniform
+        s.t = 0.0
+        s.maxd = U(10850, 10994)
+        n = max(60, H * W // 70)
+        s.snow = np.stack([np.random.uniform(0, W, n), np.random.uniform(0, H, n), np.random.uniform(0.25, 1.0, n)], 1)
+        # headlights: two cones from just above the screen
+        c = np.zeros((H, W), np.float32)
+        for sx, ang in ((0.4, -0.25), (0.6, 0.25)):
+            dx, dy = s.xx - W * sx, s.yy + H * 0.15
+            a = np.arctan2(dx, dy * 2) - ang
+            c += np.exp(-(a / 0.28) ** 2) / (1 + np.sqrt(dx * dx + dy * dy * 4) / (H * 0.9)) ** 2
+        s.cone = c / c.max()
+        s.ray = specnoise1(2048, 1.4, np.random.default_rng(random.randrange(1 << 30)))
+        s.mobs = []
+        s.notes = []
+        side = random.choice((-1, 1))
+        s.plan = [(30, "fish"), (random.uniform(350, 700), "lantern"), (random.uniform(250, 900), "comb"),
+                  (random.uniform(900, 1500), "jelly"), (random.uniform(1300, 2200), "siph"),
+                  (random.uniform(1700, 2600), "jelly"), (random.uniform(2400, 3400), "angler"),
+                  (random.uniform(4600, 5600), "squid"), (random.uniform(7000, 8500), "jelly")]
+        s.plan.sort()
+        s.side = side
+        s.floor = None
+        fr = np.random.default_rng(random.randrange(1 << 30))
+        s.fprof = specnoise1(W, 2.2, fr)
+        s.vents = sorted(random.sample(range(int(W * 0.1), int(W * 0.9)), random.randint(1, 3))) if W > 20 else []
+        s.plume = []
+        s.dumbo = None
+
+    def depth(s, t):
+        return s.maxd * min(1.0, t / s.TDIVE) ** 2.0
+
+    def note(s, txt):
+        s.notes.append([txt, s.t])
+
+    # ------------------------------------------------------------ creatures
+    def spawn(s, kind):
+        H, W, U = s.H, s.W, random.uniform
+        sd = random.choice((-1, 1))
+        if kind == "fish":
+            s.mobs.append(dict(k=kind, x=-W * 0.3 if sd > 0 else W * 1.3, y=H * U(0.35, 0.6), vx=sd * W / 9.0,
+                               n=np.random.normal(0, 1, (60, 2)) * (W * 0.06, H * 0.05), ph=U(0, 6)))
+        elif kind == "lantern":
+            for i in range(random.randint(4, 8)):
+                s.mobs.append(dict(k=kind, x=U(0, W), y=U(H * 0.2, H * 1.2), vx=sd * U(4, 10), ph=U(0, 6),
+                                   z=U(0.4, 1.0)))
+            s.note("Myctophidae \u00b7 lanternfish, the most common vertebrate on earth")
+        elif kind == "comb":
+            s.mobs.append(dict(k=kind, x=U(W * 0.25, W * 0.75), y=H * 1.15, r=H * U(0.07, 0.11), ph=U(0, 6)))
+            s.note("Beroe \u00b7 comb jelly \u2013 the rainbow is diffraction on beating cilia")
+        elif kind == "jelly":
+            col = random.choice(((0.2, 0.6, 1.0), (1.0, 0.25, 0.6), (0.4, 1.0, 0.8), (1.0, 0.5, 0.15), (0.7, 0.4, 1.0)))
+            x = U(W * 0.15, W * 0.85)
+            s.mobs.append(dict(k=kind, x=x, y=H * 1.2, r=H * U(0.06, 0.12), ph=U(0, 6), col=np.array(col, np.float32),
+                               trail=[(x, H * 1.2)] * 40, alarm=random.random() < 0.5))
+            if not any(n[0].startswith("Atolla") for n in s.notes) and s.mobs[-1]["alarm"]:
+                s.note("Atolla wyvillei \u00b7 alarm jellyfish \u2013 its light calls bigger predators")
+            elif not any(n[0].startswith("Periphylla") for n in s.notes):
+                s.note("Periphylla \u00b7 helmet jellyfish, lives up to 30 years in darkness")
+        elif kind == "siph":
+            s.mobs.append(dict(k=kind, x=-W * 0.9 if sd > 0 else W * 1.9, y=H * U(0.35, 0.65), vx=sd * W / 14.0,
+                               len=W * 0.9, ph=U(0, 6)))
+            s.note("Praya dubia \u00b7 siphonophore, a colony up to 40 m long")
+        elif kind == "angler":
+            s.mobs.append(dict(k=kind, x=W * (0.5 - 0.65 * sd), y=H * U(0.5, 0.7), sd=sd, born=s.t, ph=U(0, 6)))
+            s.note("Melanocetus johnsonii \u00b7 humpback anglerfish")
+        elif kind == "squid":
+            s.mobs.append(dict(k=kind, sd=s.side, born=s.t, y=H * U(0.4, 0.6)))
+            s.note("Architeuthis dux \u00b7 giant squid \u2013 eyes the size of a dinner plate")
+
+    def creatures(s, img, pts, dt, scroll, lamp):
+        H, W, t = s.H, s.W, s.t
+        keep = []
+        for m in s.mobs:
+            k = m["k"]
+            if k == "fish":
+                m["x"] += m["vx"] * dt
+                m["y"] -= scroll * dt * 0.6
+                ph = m["ph"] + t * 2
+                off = m["n"] + np.array([0, 1]) * np.sin(m["n"][:, 0] * 0.08 + ph)[:, None] * H * 0.03
+                xs, ys = (m["x"] + off[:, 0]).astype(int), (m["y"] + off[:, 1]).astype(int)
+                for dx in (0, 1, 2):
+                    ok = (xs + dx >= 0) & (xs + dx < W) & (ys >= 0) & (ys < H)
+                    img[ys[ok], xs[ok] + dx] *= 0.35
+                alive = -W * 0.5 < m["x"] < W * 1.5
+            elif k == "lantern":
+                m["x"] += m["vx"] * dt
+                m["y"] -= scroll * dt * m["z"]
+                blink = 0.5 + 0.5 * math.sin(t * 3 + m["ph"])
+                i = np.arange(4)
+                pts.append((m["x"] + i * 1.5 * np.sign(m["vx"]), m["y"] + i % 2, (0.2, 0.55, 1.0), 1.2 * blink * m["z"]))
+                alive = -20 < m["x"] < W + 20 and m["y"] > -10
+            elif k == "comb":
+                m["y"] -= (scroll * 0.8 + 2) * dt
+                r = m["r"]
+                row = np.arange(8)[:, None]
+                j = np.arange(12)[None, :]
+                xs = m["x"] + np.cos(row / 8 * math.pi) * r * 0.55 * np.sin(j / 11 * math.pi)
+                ys = m["y"] - r + j / 11 * 2 * r + row * 0
+                pts.append((xs.ravel(), ys.ravel(), hsv((row / 8 + j / 12 - t * 0.9).ravel(), 0.8, 1.0), 0.5 + 0.6 * lamp))
+                a = np.linspace(0, 2 * math.pi, 48, endpoint=False)
+                pts.append((m["x"] + np.cos(a) * r * 0.6, m["y"] + np.sin(a) * r, (0.3, 0.45, 0.6), 0.15 + 0.4 * lamp))
+                alive = m["y"] > -2 * r
+            elif k == "jelly":
+                pulse = math.sin(t * 2.2 + m["ph"])
+                m["y"] -= (scroll * 0.9 + max(0.0, pulse) * 14) * dt
+                m["x"] += math.sin(t * 0.3 + m["ph"]) * 3 * dt
+                tr = m["trail"]
+                tr.insert(0, (m["x"], m["y"]))
+                tr.pop()
+                r = m["r"] * (1 + 0.12 * pulse)
+                col = m["col"]
+                a = np.linspace(0.05, math.pi - 0.05, max(26, int(r * 2.2)))[None, :]
+                ring = np.array([1.0, 0.92, 0.8, 0.66, 0.52, 0.38, 0.24])[:, None]
+                xs = m["x"] + np.cos(a) * r * ring * (1.05 - 0.1 * pulse)
+                ys = m["y"] - np.sin(a) * r * 0.75 * ring + r * 0.15
+                br = np.where(ring == 1.0, 0.8, 0.2) * (1.2 - ring * 0.3) + a * 0
+                pts.append((xs.ravel(), ys.ravel(), col, br.ravel()))
+                if m["alarm"] and (t + m["ph"]) % 9 < 2.5:
+                    aa = np.arange(10) / 10 * 2 * math.pi + t * 6
+                    pts.append((m["x"] + np.cos(aa) * r * 0.9, m["y"] + r * 0.15 + np.sin(aa) * r * 0.25, (0.3, 0.5, 1.0), 2.2))
+                T = np.array(tr[1:30:2])
+                seg = np.arange(1, 30, 2)[None, :]
+                jj = np.arange(7)[:, None]
+                bx = m["x"] + (jj - 3) / 3 * r * 0.85
+                xs = bx + (T[None, :, 0] - m["x"]) + np.sin(seg * 0.3 + t * 1.5 + jj) * seg * 0.12
+                ys = T[None, :, 1] + r * 0.15 + seg * r * 0.09 + jj * 0
+                pts.append((xs.ravel(), ys.ravel(), col * 0.8 + 0.2, (0.45 * (1 - seg / 30.0) + jj * 0).ravel()))
+                alive = m["y"] > -r * 4
+            elif k == "siph":
+                m["x"] += m["vx"] * dt
+                m["y"] -= scroll * dt * 0.5
+                i = np.arange(70)
+                xs = m["x"] - np.sign(m["vx"]) * i * m["len"] / 70
+                ys = m["y"] + np.sin(i * 0.15 + t * 1.2 + m["ph"]) * H * 0.04
+                b = np.maximum(0.0, 0.6 + 0.6 * np.sin(i * 0.9 - t * 4))
+                cols = np.where((i % 3 == 0)[:, None], np.array([1.0, 0.45, 0.8]), np.array([0.5, 0.7, 1.0]))
+                pts.append((xs, ys, cols, b))
+                alive = -W * 2 < m["x"] < W * 3
+            elif k == "angler":
+                age = t - m["born"]
+                m["x"] += m["sd"] * W * 0.05 * dt * (1.4 if age > 8 else 1.0)
+                m["y"] += math.sin(t * 0.7) * 2 * dt - scroll * dt * 0.15
+                s.angler(img, pts, m, lamp, age)
+                alive = age < 20
+            elif k == "squid":
+                age = t - m["born"]
+                s.squid(img, pts, m, age, lamp)
+                alive = age < 12
+            else:
+                alive = False
+            if alive:
+                keep.append(m)
+        s.mobs = keep
+
+    def angler(s, img, pts, m, lamp, age):
+        H, W = s.H, s.W
+        R = H * 0.13
+        x0, y0, sd = m["x"], m["y"], m["sd"]
+        y1, y2 = int(max(0, y0 - R * 1.3)), int(min(H, y0 + R * 1.3))
+        x1, x2 = int(max(0, x0 - R * 1.8)), int(min(W, x0 + R * 1.8))
+        if y1 < y2 and x1 < x2:
+            yy, xx = s.yy[y1:y2, x1:x2], s.xx[y1:y2, x1:x2]
+            u, v = (xx - x0) / R * sd, (yy - y0) / R
+            body = (u / 1.1) ** 2 + (v / 0.85) ** 2 < 1
+            tail = (u < -0.9) & (u > -1.6) & (np.abs(v) < (-0.9 - u) * 0.9)
+            mouth = (u > 0.35) & (np.abs(v - 0.15) < 0.12 * (u - 0.2)) & body
+            sil = (body | tail) & ~mouth
+            rim = (np.sqrt(((u - 0.2) / 1.1) ** 2 + (v / 0.85) ** 2) > 0.8) & body
+            lit = s.cone[y1:y2, x1:x2] * lamp
+            colb = np.where(rim[..., None], np.array([0.05, 0.07, 0.09]), np.array([0.012, 0.014, 0.018]))
+            reg = img[y1:y2, x1:x2]
+            reg[sil] = (colb * (0.4 + 2.5 * lit[..., None]))[sil]
+            teeth = mouth & ((np.floor(xx) % 2) == 0) & (np.abs(np.abs(v - 0.15) - 0.1 * (u - 0.2)) < 0.06)
+            reg[teeth] = np.array([0.6, 0.6, 0.55]) * (0.3 + lit[teeth][:, None] * 2)
+            img[y1:y2, x1:x2] = reg
+        ex, ey = x0 + sd * R * 0.55, y0 - R * 0.3
+        pts.append((ex, ey, (0.6, 0.7, 0.6), 0.8))
+        lx = x0 + sd * R * (1.25 + 0.15 * math.sin(s.t * 1.3))
+        ly = y0 - R * 1.25 + math.sin(s.t * 2.1) * R * 0.1
+        f = np.arange(12) / 12.0
+        pts.append((x0 + sd * R * 0.5 + (lx - x0 - sd * R * 0.5) * f, y0 - R * 0.7 + (ly - y0 + R * 0.7) * f
+                    - np.sin(f * math.pi) * R * 0.35, (0.2, 0.3, 0.4), 0.15))
+        fl = 0.7 + 0.3 * math.sin(s.t * 5) * math.sin(s.t * 1.7)
+        pts.append((lx, ly, (0.7, 0.95, 1.0), 5.0 * fl))
+
+    def squid(s, img, pts, m, age, lamp):
+        # a giant eye drifts past, rim-lit by the headlights; then the mantle and arms slide by
+        H, W = s.H, s.W
+        sd = m["sd"]
+        p = age / 12.0
+        R = H * 0.42
+        cx = W * 0.5 + sd * (W * 0.5 + R * 1.2) * (1 - 2 * p)
+        cy = m["y"] + math.sin(age * 0.4) * H * 0.04
+        x1, x2 = int(max(0, cx - R * 2.2)), int(min(W, cx + R * 2.2))
+        if x1 >= x2:
+            return
+        yy, xx = s.yy[:, x1:x2], s.xx[:, x1:x2]
+        u, v = (xx - cx) / R, (yy - cy) / R
+        body = (u / 1.6) ** 2 + (v / 0.75) ** 2 < 1
+        arms = (u * sd < -1.2) & (np.abs(v + 0.15 * np.sin(u * 5 + age * 2)) < 0.5 + (u * sd + 1.2) * 0.25)
+        arms &= (np.sin(v * 9 + np.sin(u * 3 + age) * 2) > -0.2)
+        sil = body | arms
+        lit = s.cone[:, x1:x2] * lamp
+        reg = img[:, x1:x2]
+        dome = np.sqrt(np.clip(1 - (u / 1.6) ** 2 - (v / 0.75) ** 2, 0, 1))
+        spots = s.ray[((u * 37 + v * 113 + 999) * 7).astype(np.int64) % 2048] > 1.1
+        skin = (0.35 + 0.65 * dome) * (1 - 0.4 * spots)
+        base = np.array([0.075, 0.018, 0.012], np.float32)
+        reg[sil] = (base * (0.2 + lit[..., None] * 3.5) * skin[..., None])[sil]
+        d = np.sqrt((u - sd * 0.35) ** 2 + ((v + 0.05) * 1.1) ** 2)
+        eye = d < 0.3
+        blink = 1.0 if (age % 6) > 0.25 else 0.0
+        iris = np.where(d < 0.12, 0.0, 0.1 + 0.25 * (1 - d / 0.3))
+        eyec = np.stack([iris * 0.5, iris * 0.7, iris * 0.9], -1) * (0.4 + lit[..., None] * 2) * blink
+        reg[eye] = eyec[eye]
+        img[:, x1:x2] = reg
+        gx, gy = cx + sd * 0.35 * R - R * 0.07, cy - R * 0.12
+        if 0 <= gx < W:
+            pts.append((gx, gy, (0.9, 0.95, 1.0), 3.0 * blink))
+
+    # ------------------------------------------------------------ frame
+    def step(s, dt):
+        s.t += dt
+        t, H, W = s.t, s.H, s.W
+        if t > s.TDIVE + 28:
+            s.dive()
+            t = 0.0
+        d = s.depth(t)
+        dd = s.depth(t + 0.5) - d
+        scroll = min(14.0, 4 + dd * 0.08) * (1 - smooth(s.TDIVE - 4, s.TDIVE, t))
+        while s.plan and d >= s.plan[0][0]:
+            s.spawn(s.plan.pop(0)[1])
+        light = math.exp(-d / 70.0)
+        lamp = smooth(150, 400, d)
+        g = np.linspace(0, 1, H, dtype=np.float32)[:, None]
+        top = np.array([0.22, 0.55, 0.7]) * light + np.array([0.02, 0.1, 0.2]) * math.exp(-d / 300) + 0.004
+        bot = np.array([0.04, 0.22, 0.38]) * light + np.array([0.01, 0.05, 0.1]) * math.exp(-d / 300) + 0.004
+        img = np.empty((H, W, 3), np.float32)
+        img[:] = (top[None, :] * (1 - g) + bot[None, :] * g)[:, None, :]
+        if light > 0.02:
+            u = (s.xx * 0.35 + s.yy * 0.25 + t * 6).astype(np.int64) % 2048
+            rays = np.clip(s.ray[u] * 0.5 + 0.3, 0, 1) ** 2 * np.exp(-s.yy / (H * 0.8))
+            img += (rays * light * 0.35)[..., None] * np.array([0.6, 0.9, 1.0], np.float32)
+            if d < 15:
+                surf = H * 0.04 + (d * 4) - np.sin(s.xx[0] * 0.15 + t * 2) * 1.5 - np.sin(s.xx[0] * 0.05 - t) * 1.5
+                m = s.yy < surf[None, :]
+                img[m] = np.array([0.55, 0.85, 0.95], np.float32) * (0.9 + 0.3 * np.sin(s.xx[m] * 0.7 + t * 4))[:, None]
+        img += (s.cone * lamp * 0.05)[..., None] * np.array([0.5, 0.75, 1.0], np.float32)
+        pts = []
+        # marine snow, lit by the headlights in the dark
+        sn = s.snow
+        sn[:, 1] -= scroll * dt / sn[:, 2] * 0.6 + 0.3 * dt
+        sn[:, 0] += np.sin(t * 0.4 + sn[:, 2] * 9) * dt * 1.5
+        wrap = sn[:, 1] < 0
+        sn[wrap, 1] += H
+        sn[wrap, 0] = np.random.uniform(0, W, wrap.sum())
+        xi, yi = sn[:, 0].astype(int) % W, sn[:, 1].astype(int) % H
+        b = (0.03 + light * 0.25 + s.cone[yi, xi] * lamp * 0.9) * sn[:, 2]
+        np.add.at(img, (yi, xi), (b[:, None] * np.array([0.8, 0.9, 1.0])).astype(np.float32))
+        if d < 120:
+            for i in range(6):
+                bx = (W * (0.1 + 0.16 * i) + math.sin(t + i) * 3) % W
+                by = H - ((t * 25 + i * 37) % (H * 1.3))
+                if 0 <= by < H:
+                    pts.append((bx, by, (0.8, 0.95, 1.0), 0.6))
+        s.creatures(img, pts, dt, scroll, lamp)
+        if d > 7000:
+            s.seabed(img, pts, t, dt, lamp)
+        glow = np.zeros((H, W, 3), np.float32)
+        if pts:
+            XS, YS, CS = [], [], []
+            for px_, py_, c_, b_ in pts:
+                px_ = np.atleast_1d(np.asarray(px_, np.float32))
+                n = px_.size
+                XS.append(px_)
+                YS.append(np.broadcast_to(np.asarray(py_, np.float32), (n,)))
+                c_ = np.broadcast_to(np.asarray(c_, np.float32), (n, 3))
+                CS.append(c_ * np.broadcast_to(np.asarray(b_, np.float32), (n,))[:, None])
+            xi = np.round(np.concatenate(XS)).astype(int)
+            yi = np.round(np.concatenate(YS)).astype(int)
+            C = np.concatenate(CS)
+            ok = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
+            np.add.at(glow, (yi[ok], xi[ok]), C[ok])
+        img += glow * 0.7 + soft(glow, 4) * 2.5
+        img = bloom(img, 0.6, max(2, W // 60), 0.4)
+        s.px.show(tonemap(img, 1.4))
+        s.hud(d, light)
+
+    def seabed(s, img, pts, t, dt, lamp):
+        H, W = s.H, s.W
+        rise = smooth(7000, s.maxd, s.depth(t))
+        base = H * (1.25 - 0.45 * rise)
+        prof = base - (s.fprof * 0.5 + 1) * H * 0.08
+        yb = s.yy >= prof[None, :]
+        lit = s.cone * lamp
+        rock = np.array([0.03, 0.028, 0.025], np.float32) * (0.4 + 3 * lit[..., None])
+        tex = 0.7 + 0.3 * np.sin(s.xx * 1.3) * np.sin(s.yy * 2.1 + s.xx * 0.3)
+        img[yb] = (rock * tex[..., None])[yb]
+        if rise < 0.6:
+            return
+        smoke = np.zeros((H, W), np.float32)
+        for vx in s.vents:
+            y0 = int(prof[vx])
+            hgt = int(H * 0.28)
+            top = y0 - hgt
+            for yy in range(max(0, top), min(H, y0 + 1)):
+                f = (yy - top) / hgt
+                w = 1 + int(f * f * 4) + ((yy * 7) % 3 == 0)
+                a0, a1 = max(0, vx - w), min(W, vx + w + 1)
+                if a0 < a1:
+                    img[yy, a0:a1] = np.array([0.045, 0.035, 0.03]) * (0.4 + 3 * lit[yy, a0:a1, None])
+                    if f < 0.12:
+                        img[yy, a0:a1] += np.array([0.5, 0.12, 0.02]) * (1 - f / 0.12)
+            for _ in range(3):
+                s.plume.append([vx + random.uniform(-1, 1), top, random.uniform(-1.5, 1.5), random.uniform(9, 16), 0.0])
+            i = np.arange(-7, 8)
+            xs = vx + i * 2 + np.sign(i) * 4
+            hh = 3 + (np.abs(i) * 7 % 5)
+            ok = (xs >= 0) & (xs < W)
+            for x_, h_ in zip(xs[ok].tolist(), hh[ok].tolist()):
+                ys = np.arange(max(0, y0 - h_), min(H, y0 + 1))
+                img[ys, x_] = np.array([0.5, 0.5, 0.45]) * (0.12 + 2 * lit[ys, x_, None])
+            pts.append((xs[ok], y0 - hh[ok], (1.0, 0.15, 0.1), 0.5))
+            pts.append((vx, top + 1, (1.0, 0.45, 0.1), 3.0))
+        keep = []
+        for p in s.plume:
+            p[4] += dt
+            p[0] += p[2] * dt + math.sin(p[4] * 2 + p[1]) * dt * 3
+            p[1] -= p[3] * dt * (1 - p[4] / 12)
+            if 0 <= p[0] < W and 0 <= p[1] < H and p[4] < 7:
+                keep.append(p)
+        s.plume = keep[-600:]
+        if s.plume:
+            P = np.array(s.plume)
+            np.add.at(smoke, (P[:, 1].astype(int), P[:, 0].astype(int)), 0.5 + P[:, 4] * 0.15)
+            a = np.clip(soft(smoke, 4) * 1.6, 0, 0.9)[..., None]
+            sc = np.array([0.05, 0.045, 0.04], np.float32) * (0.3 + 4 * lit[..., None])
+            img[:] = img * (1 - a) + sc * a
+        if rise > 0.95 and s.dumbo is None and s.t > s.TDIVE + 2:
+            s.dumbo = [W * random.choice((0.2, 0.8)), H * 0.45, s.t]
+            s.note("Grimpoteuthis \u00b7 dumbo octopus, the deepest-living octopus")
+            s.note("Black smokers \u00b7 400 \u00b0C vents, life without sunlight")
+        if s.dumbo:
+            x0, y0, b = s.dumbo
+            age = s.t - b
+            x = x0 + math.sin(age * 0.3) * W * 0.1
+            y = y0 + math.sin(age * 0.5) * H * 0.05
+            flap = math.sin(age * 4)
+            R = H * 0.05
+            for a in np.linspace(0, 2 * math.pi, 30, endpoint=False):
+                pts.append((x + math.cos(a) * R, y + math.sin(a) * R * 0.8, (1.0, 0.6, 0.6), 0.25 + lit[int(y) % H, int(x) % W]))
+            for sx in (-1, 1):
+                pts.append((x + sx * R * 1.4, y - R * (0.4 + 0.4 * flap), (1.0, 0.7, 0.7), 0.6))
+                pts.append((x + sx * R * 1.2, y - R * (0.2 + 0.3 * flap), (1.0, 0.7, 0.7), 0.6))
+            for i in range(8):
+                pts.append((x + (i - 3.5) * R * 0.25, y + R * 1.1 + abs(i - 3.5) * 0.3, (0.9, 0.5, 0.5), 0.3))
+            pts.append((x - R * 0.35, y - R * 0.1, (0.1, 0.1, 0.1), 0.0))
+
+    def hud(s, d, light):
+        px = s.px
+        rows, cols = px.rows, px.cols
+        if cols < 40 or rows < 10:
+            return
+        zone = [z for z in s.ZONES if d >= z[0]][-1][1]
+        temp = 24 * math.exp(-d / 180) + 2.5 - 1.1 * smooth(3000, 11000, d)
+        x = cols - 22
+        dim = (0.35, 0.55, 0.7)
+        px.text(1, x, zone, (0.6, 0.85, 1.0))
+        px.text(2, x, "depth    %6d m" % d, dim)
+        px.text(3, x, "temp     %6.1f \u00b0C" % temp, dim)
+        px.text(4, x, "pressure %6d bar" % (1 + d / 10), dim)
+        px.text(5, x, "light    %8s" % ("%.3g %%" % (light * 100) if light > 1e-9 else "none"), dim)
+        top, bot = 7, rows - 3
+        for y in range(top, bot + 1):
+            dep = (y - top) / max(1, bot - top) * 11000
+            mark = "\u2500" if any(abs(dep - z[0]) < 11000 / max(1, bot - top) / 2 for z in s.ZONES) else "\u2502"
+            px.text(y, cols - 3, mark, (0.2, 0.3, 0.4))
+        yy = top + int(d / 11000 * (bot - top))
+        px.text(yy, cols - 5, "\u25b6", (1.0, 0.75, 0.3))
+        y = rows - 2
+        for txt, t0 in s.notes[-2:][::-1]:
+            age = s.t - t0
+            f = smooth(0, 1.5, age) * (1 - smooth(9, 11, age))
+            if f > 0.02:
+                px.text(y, 3, txt, (0.55 * f, 0.8 * f, 0.9 * f))
+                y -= 1
+
+
+class Flyover:
+    # low-altitude flight over a procedural world (voxel space rendering, like Comanche 1992): banked turns
+    # through valleys, fog, water reflections, sun glint, a sunset / sunrise passing during the visit and
+    # village lights coming on at night.
+    fps = 12
+    N = 512
+    WORLDS = ("alpine", "alpine", "islands", "islands", "canyon", "arctic", "alien", "volcanic")
+
+    def __init__(s, scr):
+        s.px = Pix(scr)
+        s.H, s.W = s.px.H, s.px.W
+        W = s.W
+        U = random.uniform
+        s.world = random.choice(s.WORLDS)
+        s.rng = np.random.default_rng(random.randrange(1 << 30))
+        s.make_world()
+        s.scen = random.choice(("sunset", "sunset", "sunrise", "sunrise", "day", "night"))
+        s.e0, s.erate = {"sunset": (U(12, 18), -U(0.35, 0.5)), "sunrise": (U(-10, -6), U(0.35, 0.5)),
+                         "day": (U(30, 55), -0.05), "night": (-25, 0.0)}[s.scen]
+        s.saz = U(0, 2 * math.pi)
+        s.cx, s.cy = U(0, s.N), U(0, s.N)
+        s.head = U(0, 2 * math.pi)
+        s.alt = s.height(s.cx, s.cy) + 40
+        s.turn = 0.0
+        s.t = 0.0
+        s.K = 96
+        s.KN = 44
+        s.z = (1.5 * (320 / 1.5) ** (np.arange(s.K) / (s.K - 1))).astype(np.float32)
+        s.tanf = 0.85
+        s.focal = (W / 2.0) / s.tanf
+        s.ux = ((np.arange(W) - W / 2.0 + 0.5) / (W / 2.0) * s.tanf).astype(np.float32)
+        n = 900
+        s.stars = (np.random.uniform(0, 2 * math.pi, n), np.random.uniform(0.02, 1.2, n) ** 0.8,
+                   np.random.random(n) ** 6 * 1.2 + 0.1)
+        s.moon_az = s.saz + math.pi + U(-0.5, 0.5)
+        s.moonv = np.array([math.cos(0.35) * math.cos(s.moon_az), math.cos(0.35) * math.sin(s.moon_az), math.sin(0.35)],
+                           np.float32)
+
+    def make_world(s):
+        N, rng, w = s.N, s.rng, s.world
+        e = specnoise(N, N, 3.6, rng, lo=3.0 / N)
+        r = 1 - np.abs(box_blur(specnoise(N, N, 3.0, rng), 2))
+        m = specnoise(N, N, 2.5, rng)
+        e = (e - e.min()) / (e.max() - e.min())
+        if w == "islands":
+            h = np.clip(e * 1.2 - 0.25, 0, 1) ** 1.6 * 0.75 + r ** 3 * 0.12 * (e > 0.45)
+            wl = 0.05
+        elif w == "canyon":
+            h = np.clip(e + r ** 4 * 0.25, 0, 1)
+            h = np.floor(h * 9) / 9 * 0.8 + (h * 9 % 1) ** 6 / 9 * 0.8 + 0.05
+            wl = -1.0
+        elif w == "arctic":
+            h = np.clip(e - 0.2, 0, 1) ** 1.2 + r ** 3 * 0.25 * (e > 0.35)
+            wl = 0.1
+        elif w == "volcanic":
+            h = np.clip(e, 0, 1) ** 1.5 + r ** 2 * 0.3
+            wl = 0.12
+        else:
+            h = np.clip(e, 0, 1) ** 1.8 * 0.85 + r ** 3 * 0.35 * np.clip(e - 0.25, 0, 1)
+            wl = 0.08 if w != "alien" else 0.14
+        h = box_blur(box_blur(h.astype(np.float32), 2), 2) * 110
+        s.wl = wl * 110
+        gx = (np.roll(h, -1, 1) - np.roll(h, 1, 1)) * 0.5
+        gy = (np.roll(h, -1, 0) - np.roll(h, 1, 0)) * 0.5
+        slope = np.sqrt(gx * gx + gy * gy)
+        hn = h / 110.0
+        blur = box_blur(box_blur(h, 6), 6)
+        ao = np.clip(0.75 + (h - blur) / 25.0, 0.45, 1.15)
+        emis = np.zeros((N, N), np.float32)
+        if w in ("alpine", "islands"):
+            c = ramp([(0, (0.85, 0.78, 0.55)), (0.06, (0.3, 0.45, 0.15)), (0.3, (0.12, 0.3, 0.1)),
+                      (0.5, (0.35, 0.33, 0.25)), (0.65, (0.45, 0.42, 0.4)), (0.75, (0.95, 0.96, 1.0))],
+                     hn + m * 0.04 - s.wl / 110 * (w == "islands"))
+            rock = np.array([0.4, 0.37, 0.33], np.float32)
+            c = np.where((slope > 1.3)[..., None] & (hn < 0.72)[..., None], rock, c)
+            sky = (0.45, 0.62, 0.9)
+        elif w == "canyon":
+            strata = np.sin(h * 0.9) * 0.08
+            c = ramp([(0, (0.55, 0.25, 0.12)), (0.4, (0.75, 0.42, 0.2)), (0.7, (0.85, 0.6, 0.38)),
+                      (1, (0.7, 0.5, 0.4))], hn + strata)
+            c = c * (0.85 + 0.15 * (m[..., None] > 0))
+            sky = (0.55, 0.65, 0.85)
+        elif w == "arctic":
+            c = ramp([(0, (0.55, 0.6, 0.65)), (0.15, (0.85, 0.9, 0.95)), (1, (1.0, 1.0, 1.0))], hn)
+            c = np.where((slope > 1.2)[..., None], np.array([0.3, 0.33, 0.38], np.float32), c)
+            sky = (0.6, 0.72, 0.9)
+        elif w == "alien":
+            c = ramp([(0, (0.9, 0.85, 0.6)), (0.1, (0.45, 0.15, 0.5)), (0.35, (0.25, 0.1, 0.4)),
+                      (0.6, (0.15, 0.45, 0.5)), (0.8, (0.85, 0.95, 0.9))], hn + m * 0.05)
+            sky = (0.8, 0.5, 0.7)
+        else:
+            c = ramp([(0, (0.08, 0.07, 0.07)), (0.5, (0.18, 0.15, 0.14)), (1, (0.35, 0.3, 0.28))], hn)
+            lava = smooth(0.82, 0.95, r) * (hn < 0.35)
+            emis = lava.astype(np.float32) * 1.5
+            c = c * (1 - lava[..., None]) + lava[..., None] * np.array([0.6, 0.15, 0.02], np.float32)
+            sky = (0.55, 0.5, 0.48)
+        if w in ("alpine", "islands", "alien") and random.random() < 0.85:
+            hf = specnoise(N, N, 0.6, rng)
+            near = (hn > s.wl / 110 + 0.005) & (hn < s.wl / 110 + 0.18) & (slope < 0.8)
+            vill = smooth(0.0, 1.0, specnoise(N, N, 2.8, rng))
+            emis = np.maximum(emis, (smooth(1.9, 2.8, hf) * vill * near * 2.5).astype(np.float32))
+        s.skyc = np.array(sky, np.float32)
+        s.hmap = h.astype(np.float32)
+        s.map = np.concatenate([gx[..., None], gy[..., None], (c * ao[..., None]).astype(np.float32),
+                                emis[..., None]], 2).astype(np.float32)
+        s.watercol = {"islands": (0.05, 0.35, 0.4), "arctic": (0.02, 0.08, 0.14), "alien": (0.1, 0.5, 0.55),
+                      "volcanic": (0.05, 0.05, 0.06)}.get(w, (0.03, 0.12, 0.2))
+        s.watercol = np.array(s.watercol, np.float32)
+        s.wtex = specnoise(64, 64, 2.0, rng)
+
+    SC = 0.5
+
+    def height(s, x, y):
+        return float(s.hmap[int(y * s.SC) % s.N, int(x * s.SC) % s.N])
+
+    def sample(s, x, y):
+        # bilinear height, nearest neighbour for everything else
+        N = s.N
+        x, y = x * s.SC, y * s.SC
+        x0, y0 = np.floor(x), np.floor(y)
+        fx, fy = x - x0, y - y0
+        x0 = x0.astype(np.int64) % N
+        y0 = y0.astype(np.int64) % N
+        x1, y1 = (x0 + 1) % N, (y0 + 1) % N
+        M = s.hmap
+        a, b, c, d = M[y0, x0], M[y0, x1], M[y1, x0], M[y1, x1]
+        h = a + (b - a) * fx + (c - a + (a - b + d - c) * fx) * fy
+        out = s.map[np.where(fy > 0.5, y1, y0), np.where(fx > 0.5, x1, x0)]
+        n = s.KN
+        A, B, C, D = (s.map[yy, xx] for yy, xx in ((y0[:n], x0[:n]), (y0[:n], x1[:n]), (y1[:n], x0[:n]), (y1[:n], x1[:n])))
+        gx, gy = fx[:n, :, None], fy[:n, :, None]
+        out[:n] = A + (B - A) * gx + (C - A + (A - B + D - C) * gx) * gy
+        return h, out
+
+    def sun(s, t):
+        e = math.radians(s.e0 + s.erate * t)
+        return e, np.array([math.cos(e) * math.cos(s.saz), math.cos(e) * math.sin(s.saz), math.sin(e)], np.float32)
+
+    def palette(s, e):
+        # sun color, zenith, horizon and ambient light as a function of the sun elevation (radians)
+        d = math.degrees(e)
+        sunc = ramp([(-4, (0.9, 0.25, 0.05)), (2, (1.0, 0.45, 0.15)), (10, (1.0, 0.75, 0.45)), (30, (1.0, 0.95, 0.88))],
+                    np.array(d)).reshape(3)
+        zen = ramp([(-18, (0.004, 0.006, 0.02)), (-8, (0.03, 0.04, 0.12)), (0, (0.12, 0.15, 0.35)),
+                    (12, (0.25, 0.4, 0.75)), (40, (0.2, 0.42, 0.85))], np.array(d)).reshape(3)
+        hor = ramp([(-18, (0.01, 0.015, 0.04)), (-8, (0.15, 0.1, 0.2)), (-2, (0.65, 0.3, 0.25)), (3, (1.0, 0.55, 0.3)),
+                    (12, (0.85, 0.8, 0.75)), (40, (0.75, 0.85, 0.95))], np.array(d)).reshape(3)
+        tint = s.skyc / s.skyc.mean()
+        return sunc, zen * tint, hor * (0.6 + 0.4 * tint), max(0.0, min(1.0, (d + 6) / 16))
+
+    def step(s, dt):
+        s.t += dt
+        t, H, W, K = s.t, s.H, s.W, s.K
+        e, L = s.sun(t)
+        sunc, zen, hor, day = s.palette(e)
+        night = 1 - smooth(-8, 2, math.degrees(e))
+        # steering: drift towards lower ground, gentle banking
+        look = 60.0
+        hl = s.height(s.cx + math.cos(s.head - 0.5) * look, s.cy + math.sin(s.head - 0.5) * look)
+        hr = s.height(s.cx + math.cos(s.head + 0.5) * look, s.cy + math.sin(s.head + 0.5) * look)
+        want = 0.12 * math.sin(t * 0.13 + s.saz) + max(-0.25, min(0.25, (hl - hr) * 0.01))
+        s.turn += (want - s.turn) * min(1.0, dt * 0.8)
+        s.head += s.turn * dt
+        v = 22.0
+        s.cx += math.cos(s.head) * v * dt
+        s.cy += math.sin(s.head) * v * dt
+        ahead = max(s.height(s.cx + math.cos(s.head) * d, s.cy + math.sin(s.head) * d) for d in (0, 15, 30, 50, 75))
+        target = max(ahead, s.wl) + 16 + 6 * math.sin(t * 0.21)
+        s.alt += (target - s.alt) * min(1.0, dt * 0.7)
+        roll = -s.turn * 1.6
+        hz = H * 0.36 + math.sin(t * 0.17) * H * 0.02
+        # terrain samples (K depths x W columns)
+        ch, sh = math.cos(s.head), math.sin(s.head)
+        z = s.z[:, None]
+        mx = s.cx + z * (ch - s.ux[None, :] * sh)
+        my = s.cy + z * (sh + s.ux[None, :] * ch)
+        hgt, smp = s.sample(mx, my)
+        water = hgt < s.wl
+        hh = np.maximum(hgt, s.wl)
+        tilt = (np.arange(W, dtype=np.float32) - W / 2.0) * math.tan(roll)
+        Y = hz + (s.alt - hh) / z * s.focal + tilt[None, :]
+        nx, ny = -smp[..., 0] * s.SC, -smp[..., 1] * s.SC
+        inv = 1.0 / np.sqrt(nx * nx + ny * ny + 1.0)
+        lam = np.maximum((nx * L[0] + ny * L[1] + L[2]) * inv, 0)
+        mo = s.moonv
+        mlam = np.maximum((nx * mo[0] + ny * mo[1] + mo[2]) * inv, 0)
+        light = lam[..., None] * (sunc * (1.3 * day)).astype(np.float32)
+        light += (zen * 0.3 + hor * 0.12).astype(np.float32)
+        if night > 0.01:
+            light += (mlam[..., None] * 0.8 + 0.25) * (np.array([0.32, 0.4, 0.62], np.float32) * night)
+        lit = smp[..., 2:5] * light
+        if night > 0.01:
+            lit += (smp[..., 5] * night)[..., None] * np.array([1.0, 0.7, 0.35], np.float32)
+        wi = np.flatnonzero(water.ravel())
+        if wi.size:
+            zz = np.broadcast_to(z, water.shape).ravel()[wi]
+            wx, wy = mx.ravel()[wi], my.ravel()[wi]
+            wav = s.wtex[(wy * 0.35 + t * 3).astype(np.int64) % 64, (wx * 0.35).astype(np.int64) % 64]
+            fres = np.clip(0.25 + zz / 160.0, 0.25, 0.85)[:, None]
+            refl = hor * 0.8 + zen * 0.2 + np.array([0.04, 0.05, 0.08], np.float32) * night
+            wc = s.watercol * (0.25 + 0.75 * day) * (0.9 + 0.1 * wav[:, None])
+            ga = (np.arctan2(wy - s.cy, wx - s.cx) - s.saz + math.pi) % (2 * math.pi) - math.pi
+            glint = np.exp(-ga * ga * 60) * max(0.0, 1.0 - abs(math.degrees(e) - 8) / 20) * (wav > 0.3) * 2.0
+            wl = wc * (1 - fres) + refl * fres + (glint * (1 - night))[:, None] * sunc
+            depthc = np.clip((s.wl - hgt.ravel()[wi]) / 6.0, 0, 1)[:, None]
+            flat = lit.reshape(-1, 3)
+            flat[wi] = wl * depthc + flat[wi] * 0.6 * (1 - depthc)
+        fog = (1 - np.exp(-(z / (230.0 if s.world != "volcanic" else 150.0)) ** 1.5))[..., None]
+        lit += (hor.astype(np.float32) - lit) * fog
+        if s.scen == "sunrise":
+            vf = smooth(s.wl + 18, s.wl + 4, hh)[..., None] * (1 - smooth(-2, 10, math.degrees(e))) * 0.85
+            lit = lit * (1 - vf) + (hor * 0.9 + sunc * 0.2 * day) * vf
+        # visibility per column: first depth whose running minimum height covers the row
+        Ym = np.minimum.accumulate(np.clip(Y, -4 * H, 4 * H), axis=0)
+        BIG = 16.0 * H
+        offs = (np.arange(W, dtype=np.float64) * BIG)
+        keys = (-Ym.T.astype(np.float64) + offs[:, None]).ravel()
+        rows = np.arange(H, dtype=np.float64)
+        q = (-rows[None, :] + offs[:, None]).ravel()
+        k = np.searchsorted(keys, q, side="left").reshape(W, H) - (np.arange(W) * K)[:, None]
+        sky = k >= K
+        k = np.minimum(k, K - 1)
+        img = lit[k.T, np.arange(W)[None, :]]
+        # sky
+        sk = sky.T
+        if sk.any():
+            si = np.flatnonzero(sk.ravel())
+            sy, sx = si // W, si % W
+            el = np.arctan2(hz + tilt[sx] - sy, s.focal)
+            az = s.head + np.arctan(s.ux)[sx]
+            g = np.clip(el / 0.6, 0, 1)[:, None]
+            skyc = hor * (1 - g) ** 1.5 + zen * (1 - (1 - g) ** 1.5)
+            da = (az - s.saz + math.pi) % (2 * math.pi) - math.pi
+            cosang = np.cos(el) * math.cos(e) * np.cos(da) + np.sin(el) * math.sin(e)
+            skyc = skyc + (np.exp((cosang - 1) * 25) * 0.6 + np.exp((cosang - 1) * 500) * 4)[:, None] * sunc * (e > -0.05)
+            if night > 0.05:
+                sa, se, sm = s.stars
+                rel = (sa - s.head + math.pi) % (2 * math.pi) - math.pi
+                ok = np.abs(rel) < math.atan(s.tanf)
+                xs = (np.tan(rel[ok]) * s.focal + W / 2).astype(int)
+                ys = (hz - np.tan(se[ok]) * s.focal).astype(int)
+                xs = np.clip(xs, 0, W - 1)
+                inn = (ys >= 0) & (ys < H)
+                add = np.zeros((H, W), np.float32)
+                np.add.at(add, (ys[inn], xs[inn]), sm[ok][inn] * night)
+                skyc += add.ravel()[si][:, None] * 0.9
+                mda = (az - s.moon_az + math.pi) % (2 * math.pi) - math.pi
+                mc = np.cos(el) * math.cos(0.35) * np.cos(mda) + np.sin(el) * math.sin(0.35)
+                skyc += (smooth(0.99985, 0.99995, mc) * 1.2 + np.exp((mc - 1) * 300) * 0.25)[:, None] * night * np.array([0.85, 0.9, 1.0])
+            if s.world == "alien":
+                pa = (az - s.saz - 2.0 + math.pi) % (2 * math.pi) - math.pi
+                pc = np.cos(el) * math.cos(0.45) * np.cos(pa) + np.sin(el) * math.sin(0.45)
+                disk = smooth(0.9975, 0.998, pc)
+                skyc = skyc * (1 - disk[:, None]) + disk[:, None] * np.array([0.85, 0.55, 0.75]) * (0.3 + 0.7 * day)
+            img.reshape(-1, 3)[si] = skyc
+        img = bloom(img.astype(np.float32), 0.75, max(2, W // 50), 0.4)
+        s.px.show(tonemap(img, 1.3))
+        if t < 9:
+            f = smooth(0.5, 2, t) * (1 - smooth(6, 9, t))
+            names = {"alpine": "ALPINE VALLEYS", "islands": "ARCHIPELAGO", "canyon": "RED CANYONS", "arctic": "FJORDS",
+                     "alien": "XENOWORLD", "volcanic": "ASHLANDS"}
+            s.px.text(s.px.rows - 3, 3, names[s.world] + " \u00b7 " + s.scen, (0.9 * f, 0.85 * f, 0.7 * f))
+
+
+class AudioTap:
+    # captures what the speakers play (pulse / pipewire monitor) in a background thread
+    RATE = 44100
+    CMDS = (["parec", "--device=@DEFAULT_MONITOR@", "--format=s16le", "--rate=44100", "--channels=2",
+             "--latency-msec=25", "--raw"],
+            ["pw-record", "-P", "stream.capture.sink=true", "--format=s16", "--rate=44100", "--channels=2", "-"])
+
+    def __init__(s):
+        s.buf = np.zeros((s.RATE * 2, 2), np.float32)
+        s.pos = 0
+        s.lock = threading.Lock()
+        s.proc = None
+        s.alive = True
+        s.meta = None
+        cmds = [shlex.split(os.environ["NERDSAVER_AUDIO"])] if os.environ.get("NERDSAVER_AUDIO") else s.CMDS
+        for cmd in cmds:
+            if cmd and shutil.which(cmd[0]):
+                try:
+                    s.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                              stdin=subprocess.DEVNULL)
+                    break
+                except OSError:
+                    s.proc = None
+        if s.proc:
+            threading.Thread(target=s.reader, daemon=True).start()
+        if shutil.which("playerctl"):
+            threading.Thread(target=s.metaloop, daemon=True).start()
+
+    def reader(s):
+        rest = b""
+        f = s.proc.stdout
+        n = s.buf.shape[0]
+        while s.alive:
+            try:
+                data = f.read1(8192)
+            except (OSError, ValueError):
+                break
+            if not data:
+                break
+            data = rest + data
+            cut = len(data) - len(data) % 4
+            rest = data[cut:]
+            a = np.frombuffer(data[:cut], np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
+            with s.lock:
+                k = len(a)
+                if k >= n:
+                    s.buf[:] = a[-n:]
+                    s.pos += k
+                    continue
+                i = s.pos % n
+                j = min(k, n - i)
+                s.buf[i:i + j] = a[:j]
+                s.buf[:k - j] = a[j:]
+                s.pos += k
+        s.proc = None if not s.alive else s.proc
+        s.dead = True
+
+    def metaloop(s):
+        fmt = "{{status}}\t{{artist}}\t{{title}}\t{{position}}\t{{mpris:length}}"
+        while s.alive:
+            try:
+                out = subprocess.run(["playerctl", "metadata", "--format", fmt], capture_output=True, text=True,
+                                     timeout=2).stdout.strip().split("\t")
+                if len(out) == 5:
+                    st, ar, ti, po, ln = out
+                    ti = re.sub(r"\.(mp3|flac|ogg|opus|m4a|wav|webm|mkv|mp4)$", "", ti, flags=re.I)
+                    s.meta = (st, ar, ti, float(po or 0) / 1e6, float(ln or 0) / 1e6, time.monotonic())
+                else:
+                    s.meta = None
+            except Exception:
+                s.meta = None
+            for _ in range(20):
+                if not s.alive:
+                    return
+                time.sleep(0.1)
+
+    def latest(s, n):
+        with s.lock:
+            N = s.buf.shape[0]
+            i = s.pos % N
+            if i >= n:
+                return s.buf[i - n:i].copy()
+            return np.concatenate([s.buf[N - (n - i):], s.buf[:i]])
+
+    def ok(s):
+        return s.proc is not None and not getattr(s, "dead", False)
+
+    def close(s):
+        s.alive = False
+        p = s.proc
+        if p:
+            try:
+                p.terminate()
+                p.wait(timeout=0.5)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+
+class Music:
+    # reacts to the music that is playing right now: FFT bands with auto gain, beat detection, stereo field.
+    # Scenes: hyperspace tunnel, ridgeline history (unknown pleasures), phosphor goniometer, spectrum sun.
+    fps = 20
+    NB = 48
+    SCENES = ("tunnel", "ridges", "scope", "sun")
+
+    def __init__(s, scr):
+        s.px = Pix(scr)
+        H, W = s.H, s.W = s.px.H, s.px.W
+        s.tap = AudioTap()
+        s.t = 0.0
+        s.st = 0.0
+        f = np.fft.rfftfreq(2048, 1.0 / AudioTap.RATE)
+        edges = np.geomspace(35, 16000, s.NB + 1)
+        s.lo = np.searchsorted(f, edges[:-1])
+        s.hi = np.maximum(np.searchsorted(f, edges[1:]), s.lo + 1)
+        s.win = np.hanning(2048).astype(np.float32)
+        s.spec = np.zeros(s.NB, np.float32)
+        s.floor = np.full(s.NB, -60.0, np.float32)
+        s.top = np.full(s.NB, -20.0, np.float32)
+        s.bass = s.level = s.beat = s.bright = 0.0
+        s.hist = deque(maxlen=40)
+        s.bhist = deque(maxlen=30)
+        s.lastbeat = 0.0
+        s.gain = 0.05
+        s.quiet = 0.0
+        s.loud = 0.0
+        s.travel = 0.0
+        s.scene = random.choice(s.SCENES)
+        s.next = random.uniform(25, 40)
+        s.fade = None
+        s.mono = np.zeros(2048, np.float32)
+        s.lr = np.zeros((1024, 2), np.float32)
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        s.yy, s.xx = yy, xx
+        dx, dy = xx - W / 2 + 0.5, yy - H / 2 + 0.5
+        M = min(H, W) / 2.0
+        s.rho = np.sqrt(dx * dx + dy * dy) / M
+        s.ang = np.arctan2(dy, dx)
+        top = np.abs(np.arctan2(dx, -dy)) / math.pi
+        s.bidx = np.minimum((top * s.NB).astype(np.int64), s.NB - 1)
+        seg = (s.ang % (math.pi / 3)) / (math.pi / 3)
+        s.kidx = np.minimum(((1 - np.abs(2 * seg - 1)) * s.NB).astype(np.int64), s.NB - 1)
+        s.U = 0.3 / np.maximum(s.rho, 0.03)
+        s.pal = hsv(np.arange(256) / 256.0, 0.85, 1.0)
+        s.persist = np.zeros((H, W, 3), np.float32)
+        s.parts = np.zeros((0, 5), np.float32)
+        n = 260
+        s.stars = np.stack([np.random.uniform(-1, 1, n), np.random.uniform(-1, 1, n), np.random.uniform(0.05, 1, n)], 1)
+        s.title = None
+        s.titlet = -99.0
+
+    def close(s):
+        s.tap.close()
+        s.px.close()
+
+    # ------------------------------------------------------------ analysis
+    def synth(s, n, ambient):
+        # stand-in signal: a beat for the demo mode, a slow pad while the speakers are silent
+        t = s.st + np.arange(n) / AudioTap.RATE
+        s.st += n / AudioTap.RATE
+        if ambient:
+            root = (110, 98, 130.8, 87.3)[int(t[0] / 8) % 4]
+            sw = 0.5 + 0.5 * np.sin(t * 0.9)
+            m = sum(np.sin(2 * np.pi * root * k * t + k) * a for k, a in ((1, 0.5), (1.5, 0.3), (2, 0.25), (3, 0.12)))
+            m = m * (0.3 + 0.7 * sw) * 0.25 + np.sin(2 * np.pi * (1800 + 600 * np.sin(t * 0.3)) * t) * 0.02 * sw
+            m = m.astype(np.float32)
+            return np.stack([m, np.roll(m, 300) * 0.8], 1)
+        kick = np.exp(-(t % 0.5) * 28) * np.sin(2 * np.pi * (45 + 80 * np.exp(-(t % 0.5) * 40)) * t)
+        hat = np.random.uniform(-1, 1, n) * np.exp(-(t % 0.25) * 90) * 0.15
+        chord = sum(np.sin(2 * np.pi * f * t + i) for i, f in enumerate((220, 277.2, 329.6, 440 * (1 + 0.5 * (t % 4 > 2)))))
+        m = (kick * 0.8 + hat + chord * 0.08 * (0.6 + 0.4 * np.sin(t * 0.7))).astype(np.float32)
+        return np.stack([m, np.roll(m, 40) * 0.9], 1)
+
+    def analyze(s, dt):
+        live = s.tap.ok()
+        idle = False
+        if live:
+            x = s.tap.latest(2048)
+            rms = float(np.sqrt(np.mean(x[-1024:] ** 2)))
+            s.quiet = s.quiet + dt if rms < 4e-4 else 0.0
+            idle = s.quiet > 2.0
+        if live and not idle:
+            mono = x.mean(1)
+            s.lr = x[-1024:]
+            s.mono = mono
+        else:
+            x = s.synth(max(1, int(AudioTap.RATE * dt)), idle)
+            s.mono = np.roll(s.mono, -len(x))
+            s.mono[-len(x):] = x.mean(1)[-2048:]
+            mono = s.mono
+            s.lr = np.concatenate([s.lr, x])[-1024:]
+            rms = float(np.sqrt(np.mean(mono[-1024:] ** 2)))
+        mag = np.abs(np.fft.rfft(mono * s.win)) ** 2
+        cs = np.concatenate([[0.0], np.cumsum(mag)])
+        p = (cs[s.hi] - cs[s.lo]) / (s.hi - s.lo)
+        db = 10 * np.log10(p + 1e-12)
+        s.top = np.maximum(db, s.top - dt * 4)
+        s.floor = np.minimum(np.maximum(s.floor + dt * 2, db), s.top - 25)
+        rng_ = np.maximum(s.top.max() - s.floor, 24)
+        v = np.clip((db - s.floor) / rng_, 0, 1) ** 1.5
+        if 0.5 < s.quiet <= 2.0:
+            v *= 0
+        if idle:
+            v *= 0.55
+        up = v > s.spec
+        s.spec = np.where(up, s.spec + (v - s.spec) * 0.7, s.spec * math.exp(-dt * 5)).astype(np.float32)
+        s.hist.append(s.spec.copy())
+        bass = float(p[:6].sum())
+        s.bhist.append(bass)
+        avg = sum(s.bhist) / len(s.bhist)
+        if bass > avg * 1.45 and s.t - s.lastbeat > 0.28 and (s.quiet == 0 or idle) and len(s.bhist) > 8:
+            s.beat = 1.0
+            s.lastbeat = s.t
+            s.onbeat()
+        s.beat *= math.exp(-dt * 6)
+        s.bass = float(s.spec[:5].mean())
+        s.gain = max(s.gain * math.exp(-dt * 0.3), rms * 1.2, 0.01)
+        lvl = min(1.0, rms / s.gain)
+        s.level += (lvl - s.level) * min(1.0, dt * 8)
+        cen = float((s.spec * np.arange(s.NB)).sum() / (s.spec.sum() + 1e-6)) / s.NB
+        s.bright += (cen - s.bright) * min(1.0, dt * 2)
+        if s.level < 0.25:
+            s.loud = 0.0
+        else:
+            s.loud += dt
+        return live
+
+    def onbeat(s):
+        H, W = s.H, s.W
+        n = 40
+        a = np.random.uniform(0, 2 * np.pi, n)
+        r0 = min(H, W) * 0.2
+        sp = np.random.uniform(30, 110, n)
+        new = np.stack([W / 2 + np.cos(a) * r0, H / 2 + np.sin(a) * r0, np.cos(a) * sp, np.sin(a) * sp,
+                        np.full(n, 1.6)], 1).astype(np.float32)
+        s.parts = np.concatenate([s.parts, new])[-600:]
+
+    # ------------------------------------------------------------ scenes
+    def hue(s, h):
+        return s.pal[(np.asarray(h) * 256).astype(np.int64) & 255]
+
+    def tunnel(s, dt):
+        # tunnel of sound: every ring is the spectrum of an earlier moment, newest in the middle
+        s.travel += dt * (0.4 + 1.5 * s.level + 3 * s.beat)
+        hist = np.array(s.hist) if s.hist else np.zeros((1, s.NB), np.float32)
+        n = len(hist)
+        age = np.clip(np.log(np.maximum(s.rho, 0.04) / 0.04) / math.log(1.25 / 0.04), 0, 0.999) * (n - 1)
+        ai = age.astype(np.int64)
+        val = hist[n - 1 - ai, s.kidx]
+        u = np.log(np.maximum(s.rho, 0.04)) * 6 - s.travel * 3
+        grid = np.clip((np.cos(u * 2 * math.pi) - 0.8) / 0.2, 0, 1) * 0.35
+        spoke = ((s.ang + math.pi) / (math.pi / s.NB * 3)) % 1.0
+        cell = smooth(0.0, 0.2, spoke) * smooth(1.0, 0.8, spoke)
+        inten = (val ** 2 * 1.3 * cell + grid * (0.15 + 0.6 * val)) * smooth(0.02, 0.2, s.rho)
+        col = s.hue(age * 0.012 + s.t * 0.03 + s.bright * 0.5)
+        img = col * inten[..., None]
+        img += (np.exp(-s.rho / 0.1) * (0.15 + 1.2 * s.bass + 1.5 * s.beat))[..., None] * s.hue(s.t * 0.03 + 0.5)
+        return img
+
+    def ridges(s, dt):
+        H, W = s.H, s.W
+        img = np.zeros((H, W, 3), np.float32)
+        img += np.array([0.0, 0.0, 0.012], np.float32)
+        hist = list(s.hist)
+        n = len(hist)
+        if not n:
+            return img
+        xs = np.arange(W, dtype=np.float32)
+        for j, sp in enumerate(hist):
+            f = j / max(1, s.hist.maxlen - 1)
+            pf = 0.45 + 0.55 * f
+            half = W * 0.42 * pf
+            base = H * 0.12 + H * 0.78 * f ** 1.15 + (s.hist.maxlen - n) * 0
+            amp = H * 0.3 * pf
+            p = np.abs(xs - W / 2) / half
+            inside = p < 1
+            val = np.interp(p * (s.NB - 1), np.arange(s.NB), sp) * (1 - p * p)
+            y = base - amp * val
+            y0 = int(max(0, y[inside].min() - 1)) if inside.any() else int(base)
+            y1 = int(min(H, base + 2))
+            if y0 >= y1:
+                continue
+            R = np.arange(y0, y1, dtype=np.float32)[:, None]
+            band = img[y0:y1]
+            occl = (R >= y[None, :]) & inside[None, :]
+            band[occl] = np.array([0.0, 0.0, 0.012], np.float32)
+            d = np.abs(R - y[None, :])
+            line = np.clip(1.2 - d, 0, 1) * inside[None, :]
+            c = s.hue(f * 0.35 + s.t * 0.02 + s.bright * 0.3) * (0.35 + 0.65 * f + s.beat * 0.4 * f)
+            band += line[..., None] * c
+            img[y0:y1] = band
+        return img
+
+    def scope(s, dt):
+        H, W = s.H, s.W
+        P = s.persist
+        P *= 0.78
+        lr = s.lr
+        g = max(1e-3, float(np.sqrt((lr * lr).mean())) * 2.8)
+        s.sg = getattr(s, "sg", g) + (g - getattr(s, "sg", g)) * min(1.0, dt * 3)
+        k = min(H, W) * 0.42 / s.sg * (1 + 0.15 * s.beat)
+        L, R = lr[:, 0], lr[:, 1]
+        a = s.t * 0.15
+        x = (L - R) * 0.7071
+        y = (L + R) * 0.7071
+        xr, yr = x * math.cos(a) - y * math.sin(a), x * math.sin(a) + y * math.cos(a)
+        up = np.linspace(0, len(xr) - 1, len(xr) * 3)
+        xi = (W / 2 + np.interp(up, np.arange(len(xr)), xr) * k * 1.0).astype(np.int64)
+        yi = (H / 2 - np.interp(up, np.arange(len(yr)), yr) * k).astype(np.int64)
+        ok = (xi >= 0) & (xi < W) & (yi >= 0) & (yi < H)
+        np.add.at(P, (yi[ok], xi[ok]), s.hue(s.t * 0.05 + s.bright * 0.4) * 0.09)
+        m = s.mono[-1024:]
+        th = np.linspace(0, 2 * np.pi, m.size, endpoint=False) + s.t * 0.3
+        rr = min(H, W) * 0.47 * (1 + 0.35 * np.clip(m / s.sg, -1.5, 1.5))
+        cx = (W / 2 + np.cos(th) * rr).astype(np.int64)
+        cy = (H / 2 + np.sin(th) * rr).astype(np.int64)
+        ok = (cx >= 0) & (cx < W) & (cy >= 0) & (cy < H)
+        np.add.at(P, (cy[ok], cx[ok]), s.hue(s.t * 0.05 + 0.5) * 0.12)
+        return P + soft(P, 6) * 1.2
+
+    def sun(s, dt):
+        H, W = s.H, s.W
+        M = min(H, W) / 2.0
+        img = np.zeros((H, W, 3), np.float32)
+        st = s.stars
+        st[:, 2] -= dt * (0.15 + 1.2 * s.level + 2 * s.beat)
+        dead = st[:, 2] <= 0.05
+        st[dead] = np.stack([np.random.uniform(-1, 1, dead.sum()), np.random.uniform(-1, 1, dead.sum()),
+                             np.ones(dead.sum())], 1)
+        sx = (W / 2 + st[:, 0] / st[:, 2] * W * 0.3).astype(np.int64)
+        sy = (H / 2 + st[:, 1] / st[:, 2] * H * 0.3).astype(np.int64)
+        ok = (sx >= 0) & (sx < W) & (sy >= 0) & (sy < H)
+        np.add.at(img, (sy[ok], sx[ok]), ((1.1 - st[ok, 2]) * 0.8)[:, None] * np.array([0.8, 0.85, 1.0], np.float32))
+        r0 = 0.32 * (1 + 0.18 * s.bass + 0.1 * s.beat)
+        L = s.spec[s.bidx] * 0.62 + 0.02
+        rel = (s.rho - r0) / L
+        gap = ((s.ang + math.pi) / (math.pi / s.NB)) % 1.0
+        ray = (rel > 0) & (rel < 1) & (gap > 0.18) & (gap < 0.82)
+        inten = np.where(ray, np.clip(1 - rel, 0, 1) ** 0.6, 0.0) * (0.4 + 0.8 * s.spec[s.bidx])
+        col = s.hue(s.bidx / s.NB * 0.8 + s.t * 0.02)
+        img += col * inten[..., None]
+        corona = np.exp(-np.abs(s.rho - r0) * M / 1.5) * (0.6 + 1.5 * s.beat)
+        img += corona[..., None] * np.array([1.0, 0.85, 0.6], np.float32)
+        img *= (smooth(r0 - 0.02, r0, s.rho) * 0.97 + 0.03)[..., None]
+        P = s.parts
+        if len(P):
+            P[:, 0] += P[:, 2] * dt
+            P[:, 1] += P[:, 3] * dt
+            P[:, 2:4] *= math.exp(-dt * 0.8)
+            P[:, 4] -= dt
+            P = P[(P[:, 4] > 0) & (P[:, 0] >= 0) & (P[:, 0] < W) & (P[:, 1] >= 0) & (P[:, 1] < H)]
+            s.parts = P
+            np.add.at(img, (P[:, 1].astype(np.int64), P[:, 0].astype(np.int64)),
+                      (P[:, 4:5] * 0.8) * s.hue(s.t * 0.05 + 0.15))
+        return img
+
+    def step(s, dt):
+        s.t += dt
+        live = s.analyze(dt)
+        if s.t > s.next or (s.loud > 0 and s.loud < dt * 1.5 and s.t > 12 and s.t - s.next > -20):
+            s.fade = (getattr(s, "last", None), s.t)
+            s.scene = random.choice([x for x in s.SCENES if x != s.scene])
+            s.next = s.t + random.uniform(25, 40)
+        img = getattr(s, s.scene)(dt)
+        if s.scene != "scope":
+            img = img + soft(img, 4) * (0.5 + 0.6 * s.beat)
+        if s.fade and s.fade[0] is not None:
+            f = (s.t - s.fade[1]) / 0.8
+            if f < 1:
+                img = img * f + s.fade[0] * (1 - f)
+            else:
+                s.fade = None
+        s.last = img
+        s.px.show(tonemap(img, 1.3 + 0.6 * s.beat))
+        s.overlay(live)
+
+    def overlay(s, live):
+        px = s.px
+        meta = s.tap.meta
+        y = px.rows - 2
+        if meta:
+            st, ar, ti, pos, ln, at = meta
+            name = (ar + " \u2013 " + ti) if ar else ti
+            if name != s.title:
+                s.title, s.titlet = name, s.t
+            age = s.t - s.titlet
+            f = 0.35 + 0.65 * (1 - smooth(6, 9, age))
+            c = (0.95 * f, 0.9 * f, 0.8 * f)
+            mark = "\u266a " if st == "Playing" else "\u2016 "
+            px.text(y, 3, (mark + name)[:max(0, px.cols - 6)], c)
+            if ln > 0 and px.cols > 20:
+                cur = pos + (time.monotonic() - at if st == "Playing" else 0)
+                w = px.cols - 6
+                k = int(w * min(1.0, cur / ln))
+                px.text(y + 1, 3, "\u2501" * k, (0.5 * f, 0.5 * f, 0.55 * f))
+                px.text(y + 1, 3 + k, "\u2500" * (w - k), (0.15 * f, 0.15 * f, 0.18 * f))
+        if not live:
+            px.text(1, 3, "demo \u00b7 no audio capture (needs parec or pw-record)", (0.5, 0.45, 0.4))
+        elif s.quiet > 1.5:
+            f = 0.3 + 0.15 * math.sin(s.t * 1.5)
+            msg = "\u266a  waiting for music"
+            px.text(1, max(0, (px.cols - len(msg)) // 2), msg, (f, f * 0.9, f * 0.8))
+
+
 class Blank:
     fps = 1
 
@@ -2465,7 +6210,7 @@ SAVERS = {
     "fractal": (Fractal, "julia morphing, mandelbrot zoom, burning ship zoom"),
     "bootlog": (BootLog, "fake terminal: dmesg, runit, make, xbps, ping, python, git, strace, hexdump"),
     "attractors": (Attractors, "chaotic attractors with butterfly effect"),
-    "primes": (Primes, "sieve of Eratosthenes, Ulam spiral, Sacks spiral"),
+    "primes": (Primes, "prime patterns: sieve wave, ulam gaps, sacks spiral, polar arms, goldbach comet"),
     "sorter": (Sorter, "sorting algorithm visualizer"),
     "dice": (Dice, "tumbling 3D die with pips"),
     "life": (Life, "Conway's game of life, braille resolution"),
@@ -2479,12 +6224,33 @@ SAVERS = {
     "lsystem": (LSystem, "L-system curves: hilbert, dragon, gosper, arrowhead, koch, levy"),
     "orbits": (Orbits, "n-body gravity: figure-eight and chaotic systems"),
     "bclock": (BinClock, "binary clock"),
+    "fire": (Fire, "doom-style fire with wind and changing colors"),
+    "donut": (Donut, "spinning shaded ascii donut (donut.c)"),
+    "boids": (Boids, "flocking swarm hunted by a hawk"),
+    "tetris": (Tetris, "self-playing tetris ai"),
+    "ripple": (Ripple, "raindrops on a water surface (wave equation)"),
+    "warp": (Warp, "star trek: warp flight with stretching stars and warp tunnel rings"),
+    "lcars": (Lcars, "star trek: LCARS panels with shifting data bars"),
+    "sensors": (Sensors, "star trek: sensor sweep with contacts and target lock"),
+    "warpcore": (WarpCore, "star trek: pulsing warp core with plasma conduits"),
+    "transporter": (Transporter, "star trek: transporter beam materializing a figure"),
+    "borg": (Borg, "star trek: rotating borg cube"),
+    "blackhole": (BlackHole, "gravitationally lensed black hole with accretion disk (ray traced)"),
+    "planet": (Planet, "procedural worlds: oceans, clouds, city lights, rings, moons, orbital sunrise"),
+    "aurora": (Aurora, "northern lights substorm over a mountain lake with mirrored sky"),
+    "abyss": (Abyss, "dive to the bottom of the challenger deep: bioluminescence, giant squid, black smokers"),
+    "flyover": (Flyover, "low-altitude flight over procedural worlds through a sunset (voxel space)"),
+    "music": (Music, "reacts live to the music that is playing: tunnel, ridgelines, goniometer, spectrum sun"),
     "blank": (Blank, "black screen, zero cpu"),
 }
-DEFAULT_NAMES = [n for n in SAVERS if n != "blank"]
+PIXEL = {"blackhole", "planet", "aurora", "abyss", "flyover", "music"}
+DEFAULT_NAMES = [n for n in SAVERS if n != "blank" and (np is not None or n not in PIXEL)]
 
 
-def sequence(names):
+def sequence(names, ordered=False):
+    if ordered:
+        yield from itertools.cycle(names)
+        return
     last = None
     while True:
         order = list(names)
@@ -2496,16 +6262,44 @@ def sequence(names):
             yield n
 
 
-def run(scr, names, cycle):
+def run(scr, names, cycle, ordered=False):
     try:
         curses.curs_set(0)
     except curses.error:
         pass
     init_colors()
     scr.keypad(True)
-    seq = sequence(names)
+    seq = sequence(names, ordered)
     name = next(seq)
-    saver = SAVERS[name][0](scr)
+
+    cur = [None]
+
+    def shut():
+        # pixel savers write raw escapes and music runs a capture process: let them clean up
+        sv, cur[0] = cur[0], None
+        close = getattr(sv, "close", None) or getattr(getattr(sv, "px", None), "close", None)
+        if close:
+            try:
+                close()
+            except Exception:
+                pass
+
+    def make(n):
+        shut()
+        # reset per-window state that individual savers may change (e.g. automata enables scrolling)
+        scr.scrollok(False)
+        scr.idlok(False)
+        cur[0] = SAVERS[n][0](scr)
+        return cur[0]
+
+    try:
+        loop(scr, names, cycle, seq, name, make)
+    finally:
+        shut()
+
+
+def loop(scr, names, cycle, seq, name, make):
+    saver = make(name)
     switched = time.monotonic()
     last = switched - 1.0 / saver.fps
     while True:
@@ -2517,7 +6311,7 @@ def run(scr, names, cycle):
             PAIRS.clear()
             init_colors()
             scr.erase()
-            saver = SAVERS[name][0](scr)
+            saver = make(name)
             switched = now
         wait = saver.step(dt)
         scr.refresh()
@@ -2532,7 +6326,7 @@ def run(scr, names, cycle):
                 break
             if ch == curses.KEY_RESIZE:
                 scr.erase()
-                saver = SAVERS[name][0](scr)
+                saver = make(name)
                 break
             return
 
@@ -2546,23 +6340,36 @@ def main(argv):
             print("  %-11s %s" % (k, d))
         return 0
     cycle = 0
+    ordered = False
     if args and args[0] == "cycle":
-        cycle = float(args[1]) if len(args) > 1 else 60.0
-        names = list(DEFAULT_NAMES)
+        args = args[1:]
+        cycle = 60.0
+        if args:
+            try:
+                cycle = float(args[0])
+                args = args[1:]
+            except ValueError:
+                pass
+        names = args or list(DEFAULT_NAMES)
+        ordered = bool(args)
     elif not args or args[0] == "random":
         names = list(DEFAULT_NAMES)
     else:
         names = args
-        for n in names:
-            if n not in SAVERS:
-                print("unknown screensaver: %s (try: nerdsaver list)" % n, file=sys.stderr)
-                return 2
+        ordered = True
         cycle = 60.0 if len(names) > 1 else 0
+    for n in names:
+        if n not in SAVERS:
+            print("unknown screensaver: %s (try: nerdsaver list)" % n, file=sys.stderr)
+            return 2
+        if n in PIXEL and np is None:
+            print("%s needs numpy (python3-numpy)" % n, file=sys.stderr)
+            return 2
     setup_locale()
     os.environ.setdefault("ESCDELAY", "25")
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
-        curses.wrapper(run, names, cycle)
+        curses.wrapper(run, names, cycle, ordered)
     except KeyboardInterrupt:
         pass
     return 0

@@ -74,3 +74,7 @@ export PATH="$HOME/.opencode/bin:$PATH"
 export NERDSAVER_TERM=alacritty
 export NERDSAVER_LOCK=0
 export CALCULUS_STATE=~/.cache/calculus
+
+export PI_CODING_AGENT_DIR="$HOME/.local/share/pi"
+export PI_TELEMETRY=0
+

@@ -16,7 +16,7 @@ inhibit_fullscreen = yes
 # do not start while a pulseaudio/pipewire sink is playing
 inhibit_audio = no
 # do not start while one of these processes runs, e.g. mpv vlc
-inhibit_procs =
+inhibit_procs = opencode pi
 # halve the frame rate on battery
 eco_on_battery = yes
 # i3 binding mode that is active while the saver runs (must exist in the i3 config)
