@@ -9,6 +9,11 @@ ROFI_MENU="$(dirname "$(readlink -f "$0")")/rofi-menu"
 
 notify() { notify-send -a display "$@" >/dev/null 2>&1; }
 
+# Wallpaper from dotfiles.conf (`wallpaper = ...`)
+DF_WALLPAPER="$HOME/images/wallpaper"
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+
 command -v rofi >/dev/null || { notify -u critical "Display" "rofi not found"; exit 1; }
 
 # Internal panel: first eDP/LVDS output (override with INTERNAL=...)
@@ -56,7 +61,7 @@ esac
 # Re-place the bar and wallpaper on the new layout
 refresh_desktop() {
     [[ -x "$HOME/.config/polybar/launch.sh" ]] && "$HOME/.config/polybar/launch.sh" >/dev/null 2>&1 &
-    [[ -f "$HOME/images/wallpaper" ]] && feh --no-fehbg --bg-fill "$HOME/images/wallpaper" >/dev/null 2>&1
+    [[ -f "$DF_WALLPAPER" ]] && feh --no-fehbg --bg-fill "$DF_WALLPAPER" >/dev/null 2>&1
 }
 
 if ! xrandr "${args[@]}"; then

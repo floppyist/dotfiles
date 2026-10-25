@@ -4,40 +4,27 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 One palette across the whole desktop: gruvbox colors on a dark teal-black (`#191c1c`), sharp corners,
 JetBrainsMono Nerd Font everywhere, red (`#cc241d`) as the single accent.
 
-> [!CAUTION]
-> This project is currently a **Work in Progress (WIP)**.
-> Features may be incomplete and bugs are to be expected.
-> Especially the Firefox configuration isn't in a production-ready state!
-
-<p align="center">
-    <img src="screenshots/general.png" />
-</p>
-
-<p align="center">
-    <img src="screenshots/dunst.png" />
-</p>
-
-<p align="center">
-    <img src="screenshots/browser.png" />
-</p>
-
-<p align="center">
-    <img src="screenshots/mpv-wrapper.png" />
-</p>
-
-<p align="center">
-    <img src="screenshots/lazyvim.png" />
-</p>
-
-<p align="center">
-    <img src="screenshots/nerdsaver-modes.png" />
-</p>
+<!-- Gallery: 3 x 240 px fits the README column on GitHub (830 px); click a picture for full size -->
+<div align="center">
+<table>
+  <tr>
+    <td align="center"><a href="screenshots/general.png"><img src="screenshots/general.png" width="240" alt="Desktop: i3, Polybar, Alacritty"></a><br><sub><b>Desktop</b> · i3, Polybar, Alacritty</sub></td>
+    <td align="center"><a href="screenshots/dunst.png"><img src="screenshots/dunst.png" width="240" alt="Notifications: Dunst, volume OSD"></a><br><sub><b>Notifications</b> · Dunst, volume OSD</sub></td>
+    <td align="center"><a href="screenshots/browser.png"><img src="screenshots/browser.png" width="240" alt="Firefox: userChrome.css"></a><br><sub><b>Firefox</b> · userChrome.css</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><a href="screenshots/lazyvim.png"><img src="screenshots/lazyvim.png" width="240" alt="Neovim: LazyVim"></a><br><sub><b>Neovim</b> · LazyVim</sub></td>
+    <td align="center"><a href="screenshots/mpv-wrapper.png"><img src="screenshots/mpv-wrapper.png" width="240" alt="Music: mpvim with album cover"></a><br><sub><b>Music</b> · mpvim with album cover</sub></td>
+    <td align="center"><a href="screenshots/nerdsaver-modes.png"><img src="screenshots/nerdsaver-modes.png" width="240" alt="Screensaver: nerdsaver"></a><br><sub><b>Screensaver</b> · nerdsaver</sub></td>
+  </tr>
+</table>
+</div>
 
 ## Components
 
 - **Settings:** one file, [`dotfiles.conf`](dotfiles.conf): accent color, palette, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings))
 - **Window Manager:** `i3wm` (with `picom`)
-- **Terminal:** `Alacritty`; shell: `bash` with a two-line git prompt and vi mode (readline's own plus vim text objects like `ciw`, `di"`, `ya(`; the prompt shows the mode)
+- **Terminal:** `Alacritty`; shell: `bash` with a two-line git prompt and vi mode (readline's own plus vim text objects like `ciw`, `di"`, `ya(`; the prompt shows the mode); `fzf` in the same style
 - **Editor:** `Neovim` (LazyVim distribution, gruvbox; sharp frames, rofi-style Telescope, mode blocks in the statusline)
 - **Multiplexer:** `tmux` (prefix `Ctrl+a`; status line like Polybar)
 - **Status Bar:** `Polybar` (grouped modules; WiFi/IP/Bluetooth with click menus, CPU/memory turn red under load, music, tray). Event-driven: updates arrive the moment something changes, nothing polls in the background (see below)
@@ -63,6 +50,7 @@ JetBrainsMono Nerd Font everywhere, red (`#cc241d`) as the single accent.
 | `Alt + b` / `Alt + v` | Split horizontal / vertical |
 | `Alt + f` | Fullscreen |
 | `Alt + Shift + space` | Toggle floating |
+| `Alt + space` | Focus between tiled and floating windows |
 | `Alt + r` | Resize mode |
 | `Alt + Shift + q` | Kill window |
 | `Alt + Shift + r` | Restart i3 |
@@ -77,7 +65,7 @@ Polybar: click WiFi or Bluetooth for their menus (right-click Bluetooth toggles 
 copy it, right-click volume for `pulsemixer`, click the music module to play/pause (right-click: next), click
 the clock for the date.
 
-Terminal tools started from Rofi (audio, calculus, htop, mutt) open as a centered floating window
+Terminal tools started from Rofi (audio, calculus, htop, mutt, notice) open as a centered floating window
 (`terminal.sh --float`, using the terminal from `dotfiles.conf`).
 
 Shell (vim mode): `Esc` switches to normal mode (block cursor, `❮`), `i`/`a` back to insert mode (bar cursor, `❯`).
@@ -85,7 +73,9 @@ In normal mode the readline vi commands work (motions, `c`/`d`/`y`, counts, `p`,
 objects `iw aw iW aW i" a" i' a'` `` i` a` `` `i( a( i[ a[ i{ a{ i< a<` (also `ib`, `iB`) after `c`, `d` or `y`.
 `v` opens the line in Neovim (`$VISUAL`, visual mode and everything else), it runs when you save and quit.
 `Up`/`Down` search the history for lines starting with what is typed; `Ctrl+r` (history), `Ctrl+t` (files)
-and `Alt+c` (cd) use fzf. All of it is readline itself (`~/.inputrc`, `config/bash/vim.bash`): nothing runs
+and `Alt+c` (cd) use fzf. They open it in place of the prompt's second line (`╰─ history ❯`), and fzf looks like
+Rofi everywhere (input line on top, accent bar on the selected row, colors from `dotfiles.conf`).
+All of it is readline itself (`~/.inputrc`, `config/bash/vim.bash`): nothing runs
 while you type, a new shell starts in about 20 ms.
 
 ## Settings
@@ -97,7 +87,7 @@ dotfiles apply      # or: dotfiles edit (opens the file, applies after saving)
 ```
 
 `dotfiles apply` checks every value (unknown keys and invalid values are reported, nothing is changed then),
-renders `templates/*` into `~/.config/dotfiles/`, and reloads i3, Polybar, dunst and tmux. Alacritty and Rofi
+renders `templates/*` into `~/.config/dotfiles/`, and reloads i3, Polybar, dunst and tmux. Alacritty, Rofi and fzf
 pick the change up by themselves, Neovim, GTK programs, Firefox and open shells on their next start. Idle times and the
 keyboard layout are applied immediately.
 
@@ -111,7 +101,8 @@ keyboard layout are applied immediately.
 Other commands: `dotfiles check`, `dotfiles get accent`, `dotfiles list`.
 
 The configs include the generated files (`include ~/.config/dotfiles/i3.conf`, `include-file` in Polybar,
-`@import` in Rofi and GTK, `import` in Alacritty, `source-file` in tmux, a drop-in in `~/.config/dunst/dunstrc.d/`).
+`@import` in Rofi and GTK, `import` in Alacritty, `source-file` in tmux, `FZF_DEFAULT_OPTS_FILE` for fzf, a drop-in in
+`~/.config/dunst/dunstrc.d/`).
 To change the design itself, edit the configs or the templates in `templates/`.
 
 ### Polybar updates
@@ -144,8 +135,8 @@ Package names are for Void Linux. Some binaries (e.g. `xprintidle`, the Nerd Fon
 sudo xbps-install -S \
 i3 i3lock-color xss-lock polybar rofi dunst picom alacritty feh \
 xsetroot xset xrandr xclip scrot xbanish xprintidle \
-pipewire wireplumber pipewire-pulse libspa-bluetooth pulsemixer \
-bluez rfkill NetworkManager nm-applet libnotify elogind polkit-gnome \
+pipewire wireplumber libspa-bluetooth pulsemixer \
+bluez rfkill NetworkManager libnotify elogind polkit-gnome \
 mpv mpv-mpris playerctl brightnessctl \
 neomutt fzf ncurses caffeine-ng python3 tmux ffmpeg
 ```
@@ -154,13 +145,14 @@ Optional: `chafa` (sharper album covers in `mpvim`; without it they are drawn wi
 `python3-Pillow`).
 
 Minimum versions: i3 4.22, polybar 3.6, picom 12 (uses the `rules` syntax), rofi 1.7, dunst 1.9, scrot 1.7, bash 5.1 (text objects; 5.3 keeps the chevron off continuation lines),
-tmux 3.2, alacritty 0.14 (`[general] import`).
+tmux 3.2, alacritty 0.14 (`[general] import`), fzf 0.66 (`--gutter`).
 
 Also needed:
 - `calculus` (built separately, expects `~/.local/bin/calculus`)
-- JetBrainsMono Nerd Font (v3, `md-*` icons)
-- Wallpaper at `~/images/wallpaper`; screenshots go to `~/images/screenshots`
-- Optional: `numpy` for the pixel screensavers of `nerdsaver`, Wine for the games in `applications/`
+- JetBrainsMono Nerd Font (v3, `md-*` icons; on Void in `nerd-fonts-ttf`)
+- Optional: the `Bibata-Modern-Classic` cursor theme (e.g. in `~/.icons`; without it X shows its default cursor)
+- Wallpaper at `~/images/wallpaper` (or set `wallpaper` in `dotfiles.conf`); screenshots go to `~/images/screenshots`
+- Optional: `numpy` for the pixel screensavers of `nerdsaver`, Wine for the games in `applications/local/`
 
 ## Installation
 
@@ -184,7 +176,7 @@ cd "$DOTFILES"
 ./install.sh
 ```
 
-The script links every file of `config/` into `~/.config/` (file by file, e.g. `~/.config/i3/config`, so your own files in those directories stay), the dotfiles into `~/`, the scripts into `~/.local/bin/` and the `.desktop` files into `~/.local/share/applications/`. It makes the scripts executable and runs `dotfiles apply` once. Existing files it would replace are moved to `*.bak-<timestamp>`; links to files that were removed from the repository are deleted. It can be run again safely (also after `git pull`, to link new files).
+The script links every file of `config/` into `~/.config/` (file by file, e.g. `~/.config/i3/config`, so your own files in those directories stay), the dotfiles into `~/`, the scripts into `~/.local/bin/` and the `.desktop` files into `~/.local/share/applications/` (those in `applications/local/` only if their program is installed, see step 5). It makes the scripts executable and runs `dotfiles apply` once. Existing files it would replace are moved to `*.bak-<timestamp>`; links to files that were removed from the repository are deleted. It can be run again safely (also after `git pull`, to link new files).
 
 Everything is linked, not copied: switching git branches changes the running desktop (Alacritty reloads its config live, scripts and Rofi pick up changes on their next start).
 
@@ -208,7 +200,11 @@ Everything is linked, not copied: switching git branches changes the running des
 
 ### 5. Adjust machine-specific paths
 
-The launchers in `applications/` (`aseprite`, `cncgenerals*`, `factorio`, `wow`) point to install locations under `/home/floppyist/`. Change `Exec=` and `Path=` to match your system.
+The launchers in `applications/local/` (Aseprite, Command & Conquer Generals, Factorio, World of Warcraft, Sunshine) are
+machine-specific and point to install locations under `/home/floppyist/`. `install.sh` links one only if its program
+exists (the command of `Exec=` and `TryExec=`, every absolute path in `Exec=` and `Path=`) and removes the link again
+when it is gone, so they never show up as broken entries in Rofi. Change `Exec=` and `Path=` to your install
+locations (or put your own launchers there) and run `./install.sh` again.
 
 ## Security notes
 

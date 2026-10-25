@@ -10,7 +10,7 @@ usage: dotfiles apply [--no-reload]   generate the theme files from dotfiles.con
 
 dotfiles.conf lives in the repository root. `apply` renders templates/* into
 ~/.config/dotfiles/, which the configs of i3, polybar, rofi, dunst, alacritty, tmux,
-neovim, neomutt, GTK and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
+neovim, neomutt, GTK, fzf and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
 """
 import colorsys
 import glob
@@ -389,6 +389,7 @@ def apply(no_reload):
     if done:
         print("dotfiles: reloaded %s" % ", ".join(done))
     later = [n for f, n in (("alacritty.toml", "alacritty (reloads itself)"), ("rofi.rasi", "rofi (next start)"),
+                            ("fzfrc", "fzf (next start)"),
                             ("nvim.lua", "neovim (next start)"), ("gtk.css", "GTK programs (next start)"),
                             ("firefox.css", "firefox (restart)"),
                             ("theme.sh", "shells and lock screen (next start)")) if f in changed]

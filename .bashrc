@@ -20,6 +20,9 @@ export PI_CODING_AGENT_DIR="$HOME/.local/share/pi"
 export PI_TELEMETRY=0
 # Editor for git, crontab, ... and for `v` in the shell's normal mode (edit the line in vim)
 export EDITOR="${EDITOR:-nvim}" VISUAL="${VISUAL:-${EDITOR:-nvim}}"
+# fzf colors and layout from dotfiles.conf (generated; fzf reads the file on every start)
+[[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/fzfrc" ]] &&
+    export FZF_DEFAULT_OPTS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/fzfrc"
 
 # Everything below is for interactive shells only
 [[ $- == *i* ]] || return
@@ -41,7 +44,7 @@ PROMPT_DIRTRIM=3
 
 # ── Prompt ───────────────────────────────────────────────────────────────────
 #
-#   ╭─ user@host ~/path [ main *+? ↑1] 󰒓 1 ✗ 127
+#   ╭─ user@host ~/path [ main *+? ↑1] 󰒓 1 ✗ 127
 #   ╰─❯                 ❯ insert mode (bar cursor), ❮ in the accent: normal mode (block cursor)
 #
 #   *  modified   +  staged   ?  untracked   ↑/↓  ahead/behind upstream
@@ -53,6 +56,7 @@ if [[ "$TERM" == linux ]]; then
     _P_MUTED=$'\e[90m'  _P_SUBTLE=$'\e[37m'  _P_PATH=$'\e[97m'
     _P_USER=$'\e[1;35m' _P_HOST=$'\e[1;36m'  _P_ERR=$'\e[1;31m'
     _P_CLEAN=$'\e[32m'  _P_DIRTY=$'\e[33m'   _P_JOBS=$'\e[34m'   _P_ACCENT=$'\e[1;31m'
+    _P_LABEL=$'\e[31m'
     _P_TOP="" _P_BOT="" _P_CHEV=">" _P_CHEV_CMD="<" _P_BRANCH="" _P_JOB="jobs:"
     _P_CUR_INS="" _P_CUR_CMD=""
 else
@@ -66,7 +70,7 @@ else
     _P_MUTED=$(_rgb "$DF_MUTED")         _P_SUBTLE=$(_rgb "$DF_SUBTLE")      _P_PATH=$(_rgb "$DF_FG")
     _P_USER=$(_rgb "$DF_PURPLE_HI" '1;') _P_HOST=$(_rgb "$DF_AQUA_HI" '1;')  _P_ERR=$(_rgb "$DF_RED_HI" '1;')
     _P_CLEAN=$(_rgb "$DF_GREEN_HI")      _P_DIRTY=$(_rgb "$DF_ORANGE_HI")    _P_JOBS=$(_rgb "$DF_BLUE_HI")
-    _P_ACCENT=$(_rgb "$DF_ACCENT_TEXT" '1;')
+    _P_ACCENT=$(_rgb "$DF_ACCENT_TEXT" '1;') _P_LABEL=$(_rgb "$DF_ACCENT_TEXT")
     _P_TOP="╭─ " _P_BOT="╰─" _P_CHEV="❯" _P_CHEV_CMD="❮" _P_BRANCH=$'\xee\x82\xa0 ' _P_JOB="󰒓 "
     # Cursor shape (DECSCUSR, as text for readline): bar in insert mode, block in normal mode
     _P_CUR_INS='\e[6 q' _P_CUR_CMD='\e[2 q'
@@ -74,7 +78,7 @@ else
 fi
 _P_RESET=$'\e[0m'
 
-# Git segment: " [ main *+?]". The branch glyph (pl-branch U+E0A0) is written as bytes:
+# Git segment: " [ main *+?]". The branch glyph (pl-branch U+E0A0) is written as bytes:
 # editors and tools tend to drop Private Use characters. \001/\002 mark the color codes as zero-width for readline.
 _prompt_git() {
     local out head files line branch ahead="" behind="" staged="" modified="" untracked="" color sym=""
@@ -173,6 +177,41 @@ alias cb='xclip -selection clipboard'
 
 # ── Tools ────────────────────────────────────────────────────────────────────
 
-# fzf key bindings: Ctrl+r history, Ctrl+t files, Alt+c cd (insert and normal mode)
+# fzf key bindings: Ctrl+r history, Ctrl+t files, Alt+c cd (insert and normal mode).
+# Bash clears the prompt's last line before a key binding runs, so fzf opens in place of
+# "╰─❯" and its input line continues the prompt (label in the accent, like rofi's "apps ❯"):
+#   ╭─ user@host ~/path
+#   ╰─ history ❯ query                                          4/120
+_fzf_prompt() {
+    printf -- "--prompt='%s%s%s%s %s%s '" "$_P_MUTED" "${_P_BOT:+$_P_BOT }" "$_P_LABEL" "$1" "$_P_SUBTLE" "$_P_CHEV"
+}
+FZF_CTRL_R_OPTS=$(_fzf_prompt history)
+FZF_CTRL_T_OPTS=$(_fzf_prompt files)
+FZF_ALT_C_OPTS=$(_fzf_prompt cd)
+unset -f _fzf_prompt
 # shellcheck source=/dev/null
 [[ -f /usr/share/fzf/key-bindings.bash ]] && . /usr/share/fzf/key-bindings.bash
+
+# Alt+c: fzf's own binding types `__fzf_cd__` into the command line and runs it from there,
+# so that text stays visible above fzf. Here it is a bind -x widget like Ctrl+r and Ctrl+t
+# (fzf opens in place of "╰─❯"), then an empty accept-line draws a fresh prompt in the new
+# directory and the line that was typed comes back.
+if declare -F __fzf_cd__ >/dev/null; then
+    _fzf_cd_widget() {
+        local cmd
+        _FZF_LINE=$READLINE_LINE _FZF_POINT=$READLINE_POINT
+        READLINE_LINE="" READLINE_POINT=0
+        # prints "builtin cd -- <dir quoted with %q>"
+        cmd=$(__fzf_cd__) && eval "$cmd"
+    }
+    _fzf_cd_restore() {
+        READLINE_LINE=${_FZF_LINE-} READLINE_POINT=${_FZF_POINT:-0}
+        unset _FZF_LINE _FZF_POINT
+    }
+    for _m in vi-insert vi-command emacs-standard; do
+        bind -m "$_m" -x '"\C-x\C-o": _fzf_cd_widget'
+        bind -m "$_m" -x '"\C-x\C-l": _fzf_cd_restore'
+        bind -m "$_m" '"\ec": "\C-x\C-o\C-m\C-x\C-l"'
+    done
+    unset _m
+fi

@@ -113,6 +113,14 @@ pause_notifications() { command -v dunstctl >/dev/null && dunstctl set-paused "$
 kill_i3lock()         { pkill -xu "$EUID" i3lock; }
 
 lock_failed() {
+    # Lost a race against a second lock.sh (e.g. Super+l at the moment the idle lock fires):
+    # its i3lock holds the screen, so ours could not grab it. The screen IS locked, and
+    # resuming notifications now would show them on top of the lock screen; that instance
+    # resumes them when it ends.
+    if pgrep -xu "$EUID" i3lock >/dev/null; then
+        trap - EXIT
+        exit 0
+    fi
     pause_notifications false
     notify-send -a system -u critical "Lock failed" "i3lock could not start. The screen is NOT locked." >/dev/null 2>&1
     exit 1

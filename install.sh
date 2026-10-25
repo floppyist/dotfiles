@@ -5,7 +5,9 @@
 #   Directories that older versions linked as a whole (~/.config/i3 -> config/i3) become
 #   real directories.
 # - Idempotent: running it again changes nothing that is already correct.
-# - A file that would be replaced is moved to *.bak-<timestamp>.
+# - A file that would be replaced is moved to *.bak-<timestamp>. Links into this repository
+#   (e.g. to a file's old location) are simply replaced.
+# - Machine-specific launchers (applications/local/) are linked only if their program exists.
 # - Links into this repository whose file is gone (renamed or deleted here) are removed.
 # - Generates the theme files from dotfiles.conf (`dotfiles apply`, into ~/.config/dotfiles).
 # - Does not touch /etc (udev rule) or Firefox profiles; those are printed as hints.
@@ -60,11 +62,37 @@ link() {
         return 0
     fi
     ensure_dir "$(dirname "$dst")"
-    if [[ -e "$dst" || -L "$dst" ]]; then
+    if into_repo "$dst"; then
+        rm "$dst"
+    elif [[ -e "$dst" || -L "$dst" ]]; then
         backup "$dst"
     fi
     ln -s "$src" "$dst"
     echo "link    $dst -> $src"
+}
+
+# True if the program of the launcher $1 is installed: TryExec= and the command of Exec= are
+# found, every absolute path in Exec= (e.g. the .exe for wine) and Path= exists. Sets MISSING.
+launcher_ok() {
+    local line section="" exec="" try="" path="" w words=()
+    while IFS= read -r line; do
+        if [[ "$line" == \[*\] ]]; then section=$line; continue; fi
+        [[ "$section" == "[Desktop Entry]" ]] || continue
+        case "$line" in
+            Exec=*)    exec=${line#Exec=} ;;
+            TryExec=*) try=${line#TryExec=} ;;
+            Path=*)    path=${line#Path=} ;;
+        esac
+    done < "$1"
+    # split like the desktop entry spec (double quotes); xargs never runs the words
+    mapfile -t words < <(printf '%s\n' "$exec" | xargs -n1 printf '%s\n' 2>/dev/null)
+    MISSING=${try:-${words[0]:-Exec=}}
+    [[ -z "$try" ]] || command -v "$try" >/dev/null || return 1
+    (( ${#words[@]} )) && command -v "${words[0]}" >/dev/null || { MISSING=${words[0]:-Exec=}; return 1; }
+    for w in "${words[@]:1}" "$path"; do
+        if [[ "$w" == /* && ! -e "$w" ]]; then MISSING=$w; return 1; fi
+    done
+    return 0
 }
 
 # Remove links into this repository whose target no longer exists. $1: directory, $2: depth
@@ -109,6 +137,19 @@ done
 for src in "$DOTFILES"/applications/*.desktop; do
     link "$src" "$HOME/.local/share/applications/$(basename "$src")"
 done
+# ... and the machine-specific ones (games, self-built programs) only where they are installed
+for src in "$DOTFILES"/applications/local/*.desktop; do
+    [[ -f "$src" ]] || continue
+    dst="$HOME/.local/share/applications/$(basename "$src")"
+    if launcher_ok "$src"; then
+        link "$src" "$dst"
+    elif into_repo "$dst"; then
+        rm "$dst"
+        echo "remove  $dst (not installed: $MISSING)"
+    else
+        echo "skip    $dst (not installed: $MISSING)"
+    fi
+done
 
 # Links to files that were renamed or removed here
 prune "$CONFIG" 1
@@ -122,7 +163,7 @@ prune "$HOME/.local/share/applications" 1
 # Executable bits (git tracks them, this is for fresh clones)
 chmod +x "$DOTFILES"/scripts/* "$DOTFILES"/config/polybar/launch.sh "$DOTFILES"/config/polybar/scripts/*
 
-# Theme files for i3, polybar, rofi, dunst, alacritty, tmux, neovim, neomutt, GTK, Firefox
+# Theme files for i3, polybar, rofi, dunst, alacritty, tmux, neovim, neomutt, GTK, fzf, Firefox
 "$DOTFILES/scripts/dotfiles" apply --no-reload
 
 if command -v update-desktop-database >/dev/null 2>&1; then
