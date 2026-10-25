@@ -2,7 +2,9 @@
 # Choose how to use an external display (rofi menu)
 set -u
 
-notify() { notify-send "Display" "$1"; }
+THEME="$HOME/.config/rofi/config.rasi"
+
+notify() { notify-send "Display" "$1" >/dev/null 2>&1; }
 
 command -v rofi >/dev/null || { notify "rofi not found"; exit 1; }
 
@@ -22,7 +24,11 @@ for m in "${EXTERNALS[@]}"; do
 done
 MENU+=("OFF")
 
-CHOICE=$(printf '%s\n' "${MENU[@]}" | rofi -dmenu -i -p "Display")
+CHOICE=$(printf '%s\n' "${MENU[@]}" | rofi -dmenu -i -p "Display" \
+    -theme "$THEME" \
+    -mesg "DISPLAY" \
+    -theme-str 'window { width: 30%; }' \
+    -theme-str 'listview { lines: 10; }')
 [[ -z "$CHOICE" ]] && exit 0
 
 if [[ "$CHOICE" == "OFF" ]]; then

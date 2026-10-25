@@ -1,8 +1,9 @@
 [Desktop Entry]
+Type=Application
 Name=Command & Conquer Generals - Zero Hour
+GenericName=Game
+Comment=Command & Conquer Generals: Zero Hour (Wine)
 Exec=wine "/home/floppyist/games/Command and Conquer Generals Zero Hour/generals.exe"
 Path=/home/floppyist/games/Command and Conquer Generals Zero Hour
 Terminal=false
-Type=Application
 Categories=Game;
-GenericName=Game

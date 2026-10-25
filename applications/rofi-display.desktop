@@ -1,8 +1,8 @@
 [Desktop Entry]
+Type=Application
 Name=Display
-Comment=Connect to external displays
+GenericName=Settings
+Comment=Switch external display mode
 Exec=/home/floppyist/.local/bin/display-select.sh
 Terminal=false
-Type=Application
-StartupNotify=false
-GenericName=Settings
+Categories=Settings;

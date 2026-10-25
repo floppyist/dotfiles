@@ -1,6 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=calculus
+Name=Calculus
+GenericName=Calculator
+Comment=Scientific calculator
 Exec=alacritty -e calculus
-Categories=Utility;
-GenericName=Scientific Calculator
+Terminal=false
+Categories=Utility;Calculator;

@@ -1,8 +1,9 @@
 [Desktop Entry]
-Name=Factorio
-Exec=/home/floppyist/games/factorio/bin/x64/factorio
-Path=/home/floppyist/games/factorio/
-Terminal=false
 Type=Application
-Categories=Game;
+Name=Factorio
 GenericName=Game
+Comment=Factory building and automation game
+Exec=/home/floppyist/games/factorio/bin/x64/factorio
+Path=/home/floppyist/games/factorio
+Terminal=false
+Categories=Game;

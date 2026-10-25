@@ -1,6 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=mutt
+Name=Mutt
+GenericName=Email Client
+Comment=Terminal email client (neomutt)
 Exec=alacritty -e neomutt
-Categories=Utility;
-GenericName=E-Mail Client
+Terminal=false
+Categories=Network;Email;

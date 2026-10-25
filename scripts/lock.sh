@@ -1,12 +1,20 @@
 #!/bin/bash
+# Lock the screen with i3lock.
+# Notifications are paused while locked (so their content stays hidden) and
+# resumed on every exit path, including signals.
 
 pgrep -x i3lock >/dev/null && exit 0
 
+resume_notifications() {
+    command -v dunstctl >/dev/null && dunstctl set-paused false
+}
+trap resume_notifications EXIT
+trap 'exit 1' INT TERM HUP
+
 command -v dunstctl >/dev/null && dunstctl set-paused true
 
-i3lock \
+i3lock --nofork \
 -c 191c1c \
---nofork \
 --ignore-empty-password \
 --pass-media-keys \
 --pass-volume-keys \
@@ -36,7 +44,3 @@ i3lock \
 --date-size=16 \
 --radius 160 \
 --ring-width 32
-|| i3lock --nofork -c ${bg}
-
-command -v dunstctl >/dev/null && dunstctl set-paused false
-exit 0

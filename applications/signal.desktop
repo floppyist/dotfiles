@@ -1,10 +1,10 @@
 [Desktop Entry]
-Name=Signal
-Exec=/usr/bin/signal-desktop %U
-Terminal=false
 Type=Application
-Icon=signal-desktop
-Comment=Private messaging from your desktop
-MimeType=x-scheme-handler/sgnl;x-scheme-handler/signalcaptcha
+Name=Signal
 GenericName=Messenger
-Categories=Network;InstantMessaging;Chat
+Comment=Private messaging from your desktop
+Exec=/usr/bin/signal-desktop %U
+Icon=signal-desktop
+Terminal=false
+MimeType=x-scheme-handler/sgnl;x-scheme-handler/signalcaptcha;
+Categories=Network;InstantMessaging;Chat;

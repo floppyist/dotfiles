@@ -1,11 +1,11 @@
 [Desktop Entry]
-Categories=RemoteAccess;Network;
+Type=Application
+Name=Sunshine
+GenericName=Game Streaming Host
 Comment=Self-hosted stream host for Moonlight
 Exec=sh -c "nohup sunshine > /dev/null 2>&1 &"
 Icon=dev.lizardbyte.app.Sunshine
+Terminal=false
 StartupWMClass=dev.lizardbyte.app.Sunshine
+Categories=Network;RemoteAccess;
 Keywords=stream;moonlight;remote play;
-Name=Sunshine
-Type=Application
-Version=1.0
-GenericName=Screensharing

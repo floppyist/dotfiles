@@ -1,9 +1,10 @@
 [Desktop Entry]
+Type=Application
 Name=World of Warcraft 2.4.3
+GenericName=Game
+Comment=World of Warcraft (Wine)
 Exec=wine "/home/floppyist/games/World of Warcraft 2.4.3/Wow.exe"
-Path=/home/floppyist/games/World of Warcraft 2.4.3/
+Path=/home/floppyist/games/World of Warcraft 2.4.3
 Icon=games-config-board
 Terminal=false
-Type=Application
 Categories=Game;
-GenericName=Game

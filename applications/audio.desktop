@@ -1,6 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=Audio
+GenericName=Audio Mixer
+Comment=Terminal audio mixer (pulsemixer)
 Exec=alacritty -e pulsemixer
-Categories=Utility;
-GenericName=Settings
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
