@@ -8,7 +8,9 @@ terminal = auto
 # all = saver on every monitor, primary = saver on primary and black windows elsewhere, focused = only focused monitor
 monitors = all
 # lock the screen after this many idle seconds (0 = never lock)
-lock_after = 300
+# 0 here: xss-lock does the locking (after `xset s 60 240`, i.e. 300 s idle, and on suspend),
+# see the i3 config. Only set this if nerdsaver-launch runs without xss-lock.
+lock_after = 0
 # empty = ~/.local/bin/lock.sh if present, otherwise i3lock
 lock_cmd =
 # do not start while a fullscreen window is visible on any monitor

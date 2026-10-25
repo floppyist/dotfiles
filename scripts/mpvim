@@ -193,25 +193,38 @@ def draw_box(s, y, x, h, w, segs, battr):
 
 
 def make_attrs():
+    # The terminal's 16 palette colors: alacritty.toml maps them to the desktop palette, so
+    # mpvim matches the rest of the desktop (and still works in 8-color terminals).
     curses.start_color()
     curses.use_default_colors()
-    cols = {"border": 244, "title": 245, "orange": 215, "text": 252, "dim": 240,
-            "red": 167, "teal": 79, "blue": 110, "bright": 255, "active": 252}
+    many = curses.COLORS >= 16
+
+    def c(n):
+        return n if many or n < 8 else n - 8
+
+    surface, muted, subtle, text = 0, (8 if many else 7), 7, c(15)
+    red, green, yellow, blue, aqua = c(9), c(10), c(11), c(12), c(14)
+    fgs = {"border": muted, "title": subtle, "accent": red, "text": text, "dim": muted,
+           "label": subtle, "red": red, "teal": aqua, "blue": blue, "green": green,
+           "yellow": yellow, "bright": text, "active": subtle}
     A = {}
     n = 0
-    for name, fg in cols.items():
+    for name, fg in fgs.items():
         n += 1
         curses.init_pair(n, fg, -1)
         A[name] = curses.color_pair(n)
-    for name, fg, bg in (("sel", 255, 237), ("selplay", 215, 237), ("hit", 234, 215)):
+    # selection rows use the surface color like rofi; the red bar marks the cursor row
+    for name, fg, bg in (("sel", text, surface), ("selplay", red, surface),
+                         ("selbar", red, surface), ("hit", surface, yellow)):
         n += 1
         curses.init_pair(n, fg, bg)
         A[name] = curses.color_pair(n)
     A["bold"] = A["bright"] | curses.A_BOLD
-    A["play"] = A["orange"] | curses.A_BOLD
+    A["head"] = A["accent"] | curses.A_BOLD
+    A["play"] = A["accent"] | curses.A_BOLD
     A["selplay"] |= curses.A_BOLD
     A["sel"] |= curses.A_BOLD
-    A["cursor"] = A["teal"] | curses.A_REVERSE
+    A["cursor"] = A["red"] | curses.A_REVERSE
     A["dimcursor"] = A["dim"] | curses.A_REVERSE
     return A
 
@@ -759,7 +772,7 @@ class App:
         pl, v = self.pl(), self.vis()
         n = len(v)
         self.cur = max(0, min(self.cur, n - 1))
-        title = [("Playlist", A["title"])]
+        title = [("\U000F0CB8 playlist", A["head"])]
         if self.mode == "INSERT" and self.buf.strip():
             title.append((f"  filter {n}/{len(pl)}", A["dim"]))
         draw_box(s, y, x, h, w, title, A["border"])
@@ -786,9 +799,12 @@ class App:
             yy = y + 1 + r
             if sel:
                 put(s, yy, x + 1, " " * (w - 2), attr)
-            mark = ("\u2016" if paused else "\u25b6") if isp else " "
-            prefix = f" {mark} {i + 1:>{numw}}  "
+            # md-pause / md-play glyphs; the red bar marks the cursor row (like rofi)
+            mark = ("\U000F03E4" if paused else "\U000F040A") if isp else " "
+            prefix = f"  {mark} {i + 1:>{numw}}  "
             put(s, yy, x + 1, prefix, attr if (isp or sel) else A["dim"])
+            if sel:
+                put(s, yy, x + 1, "\u258c", A["selbar"])
             nm = self.name(i)
             avail = w - 2 - sw(prefix) - 1
             px = x + 1 + sw(prefix)
@@ -803,13 +819,13 @@ class App:
 
     def draw_help(self, y, x, h, w):
         s, A = self.scr, self.A
-        draw_box(s, y, x, h, w, [("Help", A["title"]), ("  j/k scroll, q/Esc close", A["dim"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F030C help", A["head"]), ("  j/k scroll, q/Esc close", A["dim"])], A["border"])
         ih = h - 2
         self.help_top = max(0, min(self.help_top, max(0, len(HELP) - ih)))
         for r, item in enumerate(HELP[self.help_top:self.help_top + ih]):
             yy = y + 1 + r
             if isinstance(item, str):
-                put(s, yy, x + 2, item, A["orange"] | curses.A_BOLD)
+                put(s, yy, x + 2, item, A["head"])
             else:
                 put(s, yy, x + 3, item[0], A["teal"])
                 put(s, yy, x + 26, trunc(item[1], w - 28), A["text"])
@@ -819,7 +835,7 @@ class App:
 
     def draw_now(self, y, x, h, w):
         s, A, P = self.scr, self.A, self.mpv.props.get
-        draw_box(s, y, x, h, w, [("Now Playing", A["title"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F0387 now playing", A["title"])], A["border"])
         md = self.meta()
         pos, dur = P("time-pos"), P("duration")
         if not P("path"):
@@ -831,64 +847,68 @@ class App:
         if P("mute"):
             vols += " (muted)"
         sp = P("speed")
-        rows = [("Title", md.get("title") or P("media-title") or "-"),
-                ("Artist", md.get("artist") or "-"),
-                ("Album", md.get("album") or "-"),
-                ("State", state),
-                ("Time", f"{fmt_time(pos)} / {fmt_time(dur)}"),
+        rows = [("title", md.get("title") or P("media-title") or "-"),
+                ("artist", md.get("artist") or "-"),
+                ("album", md.get("album") or "-"),
+                ("state", state),
+                ("time", f"{fmt_time(pos)} / {fmt_time(dur)}"),
                 None,
-                ("Volume", vols),
-                ("Speed", f"{sp:.2f}x" if sp else "-"),
-                ("Repeat", self.repeat_state())]
-        iw = w - 5
+                ("volume", vols),
+                ("speed", f"{sp:.2f}x" if sp else "-"),
+                ("repeat", self.repeat_state())]
+        iw = w - 13
         for r, row in enumerate(rows[:h - 2]):
             yy = y + 1 + r
             if row is None:
-                bw = max(1, w - 6)
+                # progress line, same style as the dunst volume/brightness bar
+                bw = max(1, w - 5)
                 ratio = min(1.0, max(0.0, pos / dur)) if pos and dur else 0
                 f = int(ratio * bw)
-                put(s, yy, x + 2, "\u2588" * f, A["orange"])
-                put(s, yy, x + 2 + f, "\u2591" * (bw - f), A["dim"])
+                put(s, yy, x + 2, "\u2501" * f, A["accent"])
+                put(s, yy, x + 2 + f, "\u2500" * (bw - f), A["dim"])
             else:
-                put(s, yy, x + 2, trunc(clean(f"{row[0]:<7}= {row[1]}"), iw), A["orange"])
+                label, val = row
+                vattr = A["bold"] if label == "title" else (A["accent"] if label == "state" else A["text"])
+                put(s, yy, x + 2, f"{label:<8}", A["label"])
+                put(s, yy, x + 11, trunc(clean(str(val)), iw), vattr)
 
     def draw_props(self, y, x, h, w):
         s, A, P = self.scr, self.A, self.mpv.props.get
-        draw_box(s, y, x, h, w, [("Properties", A["title"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F02FD properties", A["title"])], A["border"])
         md = self.meta()
         ap = P("audio-params") or {}
         br = P("audio-bitrate")
         pi, n = self.playing(), len(self.pl())
-        rows = [("Position", f"{pi + 1} / {n}" if pi >= 0 else f"- / {n}"),
-                ("Codec", P("audio-codec-name") or "-"),
-                ("Format", P("file-format") or "-"),
-                ("Rate", f"{ap['samplerate']} Hz" if ap.get("samplerate") else "-"),
-                ("Channels", ap.get("hr-channels") or ap.get("channels") or "-"),
-                ("Bitrate", f"{br / 1000:.0f} kbps" if br else "-"),
-                ("Genre", md.get("genre") or "-"),
-                ("Date", md.get("date") or md.get("year") or "-"),
-                ("Track", md.get("track") or "-")]
+        rows = [("position", f"{pi + 1} / {n}" if pi >= 0 else f"- / {n}"),
+                ("codec", P("audio-codec-name") or "-"),
+                ("format", P("file-format") or "-"),
+                ("rate", f"{ap['samplerate']} Hz" if ap.get("samplerate") else "-"),
+                ("channels", ap.get("hr-channels") or ap.get("channels") or "-"),
+                ("bitrate", f"{br / 1000:.0f} kbps" if br else "-"),
+                ("genre", md.get("genre") or "-"),
+                ("date", md.get("date") or md.get("year") or "-"),
+                ("track", md.get("track") or "-")]
         for r, (k, val) in enumerate(rows[:h - 2]):
-            put(s, y + 1 + r, x + 2, trunc(clean(f"{k:<9}= {val}"), w - 5), A["text"])
+            put(s, y + 1 + r, x + 2, f"{k:<9}", A["label"])
+            put(s, y + 1 + r, x + 12, trunc(clean(str(val)), w - 14), A["text"])
 
     def draw_log(self, y, x, h, w):
         s, A = self.scr, self.A
-        draw_box(s, y, x, h, w, [("Log", A["title"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F0279 log", A["title"])], A["border"])
         ih = h - 2
         for r, (ts, text, err) in enumerate(self.log[-ih:] if ih > 0 else []):
             yy = y + 1 + r
-            put(s, yy, x + 1, f"[{ts}]", A["dim"])
-            put(s, yy, x + 11, trunc(clean(text), w - 13), A["red"] if err else A["text"])
+            put(s, yy, x + 2, ts, A["dim"])
+            put(s, yy, x + 12, trunc(clean(text), w - 14), A["red"] if err else A["text"])
 
     def draw_input(self, y, x, h, w):
         s, A = self.scr, self.A
-        mc = {"NORMAL": "blue", "INSERT": "red", "COMMAND": "orange", "SEARCH": "orange"}[self.mode]
-        segs = [("Input", A["bold"]), ("  ", 0), ("[", A["bold"]),
-                (self.mode, A[mc] | curses.A_BOLD), ("]", A["bold"])]
+        mc = {"NORMAL": "blue", "INSERT": "green", "COMMAND": "yellow", "SEARCH": "yellow"}[self.mode]
+        segs = [("\U000F07B7 input", A["title"]), ("  ", 0), (self.mode.lower(), A[mc] | curses.A_BOLD)]
         draw_box(s, y, x, h, w, segs, A["active"])
-        prompt = {"NORMAL": ">", "INSERT": ">", "COMMAND": ":",
+        prompt = {"NORMAL": "\u276f", "INSERT": "\u276f", "COMMAND": ":",
                   "SEARCH": "/" if self.sdir > 0 else "?"}[self.mode]
-        put(s, y + 1, x + 2, prompt, A["teal"] | curses.A_BOLD)
+        put(s, y + 1, x + 2, prompt, A["accent"] | curses.A_BOLD)
         if self.mode == "NORMAL":
             typed = self.count + self.pend
             put(s, y + 1, x + 4, typed, A["text"])
@@ -940,10 +960,11 @@ def main():
     files = collect(paths or ["."])
     if not files:
         sys.exit("mpvim: no audio files found")
-    if not os.environ.get("TERM", "").endswith("256color") and "kitty" not in os.environ.get("TERM", ""):
-        print("mpvim: warning: TERM is not a 256-color terminal", file=sys.stderr)
 
-    sock_path = os.path.join(tempfile.gettempdir(), f"mpvim-{os.getpid()}.sock")
+    # mpv's IPC socket accepts any command (including "run"), so it lives in a private
+    # 0700 directory instead of a predictable path in /tmp.
+    sock_dir = tempfile.mkdtemp(prefix="mpvim-", dir=os.environ.get("XDG_RUNTIME_DIR") or None)
+    sock_path = os.path.join(sock_dir, "mpv.sock")
     cmd = (["mpv", "--idle=yes", "--no-video", "--audio-display=no", "--force-window=no",
             "--no-terminal", "--input-ipc-server=" + sock_path] + opts + ["--"] + files)
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -963,10 +984,7 @@ def main():
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
-        try:
-            os.unlink(sock_path)
-        except OSError:
-            pass
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

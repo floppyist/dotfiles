@@ -1,41 +1,41 @@
 #!/usr/bin/env bash
-# Windows-style display menu (WIN+P): choose how to use external displays
+# Windows-style display menu (Super+p): choose how to use an external display.
+# "Second screen only" turns the internal panel off; it must be confirmed within
+# 15 s, otherwise the change is reverted (a dark external screen cannot lock you out).
 set -u
 
-THEME="$HOME/.config/rofi/config.rasi"
+# Shared menu helper, resolved next to this script (works without ~/.local/bin in PATH)
+ROFI_MENU="$(dirname "$(readlink -f "$0")")/rofi-menu"
 
-notify() { notify-send -a "Display" "Display" "$1" >/dev/null 2>&1; }
+notify() { notify-send -a display "$@" >/dev/null 2>&1; }
 
-command -v rofi >/dev/null || { notify "rofi not found"; exit 1; }
+command -v rofi >/dev/null || { notify -u critical "Display" "rofi not found"; exit 1; }
 
 # Internal panel: first eDP/LVDS output (override with INTERNAL=...)
 INTERNAL="${INTERNAL:-$(xrandr | awk '/^(eDP|LVDS)/ {print $1; exit}')}"
+[[ -n "$INTERNAL" ]] || { notify -u critical "Display" "No internal panel found (set INTERNAL=...)"; exit 1; }
 
 mapfile -t EXTERNALS < <(xrandr | awk -v internal="$INTERNAL" '$2 == "connected" && $1 != internal {print $1}')
 
 if (( ${#EXTERNALS[@]} == 0 )); then
-    notify "No external display found."
+    notify "No external display" "Connect a display and try again."
     exit 1
 fi
-
-rofi_menu() {
-    rofi -dmenu -i -format i -theme "$THEME" -mesg "$1" -p "Display" \
-        -theme-str 'window { width: 30%; }' \
-        -theme-str 'listview { lines: 10; }'
-}
 
 # With several external displays, pick one first
 OUT="${EXTERNALS[0]}"
 if (( ${#EXTERNALS[@]} > 1 )); then
-    IDX=$(printf '%s\n' "${EXTERNALS[@]}" | rofi_menu "SELECT DISPLAY")
-    [[ -z "$IDX" ]] && exit 0
+    IDX=$(printf '%s\n' "${EXTERNALS[@]}" | "$ROFI_MENU" "display" "select output") || exit 0
     OUT="${EXTERNALS[$IDX]}"
 fi
 
 MODES=("PC screen only" "Duplicate" "Extend" "Second screen only")
-IDX=$(printf '%s\n' "${MODES[@]}" | rofi_menu "$OUT")
-[[ -z "$IDX" ]] && exit 0
-LABEL="${MODES[$IDX]}"
+ICONS=("󰌢" "󰆑" "󰡎" "󰍹")   # md-laptop, md-content_duplicate, md-arrow_expand_horizontal, md-monitor
+LABELS=()
+for i in "${!MODES[@]}"; do LABELS+=("${ICONS[$i]}  ${MODES[$i]}"); done
+
+IDX=$(printf '%s\n' "${LABELS[@]}" | "$ROFI_MENU" "display" "$INTERNAL  ·  $OUT") || exit 0
+MODE="${MODES[$IDX]}"
 
 # Keep all other external displays off
 others=()
@@ -43,18 +43,38 @@ for m in "${EXTERNALS[@]}"; do
     [[ "$m" != "$OUT" ]] && others+=(--output "$m" --off)
 done
 
-case "$LABEL" in
-    "PC screen only")      args=(--output "$INTERNAL" --auto --primary --output "$OUT" --off) ;;
-    "Duplicate")           args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --same-as "$INTERNAL") ;;
-    "Extend")              args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --right-of "$INTERNAL") ;;
-    "Second screen only")  args=(--output "$OUT" --auto --primary --output "$INTERNAL" --off) ;;
+internal_only=(--output "$INTERNAL" --auto --primary --output "$OUT" --off "${others[@]}")
+
+case "$MODE" in
+    "PC screen only")     args=("${internal_only[@]}") ;;
+    "Duplicate")          args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --same-as "$INTERNAL" "${others[@]}") ;;
+    "Extend")             args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --right-of "$INTERNAL" "${others[@]}") ;;
+    "Second screen only") args=(--output "$OUT" --auto --primary --output "$INTERNAL" --off "${others[@]}") ;;
     *) exit 1 ;;
 esac
-args+=("${others[@]}")
 
-if xrandr "${args[@]}"; then
-    notify "$OUT: $LABEL"
-else
-    notify-send -a "Display" -u critical "Display" "xrandr failed for $OUT ($LABEL)"
+# Re-place the bar and wallpaper on the new layout
+refresh_desktop() {
+    [[ -x "$HOME/.config/polybar/launch.sh" ]] && "$HOME/.config/polybar/launch.sh" >/dev/null 2>&1 &
+    [[ -f "$HOME/images/wallpaper" ]] && feh --no-fehbg --bg-fill "$HOME/images/wallpaper" >/dev/null 2>&1
+}
+
+if ! xrandr "${args[@]}"; then
+    notify -u critical "Display" "xrandr failed for $OUT ($MODE)"
     exit 1
 fi
+
+if [[ "$MODE" == "Second screen only" ]]; then
+    # "Revert" first: it is preselected, so a blind Enter is the safe choice
+    ANSWER=$(printf '%s\n' "󰕌  Revert" "󰄬  Keep this layout" |
+        timeout 15 "$ROFI_MENU" "display" "Reverting in 15 s unless confirmed") || ANSWER=0
+    if [[ "$ANSWER" != 1 ]]; then
+        xrandr "${internal_only[@]}"
+        refresh_desktop
+        notify "Layout reverted" "$INTERNAL is active again"
+        exit 0
+    fi
+fi
+
+refresh_desktop
+notify "$MODE" "$INTERNAL  ·  $OUT"

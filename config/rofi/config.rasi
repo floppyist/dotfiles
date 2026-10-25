@@ -1,80 +1,143 @@
+/* rofi  ·  launcher and system menus (fzf-style)
+ *
+ *  ┌──────────────────────────────────────────────┐
+ *  │ apps ❯ search                          12/48 │  inputbar, red underline
+ *  │ message (only with -mesg)                    │
+ *  │▌Firefox  · Web Browser                       │  selected: red bar + surface
+ *  │ Signal   · Messenger                         │
+ *  └──────────────────────────────────────────────┘
+ */
+
 configuration {
-    modi: "drun";
-    show-icons: false;
-    display-drun: ""; 
-    sidebar-mode: false;
+    modi:                "drun";
+    show-icons:          false;
+    display-drun:        "apps";
+    drun-display-format: "{name}[<span foreground='#7c6f64'>  ·  {generic}</span>]";
+    sidebar-mode:        false;
 }
 
 * {
-    bg:          #191c1c;
-    fg:          #ebdbb2;
-    text:        #cc241d;
-    gray:        #a89984;
+    bg:       #191c1c;
+    surface:  #252a2a;
+    overlay:  #313838;
+    fg:       #ebdbb2;
+    subtle:   #a89984;
+    muted:    #7c6f64;
+    red:      #cc241d;
+    red-hi:   #fb4934;
 
-    font: "JetBrainsMono Nerd Font 14";
+    font:             "JetBrainsMono Nerd Font 13";
     background-color: transparent;
-    text-color: @fg;
+    text-color:       @fg;
 }
 
 window {
-    background-color: @bg;
-    border-radius:    0px;
-    width:            700px; 
-    padding:          20px;
-    anchor:           center;
     location:         center;
+    anchor:           center;
+    width:            640px;
+    background-color: @bg;
+    border:           2px;
+    border-color:     @overlay;
+    border-radius:    0px;
+    padding:          0px;
 }
 
 mainbox {
-    children: [ message, inputbar, listview ];
+    children: [ inputbar, message, listview ];
+    spacing:  0px;
 }
 
-message {
-    margin:           0px 0px 10px 0px;
-    padding:          0px;
-    background-color: transparent;
-}
-
-textbox {
-    text-color:       @gray;
-    horizontal-align: 0.0;
-}
+/* ── input line ─────────────────────────────────────────────────────────── */
 
 inputbar {
-    margin:           0px 0px 15px 0px;
-    padding:          8px;
-    border:           3px solid;
-    border-color:     none;
-    border-radius:    10px;
-    children:         [ entry ];
+    background-color: @surface;
+    padding:          14px 16px;
+    spacing:          10px;
+    border:           0px 0px 2px 0px;
+    border-color:     @red;
+    children:         [ prompt, textbox-chevron, entry, counter ];
+}
+
+prompt {
+    text-color: @red-hi;
+}
+
+textbox-chevron {
+    expand:     false;
+    content:    "❯";
+    text-color: @muted;
 }
 
 entry {
-    text-color: @fg;
-    placeholder: "Search...";
+    placeholder:       "search";
+    placeholder-color: @muted;
+    text-color:        @fg;
+    cursor:            text;
 }
 
+/* "12/48" without the inputbar spacing in between */
+counter {
+    orientation: horizontal;
+    expand:      false;
+    spacing:     0px;
+    children:    [ num-filtered-rows, textbox-num-sep, num-rows ];
+}
+
+num-filtered-rows,
+num-rows {
+    expand:     false;
+    text-color: @subtle;
+}
+
+textbox-num-sep {
+    expand:     false;
+    content:    "/";
+    text-color: @muted;
+}
+
+/* ── message (rofi -mesg) ───────────────────────────────────────────────── */
+
+message {
+    padding:          10px 16px;
+    border:           0px 0px 1px 0px;
+    border-color:     @overlay;
+    background-color: @bg;
+}
+
+textbox {
+    text-color: @subtle;
+    markup:     true;
+}
+
+/* ── list ───────────────────────────────────────────────────────────────── */
+
 listview {
+    lines:        8;
+    columns:      1;
     fixed-height: false;
     dynamic:      true;
     scrollbar:    false;
-    lines:        6;
-    spacing:      5px;
+    spacing:      0px;
+    padding:      6px 0px;
 }
 
 element {
-    padding:      8px;
-    border-radius: 5px;
+    padding:          8px 16px 8px 13px;
+    border:           0px 0px 0px 3px;
+    border-color:     transparent;
+    background-color: transparent;
+    text-color:       @subtle;
 }
 
 element selected {
-    background-color: transparent;
-}
-
-element-text selected {
-    text-color: @text;
+    background-color: @surface;
+    border-color:     @red;
+    text-color:       @fg;
 }
 
 element-text {
-    text-color: inherit;
+    background-color: transparent;
+    text-color:       inherit;
+    highlight:        bold #fb4934;
+    vertical-align:   0.5;
 }

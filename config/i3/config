@@ -1,9 +1,15 @@
-# Colors
-set $bg      #282828
-set $red     #cc241d
-set $blue    #458588
-set $purple  #b16286
-set $gray    #a89984
+# i3 config
+#
+# Mod1 (Alt)   window management
+# Mod4 (Super) system actions (lock, display, bluetooth, power)
+
+# ── Palette (shared with polybar, rofi, dunst, alacritty) ──────────────────────
+set $bg       #191c1c
+set $surface  #252a2a
+set $overlay  #313838
+set $fg       #ebdbb2
+set $subtle   #a89984
+set $red      #cc241d
 
 set $mod Mod1
 set $term alacritty
@@ -13,50 +19,63 @@ font pango:JetBrainsMono Nerd Font 10
 
 focus_follows_mouse off
 
-# Autostart
+# Tiled windows have no border; floating windows get a thin frame (red when focused)
+default_border pixel 0
+default_floating_border pixel 2
+
+#                       border   background text    indicator child_border
+client.focused          $red     $bg        $fg     $red      $red
+client.focused_inactive $overlay $bg        $subtle $overlay  $overlay
+client.unfocused        $overlay $bg        $subtle $overlay  $overlay
+client.urgent           $red     $red       $bg     $red      $red
+client.placeholder      $bg      $bg        $fg     $bg       $bg
+client.background       $bg
+
+# ── Autostart ──────────────────────────────────────────────────────────────────
+# Session setup (xrdb, keyboard, cursor) lives in ~/.xinitrc
 exec --no-startup-id /usr/libexec/polkit-gnome-authentication-agent-1
 exec --no-startup-id dunst
 exec --no-startup-id pipewire
 exec --no-startup-id pipewire-pulse
 exec --no-startup-id wireplumber
 exec --no-startup-id xbanish
+exec --no-startup-id caffeine-ng
+# exec_always: i3 restart (Alt+Shift+r) brings back a crashed compositor; a second instance exits
 exec_always --no-startup-id picom -b
-exec_always --no-startup-id feh --bg-fill ~/images/wallpaper
+exec_always --no-startup-id feh --no-fehbg --bg-fill ~/images/wallpaper
 exec_always --no-startup-id ~/.config/polybar/launch.sh
 
-# Screensaver
+# ── Screensaver and lock ───────────────────────────────────────────────────────
+# Idle 60 s:   screensaver (xss-lock notifier, any input ends it)
+# Idle 300 s:  lock screen (60 s timeout + 240 s cycle), display off via DPMS
+# Suspend / `loginctl lock-session`: lock immediately. --transfer-sleep-lock keeps
+# the system awake until the screen is locked, so nothing is visible on resume.
+exec --no-startup-id sh -c 'xset s noblank; xset s 60 240; xset dpms 0 0 300'
+exec --no-startup-id xss-lock --transfer-sleep-lock --notifier "$HOME/.local/bin/nerdsaver-launch cycle 60" -- "$HOME/.local/bin/lock.sh"
+
 mode "nerdsaver" {
     bindsym Mod4+Shift+F12 mode "default"
 }
 for_window [class="^nerdsaver$"] floating enable, border none
 
+# bindsym $mod+Shift+s exec --no-startup-id ~/.local/bin/nerdsaver-launch --now cycle 60
+
 # Terminal tools started from rofi: centered floating window
 for_window [class="^tool-float$"] floating enable, resize set 1000 650, move position center
 
-exec --no-startup-id caffeine-ng
-exec --no-startup-id xset s noblank
-exec --no-startup-id xset s 60
-exec --no-startup-id xset dpms 0 0 300
-exec --no-startup-id xss-lock -- ~/.local/bin/nerdsaver-launch cycle 60
-
-# bindsym $mod+Shift+s exec --no-startup-id ~/.local/bin/nerdsaver-launch --now cycle 60
-
-default_border pixel 0
-default_floating_border pixel 0
-
-# Workspaces
+# ── Workspaces ─────────────────────────────────────────────────────────────────
 set $ws1 "1"
 set $ws2 "2"
 set $ws3 "3"
 set $ws4 "4"
 set $ws5 "5"
 
-# Keybinds
+# ── Keybinds: windows (Alt) ────────────────────────────────────────────────────
 bindsym $mod+Return exec $term
 bindsym $mod+d exec $menu
 bindsym $mod+Shift+q kill
 bindsym $mod+Shift+r restart
-bindsym $mod+Shift+e exec i3-msg exit
+bindsym $mod+Shift+e exec --no-startup-id ~/.local/bin/power-menu.sh
 bindsym $mod+h focus left
 bindsym $mod+j focus down
 bindsym $mod+k focus up
@@ -65,13 +84,6 @@ bindsym $mod+Shift+h move left
 bindsym $mod+Shift+j move down
 bindsym $mod+Shift+k move up
 bindsym $mod+Shift+l move right
-bindsym XF86AudioMicMute exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
-bindsym XF86AudioMute exec --no-startup-id wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
-bindsym XF86AudioRaiseVolume exec --no-startup-id wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
-bindsym XF86AudioLowerVolume exec --no-startup-id wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
-bindsym XF86MonBrightnessUp exec --no-startup-id ~/.local/bin/polybar-backlight.sh up
-bindsym XF86MonBrightnessDown exec --no-startup-id ~/.local/bin/polybar-backlight.sh down
-bindsym Print exec --no-startup-id ~/.local/bin/screenshot.sh
 bindsym $mod+Shift+space floating toggle
 bindsym $mod+space focus mode_toggle
 bindsym $mod+f fullscreen
@@ -82,23 +94,32 @@ bindsym $mod+2 workspace number $ws2
 bindsym $mod+3 workspace number $ws3
 bindsym $mod+4 workspace number $ws4
 bindsym $mod+5 workspace number $ws5
-bindsym $mod+Shift+1 move container to workspace number 1
-bindsym $mod+Shift+2 move container to workspace number 2
-bindsym $mod+Shift+3 move container to workspace number 3
-bindsym $mod+Shift+4 move container to workspace number 4
-bindsym $mod+Shift+5 move container to workspace number 5
+bindsym $mod+Shift+1 move container to workspace number $ws1
+bindsym $mod+Shift+2 move container to workspace number $ws2
+bindsym $mod+Shift+3 move container to workspace number $ws3
+bindsym $mod+Shift+4 move container to workspace number $ws4
+bindsym $mod+Shift+5 move container to workspace number $ws5
 
-# Lock
+# ── Keybinds: system (Super, media keys) ───────────────────────────────────────
 bindsym Mod4+l exec --no-startup-id ~/.local/bin/lock.sh
-
-# Display menu (Windows-style WIN+P), also on the display key
 bindsym Mod4+p exec --no-startup-id ~/.local/bin/display-select.sh
-bindsym XF86Display exec --no-startup-id ~/.local/bin/display-select.sh
-
-# Bluetooth toggle
+# The function key that sends XF86Display is used as the Bluetooth key on this machine
+bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
 bindsym Mod4+b exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
 
-# Resize
+# Volume and brightness show an on-screen bar (dunst)
+bindsym XF86AudioRaiseVolume exec --no-startup-id ~/.local/bin/volume.sh up
+bindsym XF86AudioLowerVolume exec --no-startup-id ~/.local/bin/volume.sh down
+bindsym XF86AudioMute exec --no-startup-id ~/.local/bin/volume.sh mute
+bindsym XF86AudioMicMute exec --no-startup-id ~/.local/bin/volume.sh mic
+bindsym XF86MonBrightnessUp exec --no-startup-id ~/.local/bin/polybar-backlight.sh up
+bindsym XF86MonBrightnessDown exec --no-startup-id ~/.local/bin/polybar-backlight.sh down
+
+# Screenshots: full screen / selected region (both also copied to the clipboard)
+bindsym Print exec --no-startup-id ~/.local/bin/screenshot.sh
+bindsym Shift+Print exec --no-startup-id ~/.local/bin/screenshot.sh --select
+
+# ── Resize mode ────────────────────────────────────────────────────────────────
 bindsym $mod+r mode "resize"
 
 mode "resize" {

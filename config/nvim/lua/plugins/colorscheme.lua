@@ -1,59 +1,38 @@
+-- Gruvbox, matching the desktop palette (i3, polybar, rofi, dunst, alacritty).
+-- The background is transparent: it comes from alacritty (#191c1c, 90 % opacity).
+-- To go back to catppuccin: set colorscheme = "catppuccin-frappe" below (LazyVim ships it).
 return {
   {
-    "catppuccin/nvim",
-    lazy = true,
-    name = "catppuccin",
+    "ellisonleao/gruvbox.nvim",
+    lazy = false,
+    priority = 1000,
     opts = {
-      transparent_background = true,
-      integrations = {
-        aerial = true,
-        alpha = true,
-        cmp = true,
-        dashboard = true,
-        flash = true,
-        gitsigns = true,
-        headlines = true,
-        illuminate = true,
-        indent_blankline = { enabled = true },
-        leap = true,
-        lsp_trouble = true,
-        mason = true,
-        markdown = true,
-        mini = true,
-        native_lsp = {
-          enabled = true,
-          underlines = {
-            errors = { "undercurl" },
-            hints = { "undercurl" },
-            warnings = { "undercurl" },
-            information = { "undercurl" },
-          },
-        },
-        navic = { enabled = true, custom_bg = "lualine" },
-        neotest = true,
-        neotree = true,
-        noice = true,
-        semantic_tokens = true,
-        telescope = true,
-        treesitter = true,
-        treesitter_context = true,
-        which_key = true,
+      contrast = "hard",
+      transparent_mode = true,
+      italic = {
+        strings = false,
+        emphasis = true,
+        comments = true,
+        operators = false,
+        folds = true,
       },
-      custom_highlights = function(colors)
-        return {
-          NormalFloat = { bg = "none" },
-          FloatBorder = { bg = "none" },
-          WhichKeyFloat = { bg = "none" },
-          TelescopeNormal = { bg = "none" },
-          TelescopeBorder = { bg = "none" },
-        }
-      end,
+      overrides = {
+        CursorLine = { bg = "#252a2a" },
+        CursorLineNr = { fg = "#fb4934", bold = true },
+        Visual = { bg = "#313838" },
+        NormalFloat = { bg = "NONE" },
+        FloatBorder = { fg = "#313838", bg = "NONE" },
+        WinSeparator = { fg = "#313838", bg = "NONE" },
+        TelescopeBorder = { fg = "#313838", bg = "NONE" },
+        TelescopeSelection = { bg = "#252a2a" },
+        TelescopePromptPrefix = { fg = "#fb4934" },
+      },
     },
   },
   {
     "LazyVim/LazyVim",
     opts = {
-      colorscheme = "catppuccin-frappe",
+      colorscheme = "gruvbox",
     },
   },
 }

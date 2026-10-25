@@ -1,33 +1,61 @@
+# dunst  ·  notifications
+#
+# Layout:   <glyph>  <app>        (small header, app colored)
+#           <b>Summary</b>
+#           Body
+# Frame color = urgency (low gray, normal blue, critical red).
+# Our scripts set the app name with `notify-send -a <app>`; the rules below match it.
+# markup stays at the default ("no"): notification text is shown as plain text,
+# so SSIDs, track titles or mail subjects cannot inject pango markup.
+
 [global]
     monitor = 0
     follow = keyboard
     origin = top-right
+    # 12 px from the right edge and 12 px below the 40 px polybar
     offset = (12, 52)
-    width = (300, 340)
-    height = (0, 120)
+    width = (300, 360)
+    height = (0, 160)
     notification_limit = 5
-    gap_size = 8
+    gap_size = 6
     corner_radius = 0
     frame_width = 2
     frame_color = "#458588"
     separator_height = 0
     padding = 12
     horizontal_padding = 14
+    text_icon_padding = 12
+    line_height = 2
     font = JetBrainsMono Nerd Font 10
     foreground = "#ebdbb2"
     background = "#191c1c"
     alignment = left
+    vertical_alignment = top
+    ellipsize = end
     icon_position = left
     max_icon_size = 40
-    hide_duplicate_count = yes
+    hide_duplicate_count = no
     show_age_threshold = 60
     sort = yes
-    format = "<b>%s</b>\n%b"
+    # do not time out notifications while you are away (seconds of X idle time)
+    idle_threshold = 120
+    mouse_left_click = do_action, close_current
+    mouse_middle_click = close_all
+    mouse_right_click = close_current
+    # progress bar (volume / brightness OSD)
+    progress_bar = true
+    progress_bar_height = 8
+    progress_bar_frame_width = 1
+    progress_bar_corner_radius = 0
+    progress_bar_min_width = 272
+    progress_bar_max_width = 332
+    highlight = "#cc241d"
+    format = "<span size='small' foreground='#7c6f64'>󰂜  %a</span>\n<b>%s</b>\n%b"
 
 [urgency_low]
     background = "#191c1c"
     foreground = "#a89984"
-    frame_color = "#a89984"
+    frame_color = "#313838"
     timeout = 5
 
 [urgency_normal]
@@ -40,16 +68,47 @@
     background = "#191c1c"
     foreground = "#ebdbb2"
     frame_color = "#cc241d"
-    highlight = "#cc241d"
     timeout = 0
 
-[signal_desktop]
-    appname = Signal
-    summary = "*"
-    frame_color = "#689d6a"
+# ── our scripts: colored glyph per app ──────────────────────────────────────────
+
+[app_bluetooth]
+    appname = bluetooth
+    format = "<span size='small' foreground='#83a598'>󰂯  bluetooth</span>\n<b>%s</b>\n%b"
+
+[app_wifi]
+    appname = wifi
+    format = "<span size='small' foreground='#8ec07c'>󰖩  wifi</span>\n<b>%s</b>\n%b"
+
+[app_display]
+    appname = display
+    format = "<span size='small' foreground='#d3869b'>󰍹  display</span>\n<b>%s</b>\n%b"
+
+[app_screenshot]
+    appname = screenshot
+    format = "<span size='small' foreground='#fabd2f'>󰄀  screenshot</span>\n<b>%s</b>\n%b"
+
+[app_mail]
+    appname = mail
+    format = "<span size='small' foreground='#fe8019'>󰇮  mail</span>\n<b>%s</b>\n%b"
     timeout = 10
 
-[mail]
-    appname = Mutt
-    frame_color = "#d79921"
+[app_system]
+    appname = system
+    format = "<span size='small' foreground='#fb4934'>󰒓  system</span>\n<b>%s</b>\n%b"
+
+# Volume / brightness / mic: compact, replaces itself, not kept in the history
+[app_osd]
+    appname = osd
+    format = "<b>%s</b>"
+    frame_color = "#313838"
+    foreground = "#ebdbb2"
+    timeout = 1500ms
+    history_ignore = yes
+
+# ── third-party apps ────────────────────────────────────────────────────────────
+
+[app_signal]
+    appname = Signal
+    format = "<span size='small' foreground='#8ec07c'>󰭹  signal</span>\n<b>%s</b>\n%b"
     timeout = 10

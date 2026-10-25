@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Shared rofi menu for the system scripts (one theme, one behaviour).
+#
+# Usage: rofi-menu PROMPT [MESSAGE] < lines
+# Prints the 0-based index of the selected line.
+# Exit status 1 on cancel, on empty input or if rofi returns no valid index.
+#
+# -no-custom: typed text that matches nothing is never returned as a selection
+# (with -format i, rofi would otherwise print an index outside the list).
+# Rows are not parsed as markup, so untrusted text (SSIDs, device names) is shown as-is.
+set -u
+
+THEME="${ROFI_THEME:-$HOME/.config/rofi/config.rasi}"
+prompt=${1:-menu}
+mesg=${2:-}
+
+mapfile -t LINES
+(( ${#LINES[@]} > 0 )) || exit 1
+
+args=(-dmenu -i -no-custom -format i -p "$prompt" -theme "$THEME")
+[[ -n "$mesg" ]] && args+=(-mesg "$mesg")
+
+idx=$(printf '%s\n' "${LINES[@]}" | rofi "${args[@]}") || exit 1
+[[ "$idx" =~ ^[0-9]+$ ]] && (( idx < ${#LINES[@]} )) || exit 1
+printf '%s\n' "$idx"
