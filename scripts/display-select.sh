@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Choose how to use an external display (rofi menu)
+# Windows-style display menu (WIN+P): choose how to use external displays
 set -u
 
 THEME="$HOME/.config/rofi/config.rasi"
@@ -18,42 +18,43 @@ if (( ${#EXTERNALS[@]} == 0 )); then
     exit 1
 fi
 
-MENU=()
-for m in "${EXTERNALS[@]}"; do
-    MENU+=("$m: extend right" "$m: extend left" "$m: mirror" "$m: only external")
-done
-MENU+=("OFF")
+rofi_menu() {
+    rofi -dmenu -i -format i -theme "$THEME" -mesg "$1" -p "Display" \
+        -theme-str 'window { width: 30%; }' \
+        -theme-str 'listview { lines: 10; }'
+}
 
-CHOICE=$(printf '%s\n' "${MENU[@]}" | rofi -dmenu -i -p "Display" \
-    -theme "$THEME" \
-    -mesg "DISPLAY" \
-    -theme-str 'window { width: 30%; }' \
-    -theme-str 'listview { lines: 10; }')
-[[ -z "$CHOICE" ]] && exit 0
-
-if [[ "$CHOICE" == "OFF" ]]; then
-    args=(--output "$INTERNAL" --auto --primary)
-    for m in "${EXTERNALS[@]}"; do
-        args+=(--output "$m" --off)
-    done
-    xrandr "${args[@]}" && notify "External displays deactivated."
-    exit 0
+# With several external displays, pick one first
+OUT="${EXTERNALS[0]}"
+if (( ${#EXTERNALS[@]} > 1 )); then
+    IDX=$(printf '%s\n' "${EXTERNALS[@]}" | rofi_menu "SELECT DISPLAY")
+    [[ -z "$IDX" ]] && exit 0
+    OUT="${EXTERNALS[$IDX]}"
 fi
 
-OUT="${CHOICE%%: *}"
-MODE="${CHOICE#*: }"
+MODES=("PC screen only" "Duplicate" "Extend" "Second screen only")
+IDX=$(printf '%s\n' "${MODES[@]}" | rofi_menu "$OUT")
+[[ -z "$IDX" ]] && exit 0
+LABEL="${MODES[$IDX]}"
 
-case "$MODE" in
-    "extend right")  args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --right-of "$INTERNAL") ;;
-    "extend left")   args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --left-of "$INTERNAL") ;;
-    "mirror")        args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --same-as "$INTERNAL") ;;
-    "only external") args=(--output "$OUT" --auto --primary --output "$INTERNAL" --off) ;;
+# Keep all other external displays off
+others=()
+for m in "${EXTERNALS[@]}"; do
+    [[ "$m" != "$OUT" ]] && others+=(--output "$m" --off)
+done
+
+case "$LABEL" in
+    "PC screen only")      args=(--output "$INTERNAL" --auto --primary --output "$OUT" --off) ;;
+    "Duplicate")           args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --same-as "$INTERNAL") ;;
+    "Extend")              args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --right-of "$INTERNAL") ;;
+    "Second screen only")  args=(--output "$OUT" --auto --primary --output "$INTERNAL" --off) ;;
     *) exit 1 ;;
 esac
+args+=("${others[@]}")
 
 if xrandr "${args[@]}"; then
-    notify "$OUT: $MODE"
+    notify "$OUT: $LABEL"
 else
-    notify-send -u critical "Display" "xrandr failed for $OUT ($MODE)"
+    notify-send -u critical "Display" "xrandr failed for $OUT ($LABEL)"
     exit 1
 fi

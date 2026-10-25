@@ -3,6 +3,6 @@ Type=Application
 Name=Audio
 GenericName=Audio Mixer
 Comment=Terminal audio mixer (pulsemixer)
-Exec=alacritty -e pulsemixer
+Exec=alacritty --class tool-float -e pulsemixer
 Terminal=false
 Categories=AudioVideo;Audio;Mixer;

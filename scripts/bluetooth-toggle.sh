@@ -31,5 +31,5 @@ for _ in {1..10}; do
     sleep 0.3
 done
 
-notify-send -u critical "Bluetooth" "Failed to power on"
+notify-send -u critical "Bluetooth" "Failed to power on (try: sudo modprobe -r btusb && sudo modprobe btusb)"
 exit 1
