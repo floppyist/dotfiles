@@ -3,6 +3,6 @@ Type=Application
 Name=Calculus
 GenericName=Calculator
 Comment=Scientific calculator
-Exec=alacritty --class tool-float -e calculus
+Exec=terminal.sh --float calculus
 Terminal=false
 Categories=Utility;Calculator;

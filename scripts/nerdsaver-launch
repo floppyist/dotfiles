@@ -15,7 +15,11 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
-RUN = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+# Private runtime dir. Never fall back to /tmp: the log file there would be a predictable
+# path that another local user could pre-create as a symlink.
+RUN = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"), "nerdsaver")
+os.makedirs(RUN, mode=0o700, exist_ok=True)
 LOCKFILE = os.path.join(RUN, "nerdsaver.lock")
 LOGFILE = os.path.join(RUN, "nerdsaver.log")
 CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "nerdsaver", "config")
@@ -328,7 +332,7 @@ def lock_command(cfg):
     cmd = cfg["lock_cmd"]
     if not cmd:
         script = os.path.join(HOME, ".local", "bin", "lock.sh")
-        cmd = script if os.access(script, os.X_OK) else "i3lock -n -c 282828"
+        cmd = script if os.access(script, os.X_OK) else "i3lock -n -c 191c1c"
     return [os.path.expanduser(a) for a in shlex.split(cmd)]
 
 
@@ -360,10 +364,15 @@ def find_terminal(cfg):
 
 def term_cmd(term, opacity, argv):
     base = os.path.basename(term)
+    # No padding: the savers fill the whole screen, the terminal's own padding (alacritty.toml)
+    # would draw a frame around them
     if base == "alacritty":
-        return [term, "--class", "nerdsaver,nerdsaver", "-o", "window.opacity=%s" % opacity, "-e"] + argv
+        return [term, "--class", "nerdsaver,nerdsaver", "-o", "window.opacity=%s" % opacity,
+                "-o", "window.padding.x=0", "-o", "window.padding.y=0",
+                "-o", "window.dynamic_padding=false", "-e"] + argv
     if base == "kitty":
         return [term, "--class", "nerdsaver", "-o", "background_opacity=%s" % opacity,
+                "-o", "window_padding_width=0",
                 "-o", "hide_window_decorations=yes", "-o", "confirm_os_window_close=0"] + argv
     if base == "xterm":
         return [term, "-class", "nerdsaver", "-name", "nerdsaver", "-bg", "black", "-fg", "green",

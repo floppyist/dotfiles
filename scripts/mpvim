@@ -13,6 +13,7 @@ Benutzung:
 Hilfe im Programm: F1 oder :help
 """
 import curses
+import io
 import json
 import locale
 import os
@@ -73,6 +74,7 @@ HELP = [
     (":loop off|playlist|file", "Wiederholungsmodus"),
     (":speed 1.25", "Geschwindigkeit"),
     (":add PFAD...", "Dateien / Ordner anhaengen"),
+    (":cover", "Albumcover ein / aus (chafa, sonst Pillow)"),
     (":noh  :clear  :help  :q", "Suchmarkierung aus / Log leeren / Hilfe / Ende"),
 ]
 
@@ -192,28 +194,195 @@ def draw_box(s, y, x, h, w, segs, battr):
     put(s, y + h - 1, x, "\u2514" + "\u2500" * (w - 2) + "\u2518", battr)
 
 
+def theme_accent():
+    """ANSI number of the accent from dotfiles.conf (bright variant, 9..14); 9 = red."""
+    path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "dotfiles", "theme.sh")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"DF_ACCENT_ANSI_BRIGHT=([0-9]+)$", line.strip())
+                if m and 9 <= int(m.group(1)) <= 14:
+                    return int(m.group(1))
+    except OSError:
+        pass
+    return 9
+
+
 def make_attrs():
+    # The terminal's 16 palette colors: alacritty.toml maps them to the desktop palette, so
+    # mpvim matches the rest of the desktop (and still works in 8-color terminals).
     curses.start_color()
     curses.use_default_colors()
-    cols = {"border": 244, "title": 245, "orange": 215, "text": 252, "dim": 240,
-            "red": 167, "teal": 79, "blue": 110, "bright": 255, "active": 252}
+    many = curses.COLORS >= 16
+
+    def c(n):
+        return n if many or n < 8 else n - 8
+
+    surface, muted, subtle, text = 0, (8 if many else 7), 7, c(15)
+    red, green, yellow, blue, aqua = c(9), c(10), c(11), c(12), c(14)
+    accent = c(theme_accent())
+    fgs = {"border": muted, "title": subtle, "accent": accent, "text": text, "dim": muted,
+           "label": subtle, "red": red, "teal": aqua, "blue": blue, "green": green,
+           "yellow": yellow, "bright": text, "active": subtle}
     A = {}
     n = 0
-    for name, fg in cols.items():
+    for name, fg in fgs.items():
         n += 1
         curses.init_pair(n, fg, -1)
         A[name] = curses.color_pair(n)
-    for name, fg, bg in (("sel", 255, 237), ("selplay", 215, 237), ("hit", 234, 215)):
+    # selection rows use the surface color like rofi; the accent bar marks the cursor row
+    for name, fg, bg in (("sel", text, surface), ("selplay", accent, surface),
+                         ("selbar", accent, surface), ("hit", surface, yellow)):
         n += 1
         curses.init_pair(n, fg, bg)
         A[name] = curses.color_pair(n)
     A["bold"] = A["bright"] | curses.A_BOLD
-    A["play"] = A["orange"] | curses.A_BOLD
+    A["head"] = A["accent"] | curses.A_BOLD
+    A["play"] = A["accent"] | curses.A_BOLD
     A["selplay"] |= curses.A_BOLD
     A["sel"] |= curses.A_BOLD
-    A["cursor"] = A["teal"] | curses.A_REVERSE
+    A["cursor"] = A["accent"] | curses.A_REVERSE
     A["dimcursor"] = A["dim"] | curses.A_REVERSE
     return A
+
+
+# ---------------------------------------------------------------- Cover
+# The cover is drawn with raw escape sequences into an area that curses keeps blank:
+# curses never rewrites cells it believes unchanged (idcok is off, so it does not shift
+# line contents either). When the area moves or the cover goes away, a full repaint
+# (clearok) wipes the old pixels.
+COVER_NAMES = ("cover", "folder", "front", "album", "albumart", "albumartsmall")
+COVER_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+SGR = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
+
+
+def truecolor():
+    if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit"):
+        return True
+    return re.search(r"alacritty|kitty|wezterm|foot|ghostty|direct", os.environ.get("TERM", "")) is not None
+
+
+def cover_data(path):
+    """Embedded picture (ffmpeg) or an image next to the track; None if there is none."""
+    if not path or is_url(path) or not os.path.isfile(path):
+        return None
+    if shutil.which("ffmpeg"):
+        try:
+            r = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-map", "0:v:0?",
+                                "-frames:v", "1", "-c:v", "png", "-f", "image2pipe", "-"],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=8)
+            if r.returncode == 0 and r.stdout:
+                return r.stdout
+        except (OSError, subprocess.SubprocessError):
+            pass
+    d = os.path.dirname(os.path.abspath(path))
+    try:
+        imgs = [f for f in os.listdir(d) if os.path.splitext(f)[1].lower() in COVER_EXT]
+    except OSError:
+        return None
+    named = sorted(f for f in imgs if os.path.splitext(f)[0].lower() in COVER_NAMES)
+    # any other single image in the album folder is most likely the cover too
+    pick = named[0] if named else (imgs[0] if len(imgs) == 1 else None)
+    if not pick:
+        return None
+    try:
+        with open(os.path.join(d, pick), "rb") as f:
+            return f.read(32 * 1024 * 1024)
+    except OSError:
+        return None
+
+
+def xterm256(rgb):
+    r, g, b = (round(c / 255 * 5) for c in rgb)
+    return 16 + 36 * r + 6 * g + b
+
+
+def render_cover(data, cols, rows, tc):
+    """[(ansi line, width in cells)] for an image: chafa if installed, else half blocks."""
+    if shutil.which("chafa"):
+        try:
+            r = subprocess.run(["chafa", "--format", "symbols", "--size", f"{cols}x{rows}",
+                                "--colors", "full" if tc else "256", "--polite", "on",
+                                "--animate", "off", "-"],
+                               input=data, capture_output=True, timeout=8)
+            if r.returncode == 0 and r.stdout:
+                lines = r.stdout.decode("utf-8", "replace").replace("\r", "").rstrip("\n").split("\n")
+                return [(ln, sw(SGR.sub("", ln))) for ln in lines[:rows]]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+    except Exception:
+        return None
+    scale = min(cols / im.width, rows * 2 / im.height)
+    im = im.resize((max(1, round(im.width * scale)), max(1, round(im.height * scale))), Image.LANCZOS)
+    w, h = im.size
+    px = im.load()
+
+    def color(rgb, base):
+        if tc:
+            return f"{base + 8};2;{rgb[0]};{rgb[1]};{rgb[2]}"
+        return f"{base + 8};5;{xterm256(rgb)}"
+
+    out = []
+    for y in range(0, h, 2):
+        parts, last = [], None
+        for x in range(w):
+            # upper half block: foreground = upper pixel, background = lower pixel
+            bot = color(px[x, y + 1], 40) if y + 1 < h else "49"
+            sgr = f"\x1b[{color(px[x, y], 30)};{bot}m"
+            if sgr != last:
+                parts.append(sgr)
+                last = sgr
+            parts.append("\u2580")
+        out.append(("".join(parts) + "\x1b[0m", w))
+    return out
+
+
+class Covers:
+    """Loads and renders covers in a background thread; draw() only looks results up."""
+
+    def __init__(self):
+        self.results = {}       # (path, cols, rows) -> rendered rows or None
+        self.data = {}          # path -> image bytes or None
+        self.pending = None
+        self.busy = False
+        self.lock = threading.Lock()
+        self.tc = truecolor()
+
+    def get(self, key):
+        """Rendered rows, None (no cover) or False (not ready yet)."""
+        with self.lock:
+            if key in self.results:
+                return self.results[key]
+            self.pending = key
+            if not self.busy:
+                self.busy = True
+                threading.Thread(target=self._work, daemon=True).start()
+        return False
+
+    def _work(self):
+        while True:
+            with self.lock:
+                key, self.pending = self.pending, None
+                if key is None or key in self.results:
+                    if key is None:
+                        self.busy = False
+                        return
+                    continue
+            path, cols, rows = key
+            if path not in self.data:
+                self.data[path] = cover_data(path)
+                while len(self.data) > 20:
+                    self.data.pop(next(iter(self.data)))
+            data = self.data[path]
+            res = render_cover(data, cols, rows, self.tc) if data else None
+            with self.lock:
+                self.results[key] = res
+                while len(self.results) > 40:
+                    self.results.pop(next(iter(self.results)))
 
 
 # ---------------------------------------------------------------- mpv IPC
@@ -310,6 +479,12 @@ class App:
         self.names = {}
         self.last_play = -2
         self.page_h = 10
+        self.covers = Covers()
+        self.cover_on = os.environ.get("MPVIM_COVER", "1") != "0"
+        self.cover_shown = None     # rows currently on screen (kept while the next one loads)
+        self.cover_painted = None   # (rect, rows) last painted
+        self.cover_time = 0.0
+        self.cover_rect = None
         self.say("Type :help or press F1 for key bindings.")
         self.say("Enter plays, Space pauses, h/l seeks, / searches, i filters, q quits.")
 
@@ -507,6 +682,9 @@ class App:
             self.hl = False
         elif cmd == "clear":
             self.log.clear()
+        elif cmd == "cover":
+            self.cover_on = not self.cover_on
+            self.say("cover " + ("on" if self.cover_on else "off"))
         elif cmd in ("help", "h"):
             self.help = True
         else:
@@ -742,24 +920,72 @@ class App:
         lw = int(W * 0.72)
         rw = W - lw
         mh = H - 3
-        h1 = h2 = mh // 3
-        h3 = mh - h1 - h2
+        # Right column: [cover] now playing, properties, log. The cover is square (a cell
+        # is about twice as high as wide) and only shown if the boxes below keep their room.
+        cover = self.cover_rows(rw, mh)
+        ch = 0
+        if cover:
+            cols = rw - 4
+            ch = min(cols // 2, mh - 24) + 2
+        rest = mh - ch
+        if ch:
+            h1 = min(11, rest // 2)
+            h2 = (rest - h1) // 2
+        else:
+            h1 = h2 = rest // 3
+        h3 = rest - h1 - h2
         if self.help:
             self.draw_help(0, 0, mh, lw)
         else:
             self.draw_playlist(0, 0, mh, lw)
-        self.draw_now(0, lw, h1, rw)
-        self.draw_props(h1, lw, h2, rw)
-        self.draw_log(h1 + h2, lw, h3, rw)
+        target = None
+        if ch:
+            draw_box(s, 0, lw, ch, rw, [("\U000F0025 cover", A["title"])], A["border"])
+            self.cover_rect = (1, lw + 2, ch - 2, rw - 4)
+            target = (self.cover_rect, cover)
+        self.draw_now(ch, lw, h1, rw)
+        self.draw_props(ch + h1, lw, h2, rw)
+        self.draw_log(ch + h1 + h2, lw, h3, rw)
         self.draw_input(mh, 0, 3, W)
+        if target != self.cover_painted and self.cover_painted is not None:
+            s.clearok(True)  # wipe the old cover pixels (curses believes those cells are blank)
         s.refresh()
+        if target and (target != self.cover_painted or time.time() - self.cover_time > 5):
+            self.paint_cover(*target)
+        self.cover_painted = target
+
+    def cover_rows(self, rw, mh):
+        """Rendered cover for the playing track if it fits; keeps the previous one while loading."""
+        path = self.mpv.props.get("path")
+        cols = rw - 4
+        rows = min(cols // 2, mh - 24)
+        if not self.cover_on or not path or rows < 6:
+            self.cover_shown = None
+            return None
+        res = self.covers.get((path, cols, rows))
+        if res is not False:
+            self.cover_shown = res
+        return self.cover_shown
+
+    def paint_cover(self, rect, rows):
+        y0, x0, h, w = rect
+        top = y0 + max(0, (h - len(rows)) // 2)
+        out = []
+        for i, (line, width) in enumerate(rows[:h]):
+            left = x0 + max(0, (w - width) // 2)
+            out.append(f"\x1b[{top + i + 1};{left + 1}H{line}\x1b[0m")
+        cy, cx = self.scr.getyx()
+        out.append(f"\x1b[{cy + 1};{cx + 1}H")  # back to where curses thinks the cursor is
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+        self.cover_time = time.time()
 
     def draw_playlist(self, y, x, h, w):
         s, A = self.scr, self.A
         pl, v = self.pl(), self.vis()
         n = len(v)
         self.cur = max(0, min(self.cur, n - 1))
-        title = [("Playlist", A["title"])]
+        title = [("\U000F0CB8 playlist", A["head"])]
         if self.mode == "INSERT" and self.buf.strip():
             title.append((f"  filter {n}/{len(pl)}", A["dim"]))
         draw_box(s, y, x, h, w, title, A["border"])
@@ -786,9 +1012,12 @@ class App:
             yy = y + 1 + r
             if sel:
                 put(s, yy, x + 1, " " * (w - 2), attr)
-            mark = ("\u2016" if paused else "\u25b6") if isp else " "
-            prefix = f" {mark} {i + 1:>{numw}}  "
+            # md-pause / md-play glyphs; the red bar marks the cursor row (like rofi)
+            mark = ("\U000F03E4" if paused else "\U000F040A") if isp else " "
+            prefix = f"  {mark} {i + 1:>{numw}}  "
             put(s, yy, x + 1, prefix, attr if (isp or sel) else A["dim"])
+            if sel:
+                put(s, yy, x + 1, "\u258c", A["selbar"])
             nm = self.name(i)
             avail = w - 2 - sw(prefix) - 1
             px = x + 1 + sw(prefix)
@@ -803,13 +1032,13 @@ class App:
 
     def draw_help(self, y, x, h, w):
         s, A = self.scr, self.A
-        draw_box(s, y, x, h, w, [("Help", A["title"]), ("  j/k scroll, q/Esc close", A["dim"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F030C help", A["head"]), ("  j/k scroll, q/Esc close", A["dim"])], A["border"])
         ih = h - 2
         self.help_top = max(0, min(self.help_top, max(0, len(HELP) - ih)))
         for r, item in enumerate(HELP[self.help_top:self.help_top + ih]):
             yy = y + 1 + r
             if isinstance(item, str):
-                put(s, yy, x + 2, item, A["orange"] | curses.A_BOLD)
+                put(s, yy, x + 2, item, A["head"])
             else:
                 put(s, yy, x + 3, item[0], A["teal"])
                 put(s, yy, x + 26, trunc(item[1], w - 28), A["text"])
@@ -819,7 +1048,7 @@ class App:
 
     def draw_now(self, y, x, h, w):
         s, A, P = self.scr, self.A, self.mpv.props.get
-        draw_box(s, y, x, h, w, [("Now Playing", A["title"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F0387 now playing", A["title"])], A["border"])
         md = self.meta()
         pos, dur = P("time-pos"), P("duration")
         if not P("path"):
@@ -831,64 +1060,68 @@ class App:
         if P("mute"):
             vols += " (muted)"
         sp = P("speed")
-        rows = [("Title", md.get("title") or P("media-title") or "-"),
-                ("Artist", md.get("artist") or "-"),
-                ("Album", md.get("album") or "-"),
-                ("State", state),
-                ("Time", f"{fmt_time(pos)} / {fmt_time(dur)}"),
+        rows = [("title", md.get("title") or P("media-title") or "-"),
+                ("artist", md.get("artist") or "-"),
+                ("album", md.get("album") or "-"),
+                ("state", state),
+                ("time", f"{fmt_time(pos)} / {fmt_time(dur)}"),
                 None,
-                ("Volume", vols),
-                ("Speed", f"{sp:.2f}x" if sp else "-"),
-                ("Repeat", self.repeat_state())]
-        iw = w - 5
+                ("volume", vols),
+                ("speed", f"{sp:.2f}x" if sp else "-"),
+                ("repeat", self.repeat_state())]
+        iw = w - 13
         for r, row in enumerate(rows[:h - 2]):
             yy = y + 1 + r
             if row is None:
-                bw = max(1, w - 6)
+                # progress line, same style as the dunst volume/brightness bar
+                bw = max(1, w - 5)
                 ratio = min(1.0, max(0.0, pos / dur)) if pos and dur else 0
                 f = int(ratio * bw)
-                put(s, yy, x + 2, "\u2588" * f, A["orange"])
-                put(s, yy, x + 2 + f, "\u2591" * (bw - f), A["dim"])
+                put(s, yy, x + 2, "\u2501" * f, A["accent"])
+                put(s, yy, x + 2 + f, "\u2500" * (bw - f), A["dim"])
             else:
-                put(s, yy, x + 2, trunc(clean(f"{row[0]:<7}= {row[1]}"), iw), A["orange"])
+                label, val = row
+                vattr = A["bold"] if label == "title" else (A["accent"] if label == "state" else A["text"])
+                put(s, yy, x + 2, f"{label:<8}", A["label"])
+                put(s, yy, x + 11, trunc(clean(str(val)), iw), vattr)
 
     def draw_props(self, y, x, h, w):
         s, A, P = self.scr, self.A, self.mpv.props.get
-        draw_box(s, y, x, h, w, [("Properties", A["title"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F02FD properties", A["title"])], A["border"])
         md = self.meta()
         ap = P("audio-params") or {}
         br = P("audio-bitrate")
         pi, n = self.playing(), len(self.pl())
-        rows = [("Position", f"{pi + 1} / {n}" if pi >= 0 else f"- / {n}"),
-                ("Codec", P("audio-codec-name") or "-"),
-                ("Format", P("file-format") or "-"),
-                ("Rate", f"{ap['samplerate']} Hz" if ap.get("samplerate") else "-"),
-                ("Channels", ap.get("hr-channels") or ap.get("channels") or "-"),
-                ("Bitrate", f"{br / 1000:.0f} kbps" if br else "-"),
-                ("Genre", md.get("genre") or "-"),
-                ("Date", md.get("date") or md.get("year") or "-"),
-                ("Track", md.get("track") or "-")]
+        rows = [("position", f"{pi + 1} / {n}" if pi >= 0 else f"- / {n}"),
+                ("codec", P("audio-codec-name") or "-"),
+                ("format", P("file-format") or "-"),
+                ("rate", f"{ap['samplerate']} Hz" if ap.get("samplerate") else "-"),
+                ("channels", ap.get("hr-channels") or ap.get("channels") or "-"),
+                ("bitrate", f"{br / 1000:.0f} kbps" if br else "-"),
+                ("genre", md.get("genre") or "-"),
+                ("date", md.get("date") or md.get("year") or "-"),
+                ("track", md.get("track") or "-")]
         for r, (k, val) in enumerate(rows[:h - 2]):
-            put(s, y + 1 + r, x + 2, trunc(clean(f"{k:<9}= {val}"), w - 5), A["text"])
+            put(s, y + 1 + r, x + 2, f"{k:<9}", A["label"])
+            put(s, y + 1 + r, x + 12, trunc(clean(str(val)), w - 14), A["text"])
 
     def draw_log(self, y, x, h, w):
         s, A = self.scr, self.A
-        draw_box(s, y, x, h, w, [("Log", A["title"])], A["border"])
+        draw_box(s, y, x, h, w, [("\U000F0279 log", A["title"])], A["border"])
         ih = h - 2
         for r, (ts, text, err) in enumerate(self.log[-ih:] if ih > 0 else []):
             yy = y + 1 + r
-            put(s, yy, x + 1, f"[{ts}]", A["dim"])
-            put(s, yy, x + 11, trunc(clean(text), w - 13), A["red"] if err else A["text"])
+            put(s, yy, x + 2, ts, A["dim"])
+            put(s, yy, x + 12, trunc(clean(text), w - 14), A["red"] if err else A["text"])
 
     def draw_input(self, y, x, h, w):
         s, A = self.scr, self.A
-        mc = {"NORMAL": "blue", "INSERT": "red", "COMMAND": "orange", "SEARCH": "orange"}[self.mode]
-        segs = [("Input", A["bold"]), ("  ", 0), ("[", A["bold"]),
-                (self.mode, A[mc] | curses.A_BOLD), ("]", A["bold"])]
+        mc = {"NORMAL": "blue", "INSERT": "green", "COMMAND": "yellow", "SEARCH": "yellow"}[self.mode]
+        segs = [("\U000F07B7 input", A["title"]), ("  ", 0), (self.mode.lower(), A[mc] | curses.A_BOLD)]
         draw_box(s, y, x, h, w, segs, A["active"])
-        prompt = {"NORMAL": ">", "INSERT": ">", "COMMAND": ":",
+        prompt = {"NORMAL": "\u276f", "INSERT": "\u276f", "COMMAND": ":",
                   "SEARCH": "/" if self.sdir > 0 else "?"}[self.mode]
-        put(s, y + 1, x + 2, prompt, A["teal"] | curses.A_BOLD)
+        put(s, y + 1, x + 2, prompt, A["accent"] | curses.A_BOLD)
         if self.mode == "NORMAL":
             typed = self.count + self.pend
             put(s, y + 1, x + 4, typed, A["text"])
@@ -911,6 +1144,9 @@ class App:
         curses.curs_set(0)
         curses.raw()
         s.keypad(True)
+        # never shift line contents with insert/delete character: that would move the cover
+        s.idcok(False)
+        s.idlok(False)
         s.timeout(100)
         while self.running and self.mpv.alive:
             self.tick()
@@ -940,10 +1176,11 @@ def main():
     files = collect(paths or ["."])
     if not files:
         sys.exit("mpvim: no audio files found")
-    if not os.environ.get("TERM", "").endswith("256color") and "kitty" not in os.environ.get("TERM", ""):
-        print("mpvim: warning: TERM is not a 256-color terminal", file=sys.stderr)
 
-    sock_path = os.path.join(tempfile.gettempdir(), f"mpvim-{os.getpid()}.sock")
+    # mpv's IPC socket accepts any command (including "run"), so it lives in a private
+    # 0700 directory instead of a predictable path in /tmp.
+    sock_dir = tempfile.mkdtemp(prefix="mpvim-", dir=os.environ.get("XDG_RUNTIME_DIR") or None)
+    sock_path = os.path.join(sock_dir, "mpv.sock")
     cmd = (["mpv", "--idle=yes", "--no-video", "--audio-display=no", "--force-window=no",
             "--no-terminal", "--input-ipc-server=" + sock_path] + opts + ["--"] + files)
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -963,10 +1200,7 @@ def main():
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
-        try:
-            os.unlink(sock_path)
-        except OSError:
-            pass
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

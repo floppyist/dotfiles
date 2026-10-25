@@ -12,3 +12,6 @@ vim.g.autoformat = false
 
 -- Disable smooth scrolling
 vim.g.snacks_animate = false;
+
+-- Sharp frames for all floating windows (the desktop has no rounded corners)
+vim.o.winborder = "single"

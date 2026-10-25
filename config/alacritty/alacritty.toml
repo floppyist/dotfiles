@@ -1,9 +1,17 @@
-[window.padding]
-x = 0
-y = 0
+# alacritty  ·  palette shared with i3, polybar, rofi, dunst
+#
+# Font, size, opacity, padding and all colors come from dotfiles.conf
+# (templates/alacritty.toml). Keys set in this file win over the import, so do not
+# repeat them here: edit dotfiles.conf and run `dotfiles apply`.
+
+[general]
+import = ["~/.config/dotfiles/alacritty.toml"]
+live_config_reload = true
 
 [window]
-opacity = 0.90
+dynamic_padding = true
+decorations = "None"
 
-[font]
-size = 15
+[cursor]
+style = { shape = "Block", blinking = "Off" }
+unfocused_hollow = true

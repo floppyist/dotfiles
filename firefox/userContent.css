@@ -1,5 +1,9 @@
+/* New tab, blank and settings pages in the desktop background.
+ * dotfiles.css: generated from dotfiles.conf, see userChrome.css. */
+@import url("dotfiles.css");
+
 @-moz-document url("about:newtab"), url("about:home"), url("about:blank"), url("about:preferences"), url("about:config") {
     body {
-        background-color: #191c1c;
+        background-color: var(--df-bg, #191c1c);
     }
 }

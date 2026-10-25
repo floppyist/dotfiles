@@ -3,6 +3,6 @@ Type=Application
 Name=Mutt
 GenericName=Email Client
 Comment=Terminal email client (neomutt)
-Exec=alacritty --class tool-float -e neomutt
+Exec=terminal.sh --float neomutt
 Terminal=false
 Categories=Network;Email;

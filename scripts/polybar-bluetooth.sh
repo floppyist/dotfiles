@@ -3,12 +3,25 @@
 # Usage: polybar-bluetooth.sh [--status|--debug]
 set -u
 
-ICON=$'\uf293'
-C_OFF="#a89984"
-C_ON="#458588"
-THEME="$HOME/.config/rofi/config.rasi"
+# Shared menu helper, resolved next to this script (works without ~/.local/bin in PATH)
+ROFI_MENU="$(dirname "$(readlink -f "$0")")/rofi-menu"
 
-notify() { notify-send -a "Bluetooth" "$@" >/dev/null 2>&1; }
+ICON_ON="󰂱"   # md-bluetooth_connect
+ICON_IDLE="󰂯" # md-bluetooth
+ICON_OFF="󰂲"  # md-bluetooth_off
+DF_BLUE_HI="#83a598" DF_MUTED="#7c6f64"
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+
+notify() { notify-send -a bluetooth "$@" >/dev/null 2>&1; }
+
+# Device names are chosen by the remote device. Polybar parses %{...} tags in script
+# output (including click actions that run commands), so break up every "%{".
+# Replacement strings are quoted: since bash 5.2 an unquoted & in them means "the match".
+polybar_safe() { local s=${1//[[:cntrl:]]/} pat='%{' rep='% {'; printf '%s' "${s//"$pat"/"$rep"}"; }
+
+# Truncate to N characters (polybar's label-maxlen would also count and cut %{...} tags)
+truncate() { local s=$1 n=$2; (( ${#s} > n )) && s="${s:0:n-1}…"; printf '%s' "$s"; }
 
 powered() { bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; }
 
@@ -17,23 +30,24 @@ connected_devices() {
     bluetoothctl devices Connected 2>/dev/null | sed -n 's/^Device //p'
 }
 
+# Polybar. Two spaces after the glyph: Nerd Font icons are drawn wider than one cell.
 bt_status() {
     if ! powered; then
-        echo "%{F$C_OFF}$ICON%{F-}"
+        echo "%{F$DF_MUTED}$ICON_OFF%{F-}"
         return
     fi
     local list count first
     list=$(connected_devices)
     if [[ -z "$list" ]]; then
-        echo "%{F$C_OFF}$ICON%{F-}"
+        echo "%{F$DF_MUTED}$ICON_IDLE%{F-}"
         return
     fi
     count=$(wc -l <<< "$list")
-    first=$(head -n1 <<< "$list" | cut -d' ' -f2-)
+    first=$(truncate "$(polybar_safe "$(head -n1 <<< "$list" | cut -d' ' -f2-)")" 20)
     if (( count > 1 )); then
-        echo "%{F$C_ON}$ICON%{F-} $first +$((count - 1))"
+        echo "%{F$DF_BLUE_HI}$ICON_ON  %{F-}$first +$((count - 1))"
     else
-        echo "%{F$C_ON}$ICON%{F-} $first"
+        echo "%{F$DF_BLUE_HI}$ICON_ON  %{F-}$first"
     fi
 }
 
@@ -42,7 +56,7 @@ list_devices() {
     local devices
     devices=$(bluetoothctl devices Paired 2>/dev/null | sed -n 's/^Device //p')
     if [[ -z "$devices" ]]; then
-        notify "Bluetooth" "No paired devices, scanning for 5s..."
+        notify "Scanning" "No paired devices, scanning for 5 s…"
         bluetoothctl --timeout 5 scan on >/dev/null 2>&1
         devices=$(bluetoothctl devices 2>/dev/null | sed -n 's/^Device //p')
     fi
@@ -64,7 +78,7 @@ case "${1:-}" in
         exit 0
         ;;
     --debug)
-        echo "=== Controller ==="; bluetoothctl show 2>&1 | grep -E 'Powered|Discoverable'
+        echo "=== Controller ==="; bluetoothctl show 2>&1 | grep -E 'Powered|Discoverable|PowerState'
         echo "=== Paired ===";     bluetoothctl devices Paired 2>&1
         echo "=== Connected ===";  bluetoothctl devices Connected 2>&1
         exit 0
@@ -74,12 +88,12 @@ esac
 if ! powered; then
     bluetoothctl power on >/dev/null 2>&1
     sleep 1
-    powered || { notify -u critical "Bluetooth Error" "Bluetooth is off (try bluetooth-toggle.sh)"; exit 1; }
+    powered || { notify -u critical "Bluetooth is off" "Turn it on with Super+b"; exit 1; }
 fi
 
 mapfile -t DEVICES < <(list_devices)
 if (( ${#DEVICES[@]} == 0 )); then
-    notify -u critical "Bluetooth Error" "No devices found (see: $0 --debug)"
+    notify -u critical "No devices found" "See: polybar-bluetooth.sh --debug"
     exit 1
 fi
 
@@ -89,39 +103,34 @@ LABELS=()
 for line in "${DEVICES[@]}"; do
     mac=${line%% *}
     name=${line#* }
-    if grep -qx "$mac" <<< "$CONNECTED"; then
-        LABELS+=("● $name")
+    name=${name//[[:cntrl:]]/}
+    if grep -qxF "$mac" <<< "$CONNECTED"; then
+        LABELS+=("●  $name")
     else
-        LABELS+=("○ $name")
+        LABELS+=("○  $name")
     fi
 done
 
-IDX=$(printf '%s\n' "${LABELS[@]}" | rofi -dmenu -i -p "" -format i \
-    -theme "$THEME" \
-    -mesg "BLUETOOTH  (● connected: select to disconnect)" \
-    -theme-str 'window { width: 30%; }' \
-    -theme-str 'listview { lines: 10; }')
-
-[[ -z "$IDX" ]] && exit 0
+IDX=$(printf '%s\n' "${LABELS[@]}" | "$ROFI_MENU" "bluetooth" "● connected  ·  select to toggle") || exit 0
 
 line=${DEVICES[$IDX]}
 mac=${line%% *}
 name=${line#* }
 
-if grep -qx "$mac" <<< "$CONNECTED"; then
+if grep -qxF "$mac" <<< "$CONNECTED"; then
     if bluetoothctl disconnect "$mac" >/dev/null 2>&1; then
-        notify "Bluetooth" "Disconnected from $name"
+        notify "Disconnected" "$name"
     else
-        notify -u critical "Bluetooth Error" "Failed to disconnect from $name"
+        notify -u critical "Disconnect failed" "$name"
     fi
     exit 0
 fi
 
-notify "Bluetooth" "Connecting to $name..."
+notify "Connecting" "$name"
 bluetoothctl connect "$mac" >/dev/null 2>&1
 if wait_connected "$mac"; then
-    notify "Bluetooth" "Connected to $name"
+    notify "Connected" "$name"
 else
-    notify -u critical "Bluetooth Error" "Failed to connect to $name"
+    notify -u critical "Connection failed" "$name"
     exit 1
 fi

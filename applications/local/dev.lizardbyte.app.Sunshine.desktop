@@ -4,6 +4,7 @@ Name=Sunshine
 GenericName=Game Streaming Host
 Comment=Self-hosted stream host for Moonlight
 Exec=sh -c "nohup sunshine > /dev/null 2>&1 &"
+TryExec=sunshine
 Icon=dev.lizardbyte.app.Sunshine
 Terminal=false
 StartupWMClass=dev.lizardbyte.app.Sunshine

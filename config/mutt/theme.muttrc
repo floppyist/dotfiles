@@ -1,0 +1,97 @@
+# neomutt theme  ·  matches the desktop palette
+#
+# Source it from ~/.muttrc (accounts and behaviour stay there):
+#   source ~/.config/mutt/theme.muttrc
+#
+# Colors are the terminal's 16 palette colors, which alacritty.toml sets to the desktop palette.
+# (Hex colors would need a "direct color" TERM such as xterm-direct; TERM=alacritty is not one.)
+#   color0  #2a3030 surface     color8  #928374 muted      color7  #a89984 subtle
+#   color15 #ebdbb2 text        color1/9 red   color2/10 green   color3/11 yellow
+#   color4/12 blue   color5/13 purple   color6/14 aqua
+# The accent lines (new mail, From header, sidebar indicator) come from dotfiles.conf:
+# ~/.config/dotfiles/neomutt.muttrc, sourced at the end (templates/neomutt.muttrc).
+
+# ── Flag characters: exactly one character per position (see `man neomuttrc`) ──
+#                    tag flag del att  rep old new  t-old t-new read read
+set flag_chars   = "󰓹󰈻󰆴󰏢󰑚󰮒󰇮󰮒󰇮  "
+#                    none only-you to+others cc from-you list reply-to
+set to_chars     = " 󰀄󰡉󰁥󰒊󰉹󰑚"
+#                    unchanged changed read-only attach-mode
+set status_chars = " 󰏫󰌾󰏢"
+#                    verified encrypted signed key none
+set crypt_chars  = "󰞑󰌾󰏫󰌆 "
+
+# ── Index ───────────────────────────────────────────────────────────────────────
+#  󰇮 󰀄  Sender Name              Subject …                              24.10.26
+set index_format  = " %zs %zc %zt  %-24.24n  %s%*  %{!%d.%m.%y} "
+set status_format = " 󰚇 %f %r%> %?n?󰇮 %n new  ?%?F?󰈻 %F  ?%?d?󰆴 %d  ?%?t?󰓹 %t  ?%?M?%M/?%m mails  ·  %P "
+set pager_format  = " %Z  %C/%m  %-24.24n  %s%*  %P "
+
+color normal            default  default
+color indicator         bold color15 color0
+color tree              color8   default
+
+color index_number      color8   default
+color index_flags       color8   default
+color index_author      color7   default
+color index_subject     color7   default
+color index_date        color8   default
+
+# new: bright text, accent flag glyph (accent: see the end of this file)
+color index_author      bold color15 default  ~N
+color index_subject     bold color15 default  ~N
+# flagged
+color index_flags       color11  default  ~F
+color index_subject     color11  default  ~F
+# tagged
+color index_flags       color12  default  ~T
+# marked for deletion
+color index             color8   default  ~D
+color index_flags       color9   default  ~D
+
+# ── Status line: a capsule like the polybar groups ─────────────────────────────
+color status            color15  color0
+color status            color11  color0  "󰈻 [0-9]+"
+color status            color8   color0  "·"
+
+# ── Sidebar (toggle with Ctrl+b) ────────────────────────────────────────────────
+set sidebar_width          = 28
+set sidebar_divider_char   = "│"
+set sidebar_short_path     = yes
+set sidebar_folder_indent  = yes
+set sidebar_indent_string  = "  "
+set sidebar_format         = " %D%* %?N?%N ?"
+
+color sidebar_divider   color0   default
+color sidebar_ordinary  color7   default
+color sidebar_new       bold color15 default
+color sidebar_flagged   color11  default
+color sidebar_highlight bold color15 color0
+
+# ── Pager ───────────────────────────────────────────────────────────────────────
+color hdrdefault        color8   default
+color header            bold color11 default  "^Subject:"
+color header            color7   default  "^(To|Cc|Date):"
+
+color quoted            color7   default
+color quoted1           color8   default
+color quoted2           color6   default
+color quoted3           color4   default
+color signature         color8   default
+color attachment        color13  default
+color markers           color8   default
+color tilde             color0   default
+
+color body              underline color12 default  '(https?|ftp)://[^ <>"]+'
+color body              color14  default  '[-a-zA-Z0-9_.+]+@[-a-zA-Z0-9.]+'
+
+# ── Prompts and messages ────────────────────────────────────────────────────────
+color search            color0   color11
+color message           color7   default
+color prompt            color15  default
+color warning           color11  default
+color error             bold color9 default
+color progress          color15  color0
+
+# ── Accent from dotfiles.conf ───────────────────────────────────────────────────
+source ~/.config/dotfiles/neomutt.muttrc

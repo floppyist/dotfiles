@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Event-driven status for polybar modules (tail = true).
+#
+# Usage: polybar-watch SECONDS STATUS-CMD [ARGS...] -- EVENT-CMD [ARGS...]
+#
+# Prints the output of STATUS-CMD at start, after every burst of lines from EVENT-CMD
+# (e.g. `nmcli monitor`, `udevadm monitor`) and at least every SECONDS as a fallback.
+# Nothing runs while nothing happens, and unchanged output is not printed again, so
+# polybar does not redraw. Example:
+#   exec = polybar-watch 30 polybar-wlan.sh --status -- nmcli monitor
+set -u
+
+every=${1:-}
+[[ "$every" =~ ^[0-9]+$ ]] && (( every > 0 )) || { echo "usage: polybar-watch SECONDS STATUS-CMD -- EVENT-CMD" >&2; exit 2; }
+shift
+status=()
+while (( $# )) && [[ "$1" != "--" ]]; do status+=("$1"); shift; done
+(( $# )) && shift
+events=("$@")
+(( ${#status[@]} && ${#events[@]} )) || { echo "polybar-watch: STATUS-CMD and EVENT-CMD are required" >&2; exit 2; }
+
+# GLib tools (nmcli, gdbus) buffer their output in a pipe; force line buffering
+command -v stdbuf >/dev/null && events=(stdbuf -oL "${events[@]}")
+
+pid=""
+last=""
+# polybar closed the pipe (restart) or stops us: leave, the EXIT trap stops the event source
+trap 'exit 0' PIPE TERM INT HUP
+trap '[[ -n "$pid" ]] && kill "$pid" 2>/dev/null' EXIT
+
+# Polybar runs `exec` through `sh -c`; without `exec` in the module line, its SIGTERM only
+# reaches that shell. Unchanged output is never written, so a broken pipe would not be
+# noticed either: leave as soon as the parent (polybar) is gone.
+parent=$PPID
+orphaned() {
+    local stat
+    read -r stat < "/proc/$BASHPID/stat" || return 0
+    stat=${stat##*) }
+    set -- $stat
+    [[ "$2" != "$parent" ]]
+}
+
+start_events() {
+    exec {src}< <(exec "${events[@]}" 2>/dev/null)
+    pid=$!
+}
+
+emit() {
+    local out
+    out=$("${status[@]}" 2>/dev/null)
+    [[ "$out" == "$last" ]] && return
+    last=$out
+    printf '%s\n' "$out"
+}
+
+start_events
+emit
+while true; do
+    if read -r -t "$every" _ <&"$src"; then
+        # coalesce a burst (at most ~3 s, so a chatty source cannot starve the update)
+        for _ in {1..10}; do read -r -t 0.3 _ <&"$src" || break; done
+    elif (( $? <= 128 )); then
+        # end of file: the event source died (e.g. daemon restart); restart it after a pause
+        exec {src}<&-
+        kill "$pid" 2>/dev/null
+        sleep 5
+        start_events
+    fi
+    orphaned && exit 0
+    emit
+done
