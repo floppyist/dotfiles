@@ -22,7 +22,7 @@ A minimalist and functional development environment based on **i3wm**, **Polybar
 
 ## Components
 
-- **Window Manager:** `i3wm` (with `i3blocks` & `picom`)
+- **Window Manager:** `i3wm` (with `picom`)
 - **Terminal:** `Alacritty`
 - **Editor:** `Neovim` (LazyVim distribution)
 - **Status Bar:** `Polybar` (includes custom Bluetooth, WLAN, Display and Screenshot modules)
@@ -50,40 +50,46 @@ feh ncurses caffeine-ng
 
 ### 2. Clone the repository
 
+Set `DOTFILES` to the directory you clone into. All following commands use this variable. Replace the path with your own if you don't want `~/dotfiles`. The variable only lasts for the current shell, so set it again in new shells.
+
 ```bash
-git clone https://github.com/floppyist/dotfiles ~/dotfiles
-cd ~/dotfiles
+export DOTFILES=~/dotfiles
+git clone https://github.com/floppyist/dotfiles "$DOTFILES"
+cd "$DOTFILES"
 ```
 
 ### 3. Symlink all configuration files and scripts
 
 ```bash
 mkdir -p ~/.config
-ln -s ~/dotfiles/config/* ~/.config/
-ln -s ~/dotfiles/firefox/userChrome.css ~/.config/mozilla/firefox/<your-profile>/chrome/
-ln -s ~/dotfiles/firefox/userContent.css ~/.config/mozilla/firefox/<your-profile>/chrome/
-ln -s ~/dotfiles/.bashrc ~
-ln -s ~/dotfiles/.inputrc ~
+ln -s "$DOTFILES"/config/* ~/.config/
+ln -s "$DOTFILES"/firefox/userChrome.css ~/.config/mozilla/firefox/<your-profile>/chrome/
+ln -s "$DOTFILES"/firefox/userContent.css ~/.config/mozilla/firefox/<your-profile>/chrome/
+ln -s "$DOTFILES"/.bashrc ~
+ln -s "$DOTFILES"/.inputrc ~
+ln -s "$DOTFILES"/.xinitrc ~
+ln -s "$DOTFILES"/.Xresources ~
 
 mkdir -p ~/.local/bin
-ln -s ~/dotfiles/scripts/* ~/.local/bin/
+ln -s "$DOTFILES"/scripts/* ~/.local/bin/
+
+mkdir -p ~/.local/share/applications
+ln -s "$DOTFILES"/applications/* ~/.local/share/applications/
 ```
 
 ### 4. Make scripts executable
 
 ```bash
-chmod +x ~/.local/bin/bluetooth-toggle.sh
-chmod +x ~/.local/bin/display-select.sh
-chmod +x ~/.local/bin/polybar-bluetooth.sh
-chmod +x ~/.local/bin/polybar-wlan.sh
-chmod +x ~/.local/bin/screenshot.sh
-chmod +x ~/.local/bin/nerdsaver
-chmod +x ~/.local/bin/nerdsaver-launch
+chmod +x "$DOTFILES"/scripts/*
 ```
 
-> **Note:** Ensure `~/.local/bin` is added to your `$PATH`.
+> **Note:** `~/.local/bin` must be in your `$PATH`. `.xinitrc` and `.bashrc` both export it. The `.desktop` launchers rely on this, so start i3 through `.xinitrc`.
 
-### 5. Enable custom styles in Firefox:
+### 5. Adjust machine-specific paths
+
+The game and application launchers in `applications/` (`aseprite`, `cncgenerals*`, `factorio`, `wow`) point to install locations under `/home/floppyist/`. Change `Exec=` and `Path=` to match your system before linking them.
+
+### 6. Enable custom styles in Firefox:
 
 - Open `about:config`
 - Set `toolkit.legacyUserProfileCustomizations.stylesheets` to `true`

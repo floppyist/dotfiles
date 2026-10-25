@@ -3,6 +3,6 @@ Type=Application
 Name=Display
 GenericName=Settings
 Comment=Switch external display mode
-Exec=/home/floppyist/.local/bin/display-select.sh
+Exec=display-select.sh
 Terminal=false
 Categories=Settings;

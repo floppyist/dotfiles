@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 
-SYSFS="/sys/class/backlight/amdgpu_bl0"
+# First available backlight device (e.g. amdgpu_bl0, intel_backlight)
+shopt -s nullglob
+BACKLIGHTS=(/sys/class/backlight/*)
+SYSFS="${BACKLIGHTS[0]:-}"
+[[ -d "$SYSFS" ]] || { echo "no backlight device" >&2; exit 1; }
 
 read -r CURR < "$SYSFS/brightness"
 read -r MAX < "$SYSFS/max_brightness"

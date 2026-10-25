@@ -3,6 +3,6 @@ Type=Application
 Name=Bluetooth
 GenericName=Settings
 Comment=Connect to Bluetooth devices
-Exec=/home/floppyist/.local/bin/polybar-bluetooth.sh
+Exec=polybar-bluetooth.sh
 Terminal=false
 Categories=Settings;

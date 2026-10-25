@@ -3,6 +3,6 @@ Type=Application
 Name=WiFi
 GenericName=Settings
 Comment=Connect to WiFi networks
-Exec=/home/floppyist/.local/bin/polybar-wlan.sh
+Exec=polybar-wlan.sh
 Terminal=false
 Categories=Settings;
