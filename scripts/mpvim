@@ -2,8 +2,8 @@
 """mpvim - Vim-gesteuertes Terminal-Frontend fuer mpv (Audio).
 
 Installation:
-    install -Dm755 mpvim ~/.local/bin/mpvim
-    echo "alias mpv='mpvim'" >> ~/.bashrc        # oder z.B. alias m='mpvim'
+    ./install.sh                                  # verlinkt scripts/mpvim nach ~/.local/bin/mpvim
+    .bashrc enthaelt bereits: alias mpv='mpvim'   # eigene Aliase dort ergaenzen
 
 Benutzung:
     cd audio && mpvim .        # Ordner (rekursiv)

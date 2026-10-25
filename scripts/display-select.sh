@@ -4,7 +4,7 @@ set -u
 
 THEME="$HOME/.config/rofi/config.rasi"
 
-notify() { notify-send "Display" "$1" >/dev/null 2>&1; }
+notify() { notify-send -a "Display" "Display" "$1" >/dev/null 2>&1; }
 
 command -v rofi >/dev/null || { notify "rofi not found"; exit 1; }
 
@@ -55,6 +55,6 @@ args+=("${others[@]}")
 if xrandr "${args[@]}"; then
     notify "$OUT: $LABEL"
 else
-    notify-send -u critical "Display" "xrandr failed for $OUT ($LABEL)"
+    notify-send -a "Display" -u critical "Display" "xrandr failed for $OUT ($LABEL)"
     exit 1
 fi

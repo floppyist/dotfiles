@@ -8,7 +8,7 @@ C_OFF="#a89984"
 C_ON="#458588"
 THEME="$HOME/.config/rofi/config.rasi"
 
-notify() { notify-send "$@" >/dev/null 2>&1; }
+notify() { notify-send -a "Bluetooth" "$@" >/dev/null 2>&1; }
 
 powered() { bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; }
 

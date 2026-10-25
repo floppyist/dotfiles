@@ -9,6 +9,7 @@ configuration {
     bg:          #191c1c;
     fg:          #ebdbb2;
     text:        #cc241d;
+    gray:        #a89984;
 
     font: "JetBrainsMono Nerd Font 14";
     background-color: transparent;
@@ -25,7 +26,18 @@ window {
 }
 
 mainbox {
-    children: [ inputbar, listview ];
+    children: [ message, inputbar, listview ];
+}
+
+message {
+    margin:           0px 0px 10px 0px;
+    padding:          0px;
+    background-color: transparent;
+}
+
+textbox {
+    text-color:       @gray;
+    horizontal-align: 0.0;
 }
 
 inputbar {

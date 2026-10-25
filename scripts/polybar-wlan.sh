@@ -5,7 +5,7 @@ set -u
 
 THEME="$HOME/.config/rofi/config.rasi"
 
-notify() { notify-send "$@" >/dev/null 2>&1; }
+notify() { notify-send -a "WiFi" "$@" >/dev/null 2>&1; }
 
 wifi_status() {
     local active

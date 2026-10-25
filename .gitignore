@@ -1,0 +1,10 @@
+# Editor and OS files
+*.swp
+*~
+.DS_Store
+
+# Backups created by install.sh
+*.bak-*
+
+# Python
+__pycache__/

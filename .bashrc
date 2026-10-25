@@ -68,8 +68,16 @@ if [ -f /usr/share/fzf/key-bindings.bash ]; then
     source /usr/share/fzf/key-bindings.bash
 fi
 
-export PATH="$HOME/.local/bin:$PATH"
-export PATH="$HOME/.opencode/bin:$PATH"
+# Prepend a directory to PATH only if it is not there yet (avoids duplicates in nested shells)
+path_prepend() {
+    case ":$PATH:" in
+        *":$1:"*) ;;
+        *) PATH="$1:$PATH" ;;
+    esac
+}
+path_prepend "$HOME/.local/bin"
+path_prepend "$HOME/.opencode/bin"
+export PATH
 
 export NERDSAVER_TERM=alacritty
 export NERDSAVER_LOCK=0

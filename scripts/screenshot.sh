@@ -20,7 +20,7 @@ if /usr/bin/scrot -z "$FILE_PATH"; then
     notify-send "Screenshot Captured" \
                 "Saved as: <b>$FILENAME</b>" \
                 -i camera-photo \
-                -a "i3-Screenshot" \
+                -a "Screenshot" \
                 -t 3000
 else
     notify-send "❌ Error" "Failed to save screenshot." -u critical

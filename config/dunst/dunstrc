@@ -48,3 +48,8 @@
     summary = "*"
     frame_color = "#689d6a"
     timeout = 10
+
+[mail]
+    appname = Mutt
+    frame_color = "#d79921"
+    timeout = 10
