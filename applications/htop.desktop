@@ -3,6 +3,6 @@ Type=Application
 Name=htop
 GenericName=System Monitor
 Comment=Interactive process viewer
-Exec=alacritty --class tool-float -e htop
+Exec=terminal.sh --float htop
 Terminal=false
 Categories=System;Monitor;

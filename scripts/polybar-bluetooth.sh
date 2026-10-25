@@ -9,8 +9,9 @@ ROFI_MENU="$(dirname "$(readlink -f "$0")")/rofi-menu"
 ICON_ON="󰂱"   # md-bluetooth_connect
 ICON_IDLE="󰂯" # md-bluetooth
 ICON_OFF="󰂲"  # md-bluetooth_off
-C_ON="#83a598"
-C_OFF="#7c6f64"
+DF_BLUE_HI="#83a598" DF_MUTED="#7c6f64"
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
 
 notify() { notify-send -a bluetooth "$@" >/dev/null 2>&1; }
 
@@ -29,23 +30,24 @@ connected_devices() {
     bluetoothctl devices Connected 2>/dev/null | sed -n 's/^Device //p'
 }
 
+# Polybar. Two spaces after the glyph: Nerd Font icons are drawn wider than one cell.
 bt_status() {
     if ! powered; then
-        echo "%{F$C_OFF}$ICON_OFF %{F-}"
+        echo "%{F$DF_MUTED}$ICON_OFF%{F-}"
         return
     fi
     local list count first
     list=$(connected_devices)
     if [[ -z "$list" ]]; then
-        echo "%{F$C_OFF}$ICON_IDLE %{F-}"
+        echo "%{F$DF_MUTED}$ICON_IDLE%{F-}"
         return
     fi
     count=$(wc -l <<< "$list")
     first=$(truncate "$(polybar_safe "$(head -n1 <<< "$list" | cut -d' ' -f2-)")" 20)
     if (( count > 1 )); then
-        echo "%{F$C_ON}$ICON_ON %{F-}$first +$((count - 1))"
+        echo "%{F$DF_BLUE_HI}$ICON_ON  %{F-}$first +$((count - 1))"
     else
-        echo "%{F$C_ON}$ICON_ON %{F-}$first"
+        echo "%{F$DF_BLUE_HI}$ICON_ON  %{F-}$first"
     fi
 }
 

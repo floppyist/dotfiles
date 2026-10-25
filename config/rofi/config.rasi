@@ -1,32 +1,24 @@
 /* rofi  ·  launcher and system menus (fzf-style)
  *
  *  ┌──────────────────────────────────────────────┐
- *  │ apps ❯ search                          12/48 │  inputbar, red underline
+ *  │ apps ❯ search                          12/48 │  inputbar, accent underline
  *  │ message (only with -mesg)                    │
- *  │▌Firefox  · Web Browser                       │  selected: red bar + surface
+ *  │▌Firefox  · Web Browser                       │  selected: accent bar + surface
  *  │ Signal   · Messenger                         │
  *  └──────────────────────────────────────────────┘
+ *
+ *  Colors (@bg @surface @overlay @fg @subtle @muted @accent @accent-text), the font,
+ *  the frame width and drun-display-format come from dotfiles.conf (templates/rofi.rasi).
  */
 
 configuration {
     modi:                "drun";
     show-icons:          false;
     display-drun:        "apps";
-    drun-display-format: "{name}[<span foreground='#7c6f64'>  ·  {generic}</span>]";
     sidebar-mode:        false;
 }
 
 * {
-    bg:       #191c1c;
-    surface:  #252a2a;
-    overlay:  #313838;
-    fg:       #ebdbb2;
-    subtle:   #a89984;
-    muted:    #7c6f64;
-    red:      #cc241d;
-    red-hi:   #fb4934;
-
-    font:             "JetBrainsMono Nerd Font 13";
     background-color: transparent;
     text-color:       @fg;
 }
@@ -36,7 +28,7 @@ window {
     anchor:           center;
     width:            640px;
     background-color: @bg;
-    border:           2px;
+    border:           @frame;
     border-color:     @overlay;
     border-radius:    0px;
     padding:          0px;
@@ -54,12 +46,12 @@ inputbar {
     padding:          14px 16px;
     spacing:          10px;
     border:           0px 0px 2px 0px;
-    border-color:     @red;
+    border-color:     @accent;
     children:         [ prompt, textbox-chevron, entry, counter ];
 }
 
 prompt {
-    text-color: @red-hi;
+    text-color: @accent-text;
 }
 
 textbox-chevron {
@@ -131,13 +123,17 @@ element {
 
 element selected {
     background-color: @surface;
-    border-color:     @red;
+    border-color:     @accent;
     text-color:       @fg;
 }
 
 element-text {
     background-color: transparent;
     text-color:       inherit;
-    highlight:        bold #fb4934;
+    highlight:        @match;
     vertical-align:   0.5;
 }
+
+/* Theme values from dotfiles.conf. Must stay the last statement: rofi 2.0 fails to
+ * parse a file where anything follows an @import. */
+@import "~/.config/dotfiles/rofi.rasi"

@@ -12,6 +12,22 @@ esac
 
 xsetroot -cursor_name left_ptr
 
-setxkbmap de
+# Keyboard layout from dotfiles.conf (`keyboard_layout`, e.g. de or us,de or de(nodeadkeys))
+DF_KEYBOARD_LAYOUT=de
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+layouts="" variants=""
+IFS=, read -ra _kb <<< "$DF_KEYBOARD_LAYOUT"
+for k in "${_kb[@]}"; do
+    case "$k" in
+        *"("*")") layouts+="${k%%(*},"; v=${k#*(}; variants+="${v%)}," ;;
+        *)        layouts+="$k,"; variants+="," ;;
+    esac
+done
+if [[ "$variants" == *[a-z]* ]]; then
+    setxkbmap "${layouts%,}" -variant "${variants%,}"
+else
+    setxkbmap "${layouts%,}"
+fi
+unset _kb k v layouts variants
 
 exec dbus-run-session i3

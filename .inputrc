@@ -1,5 +1,35 @@
 $include /etc/inputrc
 
+# ── Completion (all readline programs) ──────────────────────────────────────────
+# Colors like ls, the typed prefix highlighted, case-insensitive, all matches on the
+# first Tab, a / after links to directories
+set colored-stats on
+set colored-completion-prefix on
+set completion-ignore-case on
+set show-all-if-ambiguous on
+set mark-symlinked-directories on
+
+$if Bash
+# ── Vi mode (set in .bashrc) ────────────────────────────────────────────────────
+# Esc switches to normal mode at once, and multi-key commands (ciw, da") wait for their
+# last key instead of falling back to a plain c/d after half a second
+set keyseq-timeout 0
+# The mode is shown at the start of the last prompt line: ╰─❯ insert (bar cursor),
+# ╰─❮ normal (block cursor). .bashrc sets the strings with the theme colors; these are
+# the fallback (cursor shape only).
 set show-mode-in-prompt on
-set vi-ins-mode-string ""
-set vi-cmd-mode-string "\1\e[1;31m\2[N] \1\e[0m\2"
+set vi-ins-mode-string "\1\e[6 q\2"
+set vi-cmd-mode-string "\1\e[2 q\2"
+
+# Up/Down search the history for lines that start with what is already typed
+set keymap vi-insert
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"\eOA": history-search-backward
+"\eOB": history-search-forward
+set keymap vi-command
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+"\eOA": history-search-backward
+"\eOB": history-search-forward
+$endif

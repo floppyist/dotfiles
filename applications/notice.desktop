@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Notice
+GenericName=Notes
+Comment=Kanban-style notice app
+Exec=terminal.sh --float notice --tui
+Terminal=false
+Categories=Utility;

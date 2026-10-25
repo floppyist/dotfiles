@@ -3,33 +3,19 @@
 # Mod1 (Alt)   window management
 # Mod4 (Super) system actions (lock, display, bluetooth, power)
 
-# ── Palette (shared with polybar, rofi, dunst, alacritty) ──────────────────────
-set $bg       #191c1c
-set $surface  #252a2a
-set $overlay  #313838
-set $fg       #ebdbb2
-set $subtle   #a89984
-set $red      #cc241d
+# ── Theme from dotfiles.conf ───────────────────────────────────────────────────
+# Window colors, font, floating border width, gaps, wallpaper and idle times
+# (templates/i3.conf). Edit dotfiles.conf, then run `dotfiles apply`.
+include ~/.config/dotfiles/i3.conf
 
 set $mod Mod1
-set $term alacritty
+set $term ~/.local/bin/terminal.sh
 set $menu rofi -show drun -theme ~/.config/rofi/config.rasi
-
-font pango:JetBrainsMono Nerd Font 10
 
 focus_follows_mouse off
 
-# Tiled windows have no border; floating windows get a thin frame (red when focused)
+# Tiled windows have no border; floating windows get a thin frame (accent when focused)
 default_border pixel 0
-default_floating_border pixel 2
-
-#                       border   background text    indicator child_border
-client.focused          $red     $bg        $fg     $red      $red
-client.focused_inactive $overlay $bg        $subtle $overlay  $overlay
-client.unfocused        $overlay $bg        $subtle $overlay  $overlay
-client.urgent           $red     $red       $bg     $red      $red
-client.placeholder      $bg      $bg        $fg     $bg       $bg
-client.background       $bg
 
 # ── Autostart ──────────────────────────────────────────────────────────────────
 # Session setup (xrdb, keyboard, cursor) lives in ~/.xinitrc
@@ -42,15 +28,15 @@ exec --no-startup-id xbanish
 exec --no-startup-id caffeine-ng
 # exec_always: i3 restart (Alt+Shift+r) brings back a crashed compositor; a second instance exits
 exec_always --no-startup-id picom -b
-exec_always --no-startup-id feh --no-fehbg --bg-fill ~/images/wallpaper
 exec_always --no-startup-id ~/.config/polybar/launch.sh
 
 # ── Screensaver and lock ───────────────────────────────────────────────────────
+# Idle times come from dotfiles.conf (`xset` runs in the included file; `dotfiles apply`
+# also sets them live). Defaults:
 # Idle 60 s:   screensaver (xss-lock notifier, any input ends it)
 # Idle 300 s:  lock screen (60 s timeout + 240 s cycle), display off via DPMS
 # Suspend / `loginctl lock-session`: lock immediately. --transfer-sleep-lock keeps
 # the system awake until the screen is locked, so nothing is visible on resume.
-exec --no-startup-id sh -c 'xset s noblank; xset s 60 240; xset dpms 0 0 300'
 exec --no-startup-id xss-lock --transfer-sleep-lock --notifier "$HOME/.local/bin/nerdsaver-launch cycle 60" -- "$HOME/.local/bin/lock.sh"
 
 mode "nerdsaver" {

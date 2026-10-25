@@ -9,6 +9,11 @@ PREFIX="screenshot_"
 
 notify() { notify-send -a screenshot "$@" >/dev/null 2>&1; }
 
+# Selection frame in the accent color from dotfiles.conf
+DF_ACCENT="#cc241d"
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+
 mkdir -p "$TARGET_DIR"
 
 # Next free number (highest existing + 1)
@@ -22,7 +27,7 @@ FILENAME=$(printf '%s%03d.png' "$PREFIX" $(( max + 1 )))
 FILE_PATH="$TARGET_DIR/$FILENAME"
 
 args=(-z)
-[[ "${1:-}" == "--select" ]] && args+=(--select --freeze --line mode=edge,width=2,color="#cc241d")
+[[ "${1:-}" == "--select" ]] && args+=(--select --freeze --line mode=edge,width=2,color="$DF_ACCENT")
 
 if ! scrot "${args[@]}" "$FILE_PATH"; then
     # Esc during region selection is not an error

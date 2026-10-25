@@ -4,6 +4,8 @@
 #           <b>Summary</b>
 #           Body
 # Frame color = urgency (low gray, normal blue, critical red).
+# Colors, font, frame width, the offset below the bar, the default format and the OSD rule
+# come from dotfiles.conf: dunstrc.d/50-dotfiles.conf (templates/dunst.conf), read after this file.
 # Our scripts set the app name with `notify-send -a <app>`; the rules below match it.
 # markup stays at the default ("no"): notification text is shown as plain text,
 # so SSIDs, track titles or mail subjects cannot inject pango markup.
@@ -12,23 +14,16 @@
     monitor = 0
     follow = keyboard
     origin = top-right
-    # 12 px from the right edge and 12 px below the 40 px polybar
-    offset = (12, 52)
     width = (300, 360)
     height = (0, 160)
     notification_limit = 5
     gap_size = 6
     corner_radius = 0
-    frame_width = 2
-    frame_color = "#458588"
     separator_height = 0
     padding = 12
     horizontal_padding = 14
     text_icon_padding = 12
     line_height = 2
-    font = JetBrainsMono Nerd Font 10
-    foreground = "#ebdbb2"
-    background = "#191c1c"
     alignment = left
     vertical_alignment = top
     ellipsize = end
@@ -49,25 +44,14 @@
     progress_bar_corner_radius = 0
     progress_bar_min_width = 272
     progress_bar_max_width = 332
-    highlight = "#cc241d"
-    format = "<span size='small' foreground='#7c6f64'>󰂜  %a</span>\n<b>%s</b>\n%b"
 
 [urgency_low]
-    background = "#191c1c"
-    foreground = "#a89984"
-    frame_color = "#313838"
     timeout = 5
 
 [urgency_normal]
-    background = "#191c1c"
-    foreground = "#ebdbb2"
-    frame_color = "#458588"
     timeout = 8
 
 [urgency_critical]
-    background = "#191c1c"
-    foreground = "#ebdbb2"
-    frame_color = "#cc241d"
     timeout = 0
 
 # ── our scripts: colored glyph per app ──────────────────────────────────────────
@@ -97,14 +81,11 @@
     appname = system
     format = "<span size='small' foreground='#fb4934'>󰒓  system</span>\n<b>%s</b>\n%b"
 
-# Volume / brightness / mic: compact, replaces itself, not kept in the history
-[app_osd]
-    appname = osd
-    format = "<b>%s</b>"
-    frame_color = "#313838"
-    foreground = "#ebdbb2"
-    timeout = 1500ms
-    history_ignore = yes
+[app_network]
+    appname = network
+    format = "<span size='small' foreground='#8ec07c'>󰩠  network</span>\n<b>%s</b>\n%b"
+
+# app_osd (volume / brightness bar) is defined in templates/dunst.conf
 
 # ── third-party apps ────────────────────────────────────────────────────────────
 

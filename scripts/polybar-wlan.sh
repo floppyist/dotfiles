@@ -6,8 +6,9 @@ set -u
 # Shared menu helper, resolved next to this script (works without ~/.local/bin in PATH)
 ROFI_MENU="$(dirname "$(readlink -f "$0")")/rofi-menu"
 
-C_ON="#8ec07c"
-C_OFF="#7c6f64"
+DF_AQUA_HI="#8ec07c" DF_YELLOW_HI="#fabd2f" DF_RED_HI="#fb4934" DF_MUTED="#7c6f64"
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
 
 notify() { notify-send -a wifi "$@" >/dev/null 2>&1; }
 
@@ -31,18 +32,24 @@ signal_icon() {
     fi
 }
 
+# Polybar: one WiFi glyph whose color shows the signal (aqua >= 50 %, yellow >= 25 %, red below),
+# then the SSID. Two spaces: Nerd Font icons are drawn wider than their one-cell advance.
 wifi_status() {
-    local line signal ssid
-    # --rescan no: the status runs every few seconds and must not trigger scans
+    local line signal ssid color
+    # --rescan no: the status runs on every network event and must not trigger scans
     line=$(nmcli -t -f ACTIVE,SIGNAL,SSID device wifi list --rescan no 2>/dev/null | grep -m1 '^yes:')
     if [[ -z "$line" ]]; then
-        echo "%{F$C_OFF}󰤭 %{F-}off"
+        echo "%{F$DF_MUTED}󰖪  off%{F-}"
         return
     fi
     signal=${line#yes:}; signal=${signal%%:*}
     ssid=${line#yes:*:}; ssid=${ssid//\\:/:}
     [[ "$signal" =~ ^[0-9]+$ ]] || signal=0
-    echo "%{F$C_ON}$(signal_icon "$signal") %{F-}$(truncate "$(polybar_safe "$ssid")" 20)"
+    if   (( signal >= 50 )); then color=$DF_AQUA_HI
+    elif (( signal >= 25 )); then color=$DF_YELLOW_HI
+    else                          color=$DF_RED_HI
+    fi
+    echo "%{F$color}󰖩  %{F-}$(truncate "$(polybar_safe "$ssid")" 20)"
 }
 
 [[ "${1:-}" == "--status" ]] && { wifi_status; exit 0; }

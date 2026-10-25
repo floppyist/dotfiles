@@ -8,6 +8,8 @@
 #   color0  #2a3030 surface     color8  #928374 muted      color7  #a89984 subtle
 #   color15 #ebdbb2 text        color1/9 red   color2/10 green   color3/11 yellow
 #   color4/12 blue   color5/13 purple   color6/14 aqua
+# The accent lines (new mail, From header, sidebar indicator) come from dotfiles.conf:
+# ~/.config/dotfiles/neomutt.muttrc, sourced at the end (templates/neomutt.muttrc).
 
 # ── Flag characters: exactly one character per position (see `man neomuttrc`) ──
 #                    tag flag del att  rep old new  t-old t-new read read
@@ -35,10 +37,9 @@ color index_author      color7   default
 color index_subject     color7   default
 color index_date        color8   default
 
-# new: bright text, red flag glyph
+# new: bright text, accent flag glyph (accent: see the end of this file)
 color index_author      bold color15 default  ~N
 color index_subject     bold color15 default  ~N
-color index_flags       color9   default  ~N
 # flagged
 color index_flags       color11  default  ~F
 color index_subject     color11  default  ~F
@@ -50,7 +51,6 @@ color index_flags       color9   default  ~D
 
 # ── Status line: a capsule like the polybar groups ─────────────────────────────
 color status            color15  color0
-color status            bold color9 color0  "󰇮 [0-9]+ new"
 color status            color11  color0  "󰈻 [0-9]+"
 color status            color8   color0  "·"
 
@@ -67,11 +67,9 @@ color sidebar_ordinary  color7   default
 color sidebar_new       bold color15 default
 color sidebar_flagged   color11  default
 color sidebar_highlight bold color15 color0
-color sidebar_indicator bold color9  default
 
 # ── Pager ───────────────────────────────────────────────────────────────────────
 color hdrdefault        color8   default
-color header            bold color9  default  "^From:"
 color header            bold color11 default  "^Subject:"
 color header            color7   default  "^(To|Cc|Date):"
 
@@ -94,3 +92,6 @@ color prompt            color15  default
 color warning           color11  default
 color error             bold color9 default
 color progress          color15  color0
+
+# ── Accent from dotfiles.conf ───────────────────────────────────────────────────
+source ~/.config/dotfiles/neomutt.muttrc

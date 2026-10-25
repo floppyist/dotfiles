@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""dotfiles - central settings for the desktop
+
+usage: dotfiles apply [--no-reload]   generate the theme files from dotfiles.conf, reload the desktop
+       dotfiles check                 only validate dotfiles.conf
+       dotfiles get KEY               print one resolved value (e.g. `dotfiles get accent`)
+       dotfiles list                  print all resolved values
+       dotfiles edit                  open dotfiles.conf in $EDITOR, then apply
+       dotfiles path                  print the path of dotfiles.conf
+
+dotfiles.conf lives in the repository root. `apply` renders templates/* into
+~/.config/dotfiles/, which the configs of i3, polybar, rofi, dunst, alacritty, tmux,
+neovim, neomutt, GTK and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
+"""
+import colorsys
+import glob
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+CONF = os.environ.get("DOTFILES_CONF") or os.path.join(REPO, "dotfiles.conf")
+TEMPLATES = os.path.join(REPO, "templates")
+HOME = os.path.expanduser("~")
+XDG_CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+OUT = os.path.join(XDG_CONFIG, "dotfiles")
+
+# gruvbox: (normal, bright). The normal colors are ANSI 1..6 of the terminal palette.
+GRUVBOX = {
+    "red": ("#cc241d", "#fb4934"),
+    "green": ("#98971a", "#b8bb26"),
+    "yellow": ("#d79921", "#fabd2f"),
+    "blue": ("#458588", "#83a598"),
+    "purple": ("#b16286", "#d3869b"),
+    "aqua": ("#689d6a", "#8ec07c"),
+    "orange": ("#d65d0e", "#fe8019"),
+}
+ANSI = ["red", "green", "yellow", "blue", "purple", "aqua"]  # index + 1 = ANSI color number
+TERMINALS = ["alacritty", "kitty", "wezterm", "xterm", "urxvt", "st"]
+
+# key: (type, default, min, max). Values end up in config files that can run commands
+# (i3 exec, polybar actions, tmux, shell), so every type has a strict pattern.
+SCHEMA = {
+    "accent": ("accent", "red"),
+    "accent_text": ("color?", ""),
+    "bg": ("color", "#191c1c"),
+    "surface": ("color", "#252a2a"),
+    "overlay": ("color", "#313838"),
+    "fg": ("color", "#ebdbb2"),
+    "subtle": ("color", "#a89984"),
+    "muted": ("color", "#7c6f64"),
+    "font": ("font", "JetBrainsMono Nerd Font"),
+    "font_size_terminal": ("int", "15", 6, 48),
+    "font_size_bar": ("int", "14", 6, 48),
+    "font_size_menu": ("int", "13", 6, 48),
+    "font_size_notify": ("int", "10", 6, 48),
+    "font_size_window": ("int", "10", 6, 48),
+    "bar_height": ("int", "40", 16, 120),
+    "border_width": ("int", "2", 0, 20),
+    "gaps": ("int", "0", 0, 100),
+    "terminal_opacity": ("float", "0.90", 0.1, 1.0),
+    "terminal_padding_x": ("int", "14", 0, 100),
+    "terminal_padding_y": ("int", "10", 0, 100),
+    "terminal": ("choice", "alacritty", TERMINALS),
+    "keyboard_layout": ("xkb", "de"),
+    "wallpaper": ("path", "~/images/wallpaper"),
+    "screensaver_after": ("int", "60", 10, 86400),
+    "lock_after": ("int", "300", 0, 86400),
+    "display_off_after": ("int", "300", 0, 86400),
+}
+
+PATTERNS = {
+    "color": r"#[0-9a-fA-F]{6}",
+    "font": r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}",
+    "xkb": r"[a-z]{2,3}(\([a-z0-9_]+\))?(,[a-z]{2,3}(\([a-z0-9_]+\))?){0,3}",
+    "path": r"~?[A-Za-z0-9/._ +-]{1,255}",
+}
+
+
+class ConfError(Exception):
+    pass
+
+
+# ── parsing and validation ─────────────────────────────────────────────────────
+
+def parse(path):
+    raw, errors = {}, []
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except OSError as e:
+        raise ConfError("cannot read %s: %s" % (path, e.strerror))
+    for n, line in enumerate(lines, 1):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if "=" not in s:
+            errors.append("line %d: expected 'key = value'" % n)
+            continue
+        k, v = (x.strip() for x in s.split("=", 1))
+        if k not in SCHEMA:
+            errors.append("line %d: unknown key '%s'" % (n, k))
+        elif k in raw:
+            errors.append("line %d: '%s' is set twice" % (n, k))
+        else:
+            raw[k] = (v, n)
+    values = {}
+    for k, spec in SCHEMA.items():
+        v, n = raw.get(k, (spec[1], 0))
+        where = "line %d" % n if n else "default"
+        try:
+            values[k] = check(k, v, spec)
+        except ValueError as e:
+            errors.append("%s: %s: %s" % (where, k, e))
+    if errors:
+        raise ConfError("\n".join(errors))
+    return values
+
+
+def check(key, v, spec):
+    typ = spec[0]
+    if typ == "accent":
+        if v.lower() in GRUVBOX:
+            return v.lower()
+        typ = "color"
+    if typ == "color?":
+        if v == "":
+            return ""
+        typ = "color"
+    if typ == "int":
+        if not re.fullmatch(r"[0-9]{1,6}", v) or not spec[2] <= int(v) <= spec[3]:
+            raise ValueError("'%s' is not a number from %d to %d" % (v, spec[2], spec[3]))
+        return str(int(v))
+    if typ == "float":
+        try:
+            f = float(v) if re.fullmatch(r"[0-9]*\.?[0-9]+", v) else None
+        except ValueError:
+            f = None
+        if f is None or not spec[2] <= f <= spec[3]:
+            raise ValueError("'%s' is not a number from %g to %g" % (v, spec[2], spec[3]))
+        return "%.2f" % f
+    if typ == "choice":
+        if v not in spec[2]:
+            raise ValueError("'%s' is not one of: %s" % (v, ", ".join(spec[2])))
+        return v
+    if not re.fullmatch(PATTERNS[typ], v):
+        hint = {"color": "#rrggbb", "accent": "a gruvbox name or #rrggbb", "font": "letters, digits, space . _ -",
+                "xkb": "e.g. de, us, de(nodeadkeys), us,de", "path": "letters, digits, space / . _ + -"}
+        raise ValueError("'%s' is invalid (expected %s)" % (v, hint.get(typ, typ)))
+    return v.lower() if typ == "color" else v
+
+
+# ── derived values ─────────────────────────────────────────────────────────────
+
+def rgb(h):
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+
+def hexc(r, g, b):
+    return "#%02x%02x%02x" % tuple(max(0, min(255, round(c * 255))) for c in (r, g, b))
+
+
+def luminance(h):
+    def lin(c):
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(c) for c in rgb(h))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a, b):
+    la, lb = sorted((luminance(a), luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def brighten(h, bg):
+    """Lighter, more saturated shade (like gruvbox normal -> bright), readable on bg."""
+    hh, ll, ss = colorsys.rgb_to_hls(*rgb(h))
+    ll, ss = min(0.75, ll + 0.13), min(1.0, ss + 0.15)
+    out = hexc(*colorsys.hls_to_rgb(hh, ll, ss))
+    while contrast(out, bg) < 4.5 and ll < 0.85:
+        ll += 0.03
+        out = hexc(*colorsys.hls_to_rgb(hh, ll, ss))
+    return out
+
+
+def nearest_ansi(h):
+    def dist(a, b):
+        return sum((x - y) ** 2 for x, y in zip(rgb(a), rgb(b)))
+    return min(range(len(ANSI)), key=lambda i: dist(h, GRUVBOX[ANSI[i]][0])) + 1
+
+
+def resolve(c):
+    v = dict(c)
+    if c["accent"] in GRUVBOX:
+        v["accent"], bright = GRUVBOX[c["accent"]]
+    else:
+        bright = brighten(c["accent"], c["bg"])
+    v["accent_text"] = c["accent_text"] or bright
+    # dark text on the accent (like the red workspace block), unless the accent is too dark for it
+    v["on_accent"] = c["bg"] if contrast(v["accent"], c["bg"]) >= 2.5 else c["fg"]
+    v["accent_ansi"] = str(nearest_ansi(v["accent"]))
+    v["accent_ansi_bright"] = str(nearest_ansi(v["accent"]) + 8)
+    for name, (normal, br) in GRUVBOX.items():
+        v[name] = normal
+        v[name + "_hi"] = br
+    v["gray"] = "#928374"
+    v["black"] = "#2a3030"
+    v["bright"] = "#fbf1c7"
+    # polybar: the second font is the smaller one (music title); the offset centers the glyphs
+    small = round(int(c["font_size_bar"]) * 0.8)
+    v["font_size_bar_small"] = str(small)
+    v["bar_font_offset"] = str(round(int(c["font_size_bar"]) * 0.3))
+    v["bar_font_offset_small"] = str(round(small * 0.3))
+    # notifications sit 12 px below the bar and 12 px from the right edge
+    v["notify_offset_y"] = str(int(c["bar_height"]) + 12)
+    # xset s <saver> <cycle>: xss-lock starts the saver after <saver> s and locks after <cycle> more
+    lock, saver = int(c["lock_after"]), int(c["screensaver_after"])
+    v["lock_cycle"] = str(max(lock - saver, 1)) if lock else "0"
+    wp = os.path.expanduser(c["wallpaper"])
+    v["wallpaper"] = wp
+    v["wallpaper_sh"] = shlex.quote(wp)
+    return v
+
+
+def load():
+    return resolve(parse(CONF))
+
+
+# ── output ─────────────────────────────────────────────────────────────────────
+
+def render(text, v, name):
+    def sub(m):
+        if m.group(1) not in v:
+            raise ConfError("%s: unknown placeholder {{%s}}" % (name, m.group(1)))
+        return v[m.group(1)]
+    return re.sub(r"\{\{\s*([a-z0-9_]+)\s*\}\}", sub, text)
+
+
+def theme_sh(v):
+    out = ["# Generated by `dotfiles apply` from dotfiles.conf. Do not edit: changes are overwritten.",
+           "# shellcheck shell=bash"]
+    for k in sorted(v):
+        out.append("DF_%s=%s" % (k.upper(), shlex.quote(v[k])))
+    return "\n".join(out) + "\n"
+
+
+def write(path, content):
+    """Write only when the content changed (atomic). Returns True if the file changed."""
+    try:
+        if open(path, encoding="utf-8").read() == content:
+            return False
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, path)
+    return True
+
+
+def symlink(target, link):
+    """Point `link` at `target`; an existing real file is left alone (reported)."""
+    if os.path.islink(link):
+        if os.readlink(link) == target:
+            return None
+        os.unlink(link)
+    elif os.path.exists(link):
+        return "skipped %s (a real file is in the way)" % link
+    os.makedirs(os.path.dirname(link), exist_ok=True)
+    os.symlink(target, link)
+    return "linked  %s" % link
+
+
+def firefox_profiles():
+    """Profiles whose chrome/userChrome.css is linked to this repository."""
+    found = []
+    for base in (os.path.join(HOME, ".mozilla", "firefox"), os.path.join(XDG_CONFIG, "mozilla", "firefox")):
+        for chrome in glob.glob(os.path.join(base, "*", "chrome")):
+            uc = os.path.join(chrome, "userChrome.css")
+            if os.path.realpath(uc).startswith(os.path.join(REPO, "firefox") + os.sep):
+                found.append(chrome)
+    return found
+
+
+def generate(v):
+    changed, notes = set(), []
+    if write(os.path.join(OUT, "theme.sh"), theme_sh(v)):
+        changed.add("theme.sh")
+    for path in sorted(glob.glob(os.path.join(TEMPLATES, "*"))):
+        name = os.path.basename(path)
+        text = render(open(path, encoding="utf-8").read(), v, "templates/" + name)
+        if write(os.path.join(OUT, name), text):
+            changed.add(name)
+    # dunst reads drop-ins only from its own directory, so this is a file there and not a
+    # link. (Setups from before install.sh linked file by file have ~/.config/dunst linked to
+    # the repository's config/dunst; the file then lands there, gitignored. Its content
+    # depends only on dotfiles.conf, never on $HOME.)
+    dunst_dir = os.path.join(XDG_CONFIG, "dunst")
+    if os.path.isdir(dunst_dir):
+        dropin = os.path.join(dunst_dir, "dunstrc.d", "50-dotfiles.conf")
+        if os.path.islink(dropin):
+            os.unlink(dropin)
+        if write(dropin, open(os.path.join(OUT, "dunst.conf"), encoding="utf-8").read()):
+            changed.add("dunst.conf")
+    # Firefox resolves @import "dotfiles.css" relative to the profile's chrome directory
+    for chrome in firefox_profiles():
+        n = symlink(os.path.join(OUT, "firefox.css"), os.path.join(chrome, "dotfiles.css"))
+        if n:
+            notes.append(n)
+    return changed, notes
+
+
+# ── reload ─────────────────────────────────────────────────────────────────────
+
+def old_values():
+    vals = {}
+    try:
+        for line in open(os.path.join(OUT, "theme.sh"), encoding="utf-8"):
+            m = re.match(r"DF_([A-Z0-9_]+)=(.*)$", line.rstrip("\n"))
+            if m:
+                vals[m.group(1).lower()] = (shlex.split(m.group(2)) or [""])[0]
+    except OSError:
+        pass
+    return vals
+
+
+def run(cmd, **kw):
+    try:
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10, **kw).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def running(name):
+    return run(["pgrep", "-u", str(os.getuid()), "-x", name])
+
+
+def reload(changed, old, v):
+    done = []
+    x11 = bool(os.environ.get("DISPLAY"))
+    if "i3.conf" in changed and running("i3") and run(["i3-msg", "reload"]):
+        done.append("i3")
+    if x11 and any(old.get(k) != v[k] for k in ("screensaver_after", "lock_after", "display_off_after")):
+        run(["xset", "s", "noblank"])
+        run(["xset", "s", v["screensaver_after"], v["lock_cycle"]])
+        run(["xset", "dpms", "0", "0", v["display_off_after"]])
+        done.append("idle times")
+    if x11 and old.get("keyboard_layout") not in (None, v["keyboard_layout"]):
+        layouts, variants = [], []
+        for part in v["keyboard_layout"].split(","):
+            m = re.fullmatch(r"([a-z]+)(?:\(([a-z0-9_]+)\))?", part)
+            layouts.append(m.group(1))
+            variants.append(m.group(2) or "")
+        cmd = ["setxkbmap", ",".join(layouts)] + (["-variant", ",".join(variants)] if any(variants) else [])
+        if run(cmd):
+            done.append("keyboard")
+    if x11 and old.get("wallpaper") not in (None, v["wallpaper"]) and os.path.exists(v["wallpaper"]):
+        if run(["feh", "--no-fehbg", "--bg-fill", v["wallpaper"]]):
+            done.append("wallpaper")
+    if "polybar.ini" in changed and running("polybar"):
+        launch = os.path.join(XDG_CONFIG, "polybar", "launch.sh")
+        if run([launch]):
+            done.append("polybar")
+    if "dunst.conf" in changed and running("dunst") and run(["dunstctl", "reload"]):
+        done.append("dunst")
+    if "tmux.conf" in changed and shutil.which("tmux") and run(["tmux", "info"]):
+        if run(["tmux", "source-file", os.path.join(XDG_CONFIG, "tmux", "tmux.conf")]):
+            done.append("tmux")
+    return done
+
+
+def apply(no_reload):
+    old = old_values()
+    v = load()
+    changed, notes = generate(v)
+    for n in notes:
+        print(n)
+    if not changed:
+        print("dotfiles: nothing changed")
+        return 0
+    print("dotfiles: wrote %s" % ", ".join(sorted(changed)))
+    if no_reload:
+        return 0
+    done = reload(changed, old, v)
+    if done:
+        print("dotfiles: reloaded %s" % ", ".join(done))
+    later = [n for f, n in (("alacritty.toml", "alacritty (reloads itself)"), ("rofi.rasi", "rofi (next start)"),
+                            ("nvim.lua", "neovim (next start)"), ("gtk.css", "GTK programs (next start)"),
+                            ("firefox.css", "firefox (restart)"),
+                            ("theme.sh", "shells and lock screen (next start)")) if f in changed]
+    if later:
+        print("dotfiles: picked up by %s" % ", ".join(later))
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "help"
+    try:
+        if cmd == "apply":
+            return apply("--no-reload" in argv[2:])
+        if cmd == "check":
+            load()
+            print("dotfiles: %s is valid" % CONF)
+            return 0
+        if cmd == "get" and len(argv) == 3:
+            v = load()
+            if argv[2] not in v:
+                print("dotfiles: unknown key '%s'" % argv[2], file=sys.stderr)
+                return 1
+            print(v[argv[2]])
+            return 0
+        if cmd == "list":
+            for k, val in sorted(load().items()):
+                print("%-22s %s" % (k, val))
+            return 0
+        if cmd == "path":
+            print(CONF)
+            return 0
+        if cmd == "edit":
+            editor = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nvim")
+            subprocess.call(editor + [CONF])
+            return apply(False)
+    except ConfError as e:
+        print("dotfiles: %s:\n%s" % (CONF, "\n".join("  " + l for l in str(e).splitlines())), file=sys.stderr)
+        return 1
+    print(__doc__.strip())
+    return 0 if cmd in ("help", "-h", "--help") else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
