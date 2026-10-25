@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=WiFi Network
+Comment=Connect to WiFi networks
+Exec=/home/floppyist/.local/bin/polybar-wlan.sh
+Terminal=false
+Type=Application
+StartupNotify=false
+GenericName=Settings

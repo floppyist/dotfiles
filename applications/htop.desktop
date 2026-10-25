@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=htop
+Exec=alacritty --class htop-float -e htop
+Categories=Utility;
+GenericName=Sysmon

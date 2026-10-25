@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Aseprite
+Exec="/home/floppyist/workspace/aseprite/build/bin/aseprite"
+Path=/home/floppyist/workspace/aseprite/build/bin/
+Terminal=false
+Type=Application
+Categories=Productivity
+GenericName=Pixelart

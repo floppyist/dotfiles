@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Bluetooth
+Comment=Connect to Bluetooth devices
+Exec=/home/floppyist/.local/bin/polybar-bluetooth.sh
+Terminal=false
+Type=Application
+StartupNotify=false
+GenericName=Settings

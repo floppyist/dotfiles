@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Command & Conquer Generals
+Exec=wine "/home/floppyist/games/Command and Conquer Generals/generals.exe"
+Path=/home/floppyist/games/Command and Conquer Generals
+Terminal=false
+Type=Application
+Categories=Game;
+GenericName=Game

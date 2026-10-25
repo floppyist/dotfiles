@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=mutt
+Exec=alacritty -e neomutt
+Categories=Utility;
+GenericName=E-Mail Client

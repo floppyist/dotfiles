@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=calculus
+Exec=alacritty -e calculus
+Categories=Utility;
+GenericName=Scientific Calculator
