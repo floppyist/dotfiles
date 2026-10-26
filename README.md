@@ -24,7 +24,7 @@ JetBrainsMono Nerd Font everywhere, red (`#cc241d`) as the single accent.
 
 - **Settings:** one file, [`dotfiles.conf`](dotfiles.conf): accent color, palette, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings))
 - **Window Manager:** `i3wm` (with `picom`)
-- **Terminal:** `Alacritty`; shell: `bash` with a two-line git prompt and vi mode (readline's own plus vim text objects like `ciw`, `di"`, `ya(`; the prompt shows the mode); `fzf` in the same style
+- **Terminal:** `Alacritty`; shell: `bash` with a two-line prompt in the polybar style (directory block; git, exit code/signal, jobs and duration capsules) and vi mode (readline's own plus vim text objects like `ciw`, `di"`, `ya(`; the prompt shows the mode); `fzf` in the same style
 - **Editor:** `Neovim` (LazyVim distribution, gruvbox; sharp frames, rofi-style Telescope, mode blocks in the statusline)
 - **Multiplexer:** `tmux` (prefix `Ctrl+a`; status line like Polybar)
 - **Status Bar:** `Polybar` (grouped modules; WiFi/IP/Bluetooth with click menus, CPU/memory turn red under load, music, tray). Event-driven: updates arrive the moment something changes, nothing polls in the background (see below)
@@ -68,12 +68,12 @@ the clock for the date.
 Terminal tools started from Rofi (audio, calculus, htop, mutt, notice) open as a centered floating window
 (`terminal.sh --float`, using the terminal from `dotfiles.conf`).
 
-Shell (vim mode): `Esc` switches to normal mode (block cursor, `❮`), `i`/`a` back to insert mode (bar cursor, `❯`).
+Shell (vim mode): `Esc` switches to normal mode (block cursor, `▌` yellow), `i`/`a` back to insert mode (bar cursor, `▌` accent).
 In normal mode the readline vi commands work (motions, `c`/`d`/`y`, counts, `p`, `u`, `.`) plus the text
 objects `iw aw iW aW i" a" i' a'` `` i` a` `` `i( a( i[ a[ i{ a{ i< a<` (also `ib`, `iB`) after `c`, `d` or `y`.
 `v` opens the line in Neovim (`$VISUAL`, visual mode and everything else), it runs when you save and quit.
 `Up`/`Down` search the history for lines starting with what is typed; `Ctrl+r` (history), `Ctrl+t` (files)
-and `Alt+c` (cd) use fzf. They open it in place of the prompt's second line (`╰─ history ❯`), and fzf looks like
+and `Alt+c` (cd) use fzf. They open it in place of the prompt's second line (`▌ history`), and fzf looks like
 Rofi everywhere (input line on top, accent bar on the selected row, colors from `dotfiles.conf`).
 All of it is readline itself (`~/.inputrc`, `config/bash/vim.bash`): nothing runs
 while you type, a new shell starts in about 20 ms.
@@ -211,7 +211,7 @@ locations (or put your own launchers there) and run `./install.sh` again.
 - The screen is locked before suspend (`xss-lock --transfer-sleep-lock`), so no content is visible on resume. If `i3lock-color` fails, plain `i3lock` is used; if that fails too, a critical notification says that the screen is **not** locked.
 - Text that other people control (song titles from websites, WiFi names, Bluetooth device names) is sanitized before it reaches Polybar, which would otherwise interpret `%{A:…:}` tags as clickable shell commands.
 - System menus never act on typed text that matches no entry (`rofi -no-custom`), so a typo cannot select a random network or display mode.
-- The git prompt runs `git status` with `core.fsmonitor=false`, so a repository's own config cannot start a program when you `cd` into it.
+- The git prompt runs `git status` with `core.fsmonitor=false`, so a repository's own config cannot start a program when you `cd` into it. Control characters in directory names are replaced in the prompt (no escape sequences from a crafted directory name).
 - Runtime files (mpv IPC socket, screensaver log/lock) live in private directories, not under predictable names in `/tmp`.
 - `dotfiles.conf` values end up in configs that can run commands (i3, Polybar, tmux, shell), so `dotfiles apply` only accepts strict patterns (colors `#rrggbb`, numbers in a range, fonts and paths without quotes or shell characters).
 - A command typed with a leading space is not saved in the bash history.
@@ -227,4 +227,4 @@ locations (or put your own launchers there) and run `./install.sh` again.
 ## Optional steps: Enable/Disable vim mode in CLI
 
 - Open `.bashrc`
-- Add/Delete: `set -o vi` (without it bash uses the emacs keys; the prompt then always shows `❯`)
+- Add/Delete: `set -o vi` (without it bash uses the emacs keys; the prompt then always shows the insert-mode bar)
