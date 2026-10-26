@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=VPN
+GenericName=VPN Client
+Exec=vpn
+Terminal=false
+Categories=Settings;
