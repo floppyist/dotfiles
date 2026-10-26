@@ -1,0 +1,816 @@
+#!/usr/bin/env python3
+"""polybar-fit: keep the whole status line on the bar.
+
+Polybar never shrinks modules: when the right block is wider than the free space, it is
+cut off on the right, so the clock disappears first. This daemon runs as an empty polybar
+module, estimates the width of both blocks and hides module groups until everything fits:
+
+    1. cpu memory temp        2. pulseaudio backlight        3. music
+
+They come back as soon as there is room again. It also hides the gap in front of an empty
+capsule (tray without icons, no battery, all modules of a capsule hidden), so no double
+gaps appear, and switches the clock between the short and the long date on click (the
+long form is reserved before it is shown, so it never pushes the clock off the bar).
+
+The estimate is exact for this bar: the font is monospaced and every glyph, the Nerd Font
+icons included, advances one cell, so width = cells x cell width; the tray follows
+polybar's own formula. Nothing polls:
+    script modules   polybar-watch --slot NAME and music.sh write their output to the
+                     state directory, watched with inotify
+    workspaces       i3 IPC events (the left block)
+    tray icons       X events on the bar window (the icons are its child windows)
+    clock click      `polybar-fit --toggle-date` writes a request file
+
+Usage:
+    polybar-fit                  the daemon (polybar module: exec = exec polybar-fit, tail = true)
+    polybar-fit --toggle-date    click on the clock
+    polybar-fit --explain [PID]  print the current estimate (for the running bar)
+
+Keep MODULES/GROUPS in sync with ~/.config/polybar/config.ini.
+"""
+import ctypes
+import ctypes.util
+import json
+import locale
+import os
+import re
+import select
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+import unicodedata
+
+# ── layout knowledge (mirrors config.ini) ───────────────────────────────────
+
+# Fixed modules: width in font-0 cells, format padding included. Volume and brightness are
+# often at 100 % ("󰕾  100%" = 7 cells + padding 1 + 1); cpu, memory and temperature are
+# counted with two digits ("  42%", "󱃃 45°C"): a rare 100 % cpu is one cell more, which
+# only eats into the clock's right padding (2 cells), never into the time.
+FIXED = {
+    "pulseaudio": 9, "backlight": 9, "cpu": 8, "memory": 8, "temp": 8,
+    "date": 9,          # "HH:MM" + padding 2 + 2
+}
+# Script modules: (font index of the text, padding cells in font 0). Width from the slot file.
+SLOTS = {
+    "music": (1, 2), "wlan": (0, 2), "ip": (0, 2), "vpn": (0, 2),
+    "bluetooth": (0, 2), "battery": (0, 0),
+}
+TRAY_PADDING_CELLS = 2      # [module/tray] format-padding = 1
+TRAY_SIZE_PCT = 50          # tray-size = 50%
+TRAY_SPACING_PX = 10        # tray-spacing = 10px
+LONG_DATE = "%a %d.%m.%Y  %H:%M"   # [module/date-long] date + time
+I3_PADDING_CELLS = 4        # label-*-padding = 2
+I3_MODE_PREFIX = "󰩨 "        # label-mode
+
+# Hidden in this order until the bar fits
+GROUPS = [("cpu", "memory", "temp"), ("pulseaudio", "backlight"), ("music",)]
+DEFAULT_ORDER = ("fit music gap-tray tray gap-net wlan ip vpn bluetooth gap-audio pulseaudio "
+                 "backlight gap-sys cpu memory temp gap-bat battery gap-date date date-long").split()
+
+BLOCK_GAP_PX = 20           # polybar renderer: space between the left and the right block
+SAFETY_PX = 4
+DPI = 96                    # polybar's default dpi-x
+SLOT_RE = re.compile(r"^[a-z0-9-]{1,32}$")
+TAG_RE = re.compile(r"%\{[^}]*\}")
+
+
+def log(msg):
+    print(f"polybar-fit: {msg}", file=sys.stderr, flush=True)
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+def text_cells(s):
+    """Visible width of polybar text in cells (tags removed, wide characters count 2)."""
+    n = 0
+    for ch in TAG_RE.sub("", s):
+        if unicodedata.combining(ch) or unicodedata.category(ch) in ("Cc", "Cf"):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
+
+
+def theme_values():
+    """DF_* values from the generated theme.sh (KEY='value' lines; never executed)."""
+    path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "dotfiles", "theme.sh")
+    vals = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"^(DF_[A-Z0-9_]+)='?([^']*)'?$", line.strip())
+                if m:
+                    vals[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return vals
+
+
+def font_advance(family):
+    """Advance of "M" in em for the bar font (0.6 for JetBrains Mono), read from the TTF."""
+    try:
+        path = subprocess.run(["fc-match", "-f", "%{file}", family], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+        with open(path, "rb") as f:
+            b = f.read()
+        if b[:4] not in (b"\x00\x01\x00\x00", b"true", b"OTTO"):
+            return 0.6
+        n = struct.unpack(">H", b[4:6])[0]
+        tables = {}
+        for i in range(n):
+            tag, _, off, _ = struct.unpack(">4sIII", b[12 + 16 * i:28 + 16 * i])
+            tables[tag] = off
+        upem = struct.unpack(">H", b[tables[b"head"] + 18:tables[b"head"] + 20])[0]
+        nhm = struct.unpack(">H", b[tables[b"hhea"] + 34:tables[b"hhea"] + 36])[0]
+        glyph = cmap_glyph(b, tables[b"cmap"], ord("M"))
+        if glyph:
+            o = tables[b"hmtx"] + 4 * min(glyph, nhm - 1)
+            adv = struct.unpack(">H", b[o:o + 2])[0]
+            if adv:
+                return adv / upem
+    except (OSError, KeyError, struct.error, subprocess.SubprocessError, ValueError):
+        pass
+    return 0.6
+
+
+def cmap_glyph(b, o, code):
+    """Glyph index of a character (cmap format 12 or 4)."""
+    for i in range(struct.unpack(">H", b[o + 2:o + 4])[0]):
+        _, _, so = struct.unpack(">HHI", b[o + 4 + 8 * i:o + 12 + 8 * i])
+        s = o + so
+        fmt = struct.unpack(">H", b[s:s + 2])[0]
+        if fmt == 12:
+            for g in range(struct.unpack(">I", b[s + 12:s + 16])[0]):
+                a, z, start = struct.unpack(">III", b[s + 16 + 12 * g:s + 28 + 12 * g])
+                if a <= code <= z:
+                    return start + code - a
+        elif fmt == 4:
+            n = struct.unpack(">H", b[s + 6:s + 8])[0] // 2
+            ends, starts = s + 14, s + 16 + 2 * n
+            deltas, offs = starts + 2 * n, starts + 4 * n
+            for k in range(n):
+                end = struct.unpack(">H", b[ends + 2 * k:ends + 2 * k + 2])[0]
+                if code > end:
+                    continue
+                start = struct.unpack(">H", b[starts + 2 * k:starts + 2 * k + 2])[0]
+                if code < start:
+                    break
+                delta = struct.unpack(">h", b[deltas + 2 * k:deltas + 2 * k + 2])[0]
+                ro = struct.unpack(">H", b[offs + 2 * k:offs + 2 * k + 2])[0]
+                if ro == 0:
+                    return (code + delta) & 0xFFFF
+                p = offs + 2 * k + ro + 2 * (code - start)
+                g = struct.unpack(">H", b[p:p + 2])[0]
+                return (g + delta) & 0xFFFF if g else 0
+    return 0
+
+
+def proc_comm(pid):
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def proc_ppid(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def runtime_base():
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    # only a private runtime directory: no fallback to /tmp (other users, symlinks)
+    if not rt or not os.path.isdir(rt):
+        return None
+    st = os.stat(rt)
+    if st.st_uid != os.getuid() or st.st_mode & 0o077:
+        return None
+    return os.path.join(rt, "polybar-fit")
+
+
+def polybar_pid_from_ancestors():
+    pid = os.getppid()
+    for _ in range(6):
+        if pid <= 1:
+            break
+        if proc_comm(pid) == "polybar":
+            return pid
+        pid = proc_ppid(pid)
+    return 0
+
+
+def polybar_action(pid, module, op):
+    try:
+        r = subprocess.run(["polybar-msg", "-p", str(pid), "action", f"#{module}.module_{op}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# ── X11 (ctypes, libX11): bar window, its width and the tray icons ─────────
+
+class XWindowAttributes(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_int), ("y", ctypes.c_int), ("width", ctypes.c_int),
+                ("height", ctypes.c_int), ("border_width", ctypes.c_int), ("depth", ctypes.c_int),
+                ("visual", ctypes.c_void_p), ("root", ctypes.c_ulong), ("class_", ctypes.c_int),
+                ("bit_gravity", ctypes.c_int), ("win_gravity", ctypes.c_int),
+                ("backing_store", ctypes.c_int), ("backing_planes", ctypes.c_ulong),
+                ("backing_pixel", ctypes.c_ulong), ("save_under", ctypes.c_int),
+                ("colormap", ctypes.c_ulong), ("map_installed", ctypes.c_int),
+                ("map_state", ctypes.c_int), ("all_event_masks", ctypes.c_long),
+                ("your_event_mask", ctypes.c_long), ("do_not_propagate_mask", ctypes.c_long),
+                ("override_redirect", ctypes.c_int), ("screen", ctypes.c_void_p)]
+
+
+IS_VIEWABLE = 2
+SUBSTRUCTURE_NOTIFY = 1 << 19
+STRUCTURE_NOTIFY = 1 << 17
+CONFIGURE_NOTIFY = 22
+
+
+class X:
+    def __init__(self):
+        lib = ctypes.util.find_library("X11") or "libX11.so.6"
+        x = self.x = ctypes.CDLL(lib)
+        x.XOpenDisplay.restype = ctypes.c_void_p
+        x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x.XDefaultRootWindow.restype = ctypes.c_ulong
+        x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x.XInternAtom.restype = ctypes.c_ulong
+        x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x.XQueryTree.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
+                                 ctypes.POINTER(ctypes.c_ulong),
+                                 ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+                                 ctypes.POINTER(ctypes.c_uint)]
+        x.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+                                         ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+                                         ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+                                         ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                                         ctypes.POINTER(ctypes.c_void_p)]
+        x.XGetWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                           ctypes.POINTER(XWindowAttributes)]
+        x.XSelectInput.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_long]
+        x.XConnectionNumber.argtypes = [ctypes.c_void_p]
+        x.XPending.argtypes = [ctypes.c_void_p]
+        x.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        x.XFree.argtypes = [ctypes.c_void_p]
+        x.XFlush.argtypes = [ctypes.c_void_p]
+        # a bar window that vanishes between two calls must not kill the daemon (BadWindow)
+        handler_t = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+        self._handler = handler_t(lambda d, e: 0)
+        x.XSetErrorHandler(self._handler)
+        self.d = x.XOpenDisplay(None)
+        if not self.d:
+            raise OSError("cannot open the X display")
+        self.root = x.XDefaultRootWindow(self.d)
+        self.a_pid = x.XInternAtom(self.d, b"_NET_WM_PID", 0)
+        self.event = ctypes.create_string_buffer(256)   # XEvent is 192 bytes
+        self.bar = 0
+
+    def fileno(self):
+        return self.x.XConnectionNumber(self.d)
+
+    def children(self, w):
+        root, parent = ctypes.c_ulong(), ctypes.c_ulong()
+        ch, n = ctypes.POINTER(ctypes.c_ulong)(), ctypes.c_uint()
+        if not self.x.XQueryTree(self.d, w, ctypes.byref(root), ctypes.byref(parent),
+                                 ctypes.byref(ch), ctypes.byref(n)):
+            return []
+        out = [ch[i] for i in range(n.value)]
+        if ch:
+            self.x.XFree(ch)
+        return out
+
+    def wm_pid(self, w):
+        typ, fmt, n, after = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong()
+        data = ctypes.c_void_p()
+        if self.x.XGetWindowProperty(self.d, w, self.a_pid, 0, 1, 0, 0, ctypes.byref(typ),
+                                     ctypes.byref(fmt), ctypes.byref(n), ctypes.byref(after),
+                                     ctypes.byref(data)) != 0 or not data.value:
+            return 0
+        pid = ctypes.cast(data, ctypes.POINTER(ctypes.c_long))[0] if n.value and fmt.value == 32 else 0
+        self.x.XFree(data)
+        return pid
+
+    def attrs(self, w):
+        a = XWindowAttributes()
+        if not self.x.XGetWindowAttributes(self.d, w, ctypes.byref(a)):
+            return None
+        return a
+
+    def find_bar(self, pid):
+        """The bar window of polybar `pid` (i3 reparents docks into frames: search 3 levels)."""
+        level = [self.root]
+        for _ in range(3):
+            nxt = []
+            for w in level:
+                for c in self.children(w):
+                    if self.wm_pid(c) == pid:
+                        a = self.attrs(c)
+                        if a and a.width > 100:
+                            self.bar = c
+                            # tray icons are children of the bar window; its own size changes too
+                            self.x.XSelectInput(self.d, c, SUBSTRUCTURE_NOTIFY | STRUCTURE_NOTIFY)
+                            self.x.XFlush(self.d)
+                            return True
+                    nxt.append(c)
+            level = nxt
+        return False
+
+    def bar_width(self):
+        a = self.attrs(self.bar) if self.bar else None
+        return a.width if a else 0
+
+    def tray_icons(self):
+        n = 0
+        for c in self.children(self.bar) if self.bar else []:
+            a = self.attrs(c)
+            if a and a.map_state == IS_VIEWABLE:
+                n += 1
+        return n
+
+    def drain(self):
+        """Read pending events; True if any arrived."""
+        got = False
+        while self.x.XPending(self.d):
+            self.x.XNextEvent(self.d, self.event)
+            got = True
+        return got
+
+
+# ── i3 IPC ───────────────────────────────────────────────────────────────────
+
+I3_MAGIC = b"i3-ipc"
+I3_GET_WORKSPACES, I3_SUBSCRIBE = 1, 2
+
+
+class I3:
+    def __init__(self):
+        path = os.environ.get("I3SOCK") or subprocess.run(
+            ["i3", "--get-socketpath"], capture_output=True, text=True, timeout=5).stdout.strip()
+        self.path = path
+        self.cmd = self._connect()
+        self.events = self._connect()
+        self._send(self.events, I3_SUBSCRIBE, json.dumps(["workspace", "mode", "output"]))
+        self._recv(self.events)
+        self.mode = ""
+
+    def _connect(self):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(self.path)
+        return s
+
+    @staticmethod
+    def _send(s, typ, payload):
+        data = payload.encode()
+        s.sendall(I3_MAGIC + struct.pack("<II", len(data), typ) + data)
+
+    @staticmethod
+    def _recv_exact(s, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = s.recv(n - len(buf))
+            if not chunk:
+                raise ConnectionError("i3 closed the connection")
+            buf += chunk
+        return buf
+
+    def _recv(self, s):
+        head = self._recv_exact(s, 14)
+        if head[:6] != I3_MAGIC:
+            raise ConnectionError("bad i3 reply")
+        n, typ = struct.unpack("<II", head[6:])
+        if n > 16 * 1024 * 1024:
+            raise ConnectionError("i3 reply too large")
+        return typ, json.loads(self._recv_exact(s, n) or b"null")
+
+    def fileno(self):
+        return self.events.fileno()
+
+    def workspaces(self, output):
+        self._send(self.cmd, I3_GET_WORKSPACES, "")
+        _, ws = self._recv(self.cmd)
+        return [w.get("name", "") for w in ws or [] if not output or w.get("output") == output]
+
+    def read_event(self):
+        """Returns True if the event can change the width of the left block."""
+        typ, ev = self._recv(self.events)
+        kind = typ & 0x7fffffff
+        if kind == 2:                       # mode
+            change = ev.get("change", "") if isinstance(ev, dict) else ""
+            self.mode = "" if change == "default" else str(change)
+            return True
+        if kind == 0 and isinstance(ev, dict) and ev.get("change") in ("focus", "urgent"):
+            return False                    # workspace focus/urgency: same names, same width
+        return True
+
+
+# ── inotify (ctypes, libc) ───────────────────────────────────────────────────
+
+IN_CLOSE_WRITE, IN_MOVED_TO, IN_DELETE = 0x8, 0x80, 0x200
+IN_NONBLOCK, IN_CLOEXEC = 0o4000, 0o2000000
+
+
+class Inotify:
+    def __init__(self, path):
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+        self.fd = libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1")
+        if libc.inotify_add_watch(self.fd, path.encode(), IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE) < 0:
+            raise OSError(ctypes.get_errno(), "inotify_add_watch")
+
+    def fileno(self):
+        return self.fd
+
+    def drain(self):
+        try:
+            while os.read(self.fd, 65536):
+                pass
+        except BlockingIOError:
+            pass
+
+
+# ── the estimate ─────────────────────────────────────────────────────────────
+
+class Layout:
+    def __init__(self, order):
+        df = theme_values()
+        size0 = int(df.get("DF_FONT_SIZE_BAR", "14") or 14)
+        size1 = int(df.get("DF_FONT_SIZE_BAR_SMALL", "11") or 11)
+        adv = font_advance(df.get("DF_FONT", "JetBrainsMono Nerd Font"))
+        # cairo hints the advance to whole pixels (measured: 14 pt -> 11 px, 11 pt -> 9 px)
+        self.cell = [round(size0 * DPI / 72 * adv), round(size1 * DPI / 72 * adv)]
+        height = int(df.get("DF_BAR_HEIGHT", "40") or 40)
+        self.tray_size = round(height * TRAY_SIZE_PCT / 100)
+        self.order = order
+        # capsules: (gap module in front or None, [modules]); "fit" is invisible
+        self.capsules = []
+        gap, mods = None, []
+        for m in order:
+            if m == "fit":
+                continue
+            if m.startswith("gap"):
+                if gap or mods:
+                    self.capsules.append((gap, mods))
+                gap, mods = m, []
+            else:
+                mods.append(m)
+        if gap or mods:
+            self.capsules.append((gap, mods))
+        present = set(order)
+        self.groups = [tuple(m for m in g if m in present) for g in GROUPS]
+        self.groups = [g for g in self.groups if g]
+        try:
+            locale.setlocale(locale.LC_TIME, "")
+        except locale.Error:
+            pass
+
+    def module_px(self, m, data):
+        c0, c1 = self.cell
+        if m == "date-long":
+            return (text_cells(time.strftime(LONG_DATE)) + 4) * c0
+        if m in FIXED:
+            return FIXED[m] * c0
+        if m == "tray":
+            n = data["tray"]
+            if n <= 0:
+                return 0
+            return n * self.tray_size + (n - 1) * TRAY_SPACING_PX + TRAY_PADDING_CELLS * c0
+        if m in SLOTS:
+            text = data["slots"].get(m, "")
+            if not text.strip():
+                return 0
+            font, pad = SLOTS[m]
+            return text_cells(text) * self.cell[font] + pad * c0
+        text = data["slots"].get(m)
+        if text is not None:            # unknown script module with a slot: padding 1 + 1
+            return (text_cells(text) + 2) * c0 if text.strip() else 0
+        return 10 * c0                  # unknown module: a guess
+
+    def left_px(self, data):
+        cells = sum(text_cells(n) + I3_PADDING_CELLS for n in data["workspaces"])
+        if data["mode"]:
+            cells += text_cells(I3_MODE_PREFIX + data["mode"]) + I3_PADDING_CELLS
+        return cells * self.cell[0]
+
+    def right(self, data, hidden):
+        """Width of the right block and the gaps to hide, for a set of hidden modules."""
+        px, gaps_hidden, before = 0, set(), False
+        for gap, mods in self.capsules:
+            content = sum(self.module_px(m, data) for m in mods if m not in hidden)
+            if gap:
+                if content > 0 and before:
+                    px += self.cell[0]
+                else:
+                    gaps_hidden.add(gap)
+            px += content
+            before = before or content > 0
+        return px, gaps_hidden
+
+    def plan(self, data, long_date):
+        """The set of modules to hide, and the numbers behind it."""
+        base = {"date"} if long_date else {"date-long"}
+        left = self.left_px(data)
+        free = data["width"] - left - (BLOCK_GAP_PX if left else 0) - SAFETY_PX
+        level, hidden = 0, set(base)
+        for level in range(len(self.groups) + 1):
+            hidden = set(base).union(*self.groups[:level])
+            width, gaps = self.right(data, hidden)
+            if width <= free:
+                break
+        hidden |= gaps
+        return hidden, {"left": left, "right": width, "free": free, "level": level}
+
+    def managed(self):
+        mods = {m for g in self.groups for m in g} | {g for g, _ in self.capsules if g}
+        return mods | ({"date", "date-long"} & set(self.order))
+
+
+# ── daemon ───────────────────────────────────────────────────────────────────
+
+def read_slots(statedir):
+    slots = {}
+    try:
+        names = os.listdir(statedir)
+    except OSError:
+        return slots
+    for name in names:
+        if not SLOT_RE.match(name):
+            continue
+        try:
+            fd = os.open(os.path.join(statedir, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                raw = os.read(fd, 4096)
+            finally:
+                os.close(fd)
+        except OSError:
+            continue
+        slots[name] = raw.decode("utf-8", "replace").split("\n", 1)[0]
+    return slots
+
+
+def bar_args(pid):
+    """polybar's own arguments: config file and bar name (for --dump)."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return [], ""
+    args, name, i = [], "", 1
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-c", "--config") and i + 1 < len(argv):
+            args += ["-c", argv[i + 1]]
+            i += 1
+        elif a.startswith("--config="):
+            args.append(a)
+        elif not a.startswith("-"):
+            name = a
+        i += 1
+    return args, name
+
+
+def module_order(pid):
+    args, name = bar_args(pid)
+    if name:
+        try:
+            out = subprocess.run(["polybar", *args, f"--dump=modules-right", name],
+                                 capture_output=True, text=True, timeout=10).stdout.split()
+            if out:
+                return out
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return DEFAULT_ORDER
+
+
+class Daemon:
+    def __init__(self, pid, statedir):
+        self.pid = pid
+        self.statedir = statedir
+        self.layout = Layout(module_order(pid))
+        self.x = X()
+        self.i3 = None
+        self.output = os.environ.get("MONITOR", "")
+        self.long_date = False
+        self.state = {}          # module -> hidden (what polybar shows), unknown at start
+        self.workspaces = []
+        self.dirty = True
+        self.retry_at = 0.0
+
+    def connect_i3(self):
+        try:
+            self.i3 = I3()
+            self.workspaces = self.i3.workspaces(self.output)
+        except (OSError, ConnectionError, ValueError, subprocess.SubprocessError):
+            self.i3 = None
+
+    def data(self):
+        return {"slots": read_slots(self.statedir), "workspaces": self.workspaces,
+                "mode": self.i3.mode if self.i3 else "", "tray": self.x.tray_icons(),
+                "width": self.x.bar_width()}
+
+    def apply(self):
+        data = self.data()
+        if data["width"] <= 0:
+            return
+        hidden, _ = self.layout.plan(data, self.long_date)
+        changes = []
+        for m in sorted(self.layout.managed()):
+            want = m in hidden
+            if self.state.get(m) != want:
+                changes.append((m, want))
+        # hide first, then show: the bar never gets wider than the plan in between
+        changes.sort(key=lambda c: not c[1])
+        for m, want in changes:
+            if polybar_action(self.pid, m, "hide" if want else "show"):
+                self.state[m] = want
+            else:
+                self.retry_at = time.monotonic() + 1.0     # polybar IPC not ready yet
+                return
+
+    def handle_requests(self):
+        req = os.path.join(self.statedir, "toggle-date")
+        if os.path.lexists(req):
+            try:
+                os.unlink(req)
+            except OSError:
+                pass
+            self.long_date = not self.long_date
+
+    def run(self):
+        for _ in range(40):                 # the bar window appears right after start
+            if self.x.find_bar(self.pid):
+                break
+            time.sleep(0.25)
+        else:
+            log("bar window not found")
+            return
+        self.connect_i3()
+        ino = Inotify(self.statedir)
+        i3_retry = 0.0
+        while True:
+            if os.getppid() != self.pid:
+                return
+            now = time.monotonic()
+            if self.i3 is None and now >= i3_retry:
+                self.connect_i3()
+                i3_retry = now + 2.0
+                self.dirty = True
+            if self.dirty or (self.retry_at and now >= self.retry_at):
+                self.dirty, self.retry_at = False, 0.0
+                self.handle_requests()
+                self.apply()
+            waits = [s for s in (ino, self.x, self.i3) if s is not None]
+            timeout = None
+            if self.retry_at:
+                timeout = max(0.0, self.retry_at - time.monotonic())
+            if self.i3 is None:
+                timeout = 2.0 if timeout is None else min(timeout, 2.0)
+            # X events may already sit in Xlib's queue: drain before sleeping
+            if self.x.drain():
+                self.dirty = True
+                continue
+            ready, _, _ = select.select(waits, [], [], timeout)
+            if not ready:
+                continue
+            for src in ready:
+                if src is ino:
+                    ino.drain()
+                    self.dirty = True
+                elif src is self.x:
+                    if self.x.drain():
+                        self.dirty = True
+                elif src is self.i3:
+                    try:
+                        if self.i3.read_event():
+                            self.workspaces = self.i3.workspaces(self.output)
+                            self.dirty = True
+                    except (OSError, ConnectionError, ValueError):
+                        self.i3 = None      # i3 restart: reconnect
+            # coalesce a burst of events (workspace moves, several slots at once)
+            if self.dirty:
+                time.sleep(0.05)
+
+
+def statedir_for(pid, create=False):
+    base = runtime_base()
+    if base is None:
+        return None
+    path = os.path.join(base, str(pid))
+    if create:
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def cleanup_stale(base):
+    try:
+        for name in os.listdir(base):
+            if name.isdigit() and proc_comm(int(name)) != "polybar":
+                shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+    except OSError:
+        pass
+
+
+def main_daemon():
+    pid = os.getppid()
+    if proc_comm(pid) != "polybar":
+        log("must run as a polybar module (exec = exec polybar-fit)")
+        return 1
+    print("", flush=True)          # the module itself shows nothing
+    statedir = statedir_for(pid, create=True)
+    if statedir is None:
+        log("XDG_RUNTIME_DIR missing or not private, overflow handling disabled")
+        signal.pause()
+        return 0
+    cleanup_stale(os.path.dirname(statedir))
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+        libc.prctl(1, signal.SIGTERM)         # PR_SET_PDEATHSIG: leave with the bar
+    except OSError:
+        pass
+
+    def bye(*_):
+        shutil.rmtree(statedir, ignore_errors=True)
+        os._exit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGPIPE):
+        signal.signal(sig, bye)
+    try:
+        Daemon(pid, statedir).run()
+    finally:
+        shutil.rmtree(statedir, ignore_errors=True)
+    return 0
+
+
+def main_toggle_date():
+    pid = polybar_pid_from_ancestors()
+    if not pid:
+        return 1
+    statedir = statedir_for(pid)
+    if statedir and os.path.isdir(statedir):
+        fd = os.open(os.path.join(statedir, "toggle-date"),
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        return 0
+    # no daemon: toggle without the space check
+    polybar_action(pid, "date", "toggle")
+    polybar_action(pid, "date-long", "toggle")
+    return 0
+
+
+def main_explain(arg=""):
+    pids = [int(p) for p in os.listdir("/proc") if p.isdigit() and proc_comm(int(p)) == "polybar"
+            and os.stat(f"/proc/{p}").st_uid == os.getuid()]
+    if arg.isdigit() and int(arg) in pids:
+        pids = [int(arg)]
+    if not pids:
+        print("no polybar running")
+        return 1
+    pid = pids[0]
+    statedir = statedir_for(pid) or ""
+    layout = Layout(module_order(pid))
+    x = X()
+    if not x.find_bar(pid):
+        print("bar window not found")
+        return 1
+    try:
+        env = dict(a.split("=", 1) for a in open(f"/proc/{pid}/environ", "rb").read()
+                   .decode("utf-8", "replace").split("\0") if "=" in a)
+        i3 = I3()
+        ws = i3.workspaces(env.get("MONITOR", ""))
+    except (OSError, ConnectionError, ValueError, subprocess.SubprocessError):
+        ws = []
+    data = {"slots": read_slots(statedir), "workspaces": ws, "mode": "", "tray": x.tray_icons(),
+            "width": x.bar_width()}
+    print(f"bar {data['width']} px, cell {layout.cell[0]}/{layout.cell[1]} px, "
+          f"tray icons {data['tray']}, workspaces {ws}")
+    for long_date in (False, True):
+        hidden, n = layout.plan(data, long_date)
+        print(f"{'long' if long_date else 'short'} date: left {n['left']} + right {n['right']} px "
+              f"(free {n['free']}), level {n['level']}, hidden: {' '.join(sorted(hidden))}")
+    for gap, mods in layout.capsules:
+        print(f"  {gap or '-':10} " + "  ".join(f"{m}={layout.module_px(m, data)}" for m in mods))
+    return 0
+
+
+if __name__ == "__main__":
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg == "--toggle-date":
+        sys.exit(main_toggle_date())
+    if arg == "--explain":
+        sys.exit(main_explain(sys.argv[2] if len(sys.argv) > 2 else ""))
+    if arg in ("-h", "--help"):
+        print(__doc__)
+        sys.exit(0)
+    sys.exit(main_daemon())

@@ -1,0 +1,1010 @@
+#!/usr/bin/env python3
+"""vpn: VPN profiles in NetworkManager, from rofi, polybar or the shell.
+
+Usage:
+    vpn                          menu (rofi): connect/disconnect, add, manage
+    vpn list                     all VPN profiles and their state
+    vpn status                   active VPNs (exit status 1 if none)
+    vpn up [NAME]                connect NAME (default: the last used profile)
+    vpn down [NAME]              disconnect NAME (default: every active VPN)
+    vpn toggle                   disconnect if a VPN is active, else connect the last used
+    vpn import [--dry-run] FILE [NAME]
+                                 add a profile from a config file: WireGuard (.conf, built
+                                 into NetworkManager), OpenVPN (.ovpn) and Cisco (.pcf) with
+                                 the NetworkManager plugin installed
+    vpn fritzbox [--dry-run]     add a FRITZ!Box IPsec profile (FRITZ!OS before 7.50; newer
+                                 boxes export a WireGuard file: use `vpn import`)
+    vpn autoconnect NAME on|off
+    vpn remove NAME
+
+Every profile type NetworkManager knows is listed and switched here (also ones made with
+nm-connection-editor, the eduVPN client, ...): WireGuard, OpenVPN, OpenConnect (AnyConnect,
+GlobalProtect, Fortinet), vpnc, L2TP, strongSwan.
+
+Security:
+  - Profiles are added system-wide: adding, changing and removing ask for your password
+    (polkit). The stored keys and passwords are then only readable by root, so a program
+    running as you cannot read them or quietly point the tunnel somewhere else. Connecting
+    and disconnecting need no password.
+  - Secrets never appear on a command line, in the environment, in a notification or in a
+    log. Everything goes through libnm (D-Bus); WireGuard files are read through a private
+    copy in $XDG_RUNTIME_DIR (removed right after parsing). Passwords are typed into rofi's
+    password field.
+  - Imported files are parsed by libnm / the NetworkManager plugins, not executed:
+    wg-quick hooks (PreUp, PostUp, ...) and OpenVPN scripts never run.
+  - New profiles do not connect on their own (autoconnect off).
+  - Leak protection for tunnels that carry all traffic: the tunnel's DNS servers are used
+    exclusively (dns-priority -50), and for WireGuard IPv6 goes into the tunnel too (::/0),
+    so it cannot bypass it (it is blocked if the server has no IPv6).
+  - Names from files and profiles are shown as plain text (control characters removed;
+    rofi rows are no markup, the -mesg line is escaped).
+"""
+import ipaddress
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+
+try:
+    import gi
+    gi.require_version("NM", "1.0")
+    from gi.repository import GLib, NM
+except (ImportError, ValueError) as err:  # pragma: no cover
+    subprocess.run(["notify-send", "-a", "vpn", "-u", "critical", "VPN tool unavailable",
+                    "Needs python3-gobject and libnm"], check=False)
+    sys.exit(f"vpn: {err} (install python3-gobject and libnm)")
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+ROFI_MENU = os.path.join(HERE, "rofi-menu")
+TERMINAL = os.path.join(HERE, "terminal.sh")
+ROFI_THEME = os.environ.get("ROFI_THEME") or os.path.expanduser("~/.config/rofi/config.rasi")
+
+MAX_FILE = 1024 * 1024
+VPN_TYPES = ("vpn", "wireguard")
+UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+HOST_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$")
+WG_HOOKS = re.compile(r"^\s*(PreUp|PostUp|PreDown|PostDown|SaveConfig)\s*=", re.I | re.M)
+
+S_OPENVPN = "org.freedesktop.NetworkManager.openvpn"
+S_VPNC = "org.freedesktop.NetworkManager.vpnc"
+KINDS = {  # service type suffix -> label, Void package of the plugin
+    "openvpn": ("OpenVPN", "NetworkManager-openvpn"),
+    "vpnc": ("Cisco IPsec", "NetworkManager-vpnc"),
+    "openconnect": ("OpenConnect", "NetworkManager-openconnect"),
+    "strongswan": ("IPsec IKEv2", "NetworkManager-strongswan"),
+    "l2tp": ("L2TP", "NetworkManager-l2tp"),
+    "pptp": ("PPTP", "NetworkManager-pptp"),
+}
+
+ICON_ADD, ICON_FILE, ICON_ROUTER, ICON_COG = "󰐕", "󰈙", "󰑩", "󰒓"
+ICON_DEL, ICON_AUTO, ICON_PATH, ICON_EDIT = "󰆴", "󰑐", "󰉋", "󰏫"
+
+INTERACTIVE = False      # True in the rofi menu: questions go to rofi, not the terminal
+
+
+class Fail(Exception):
+    """An error for the user (shown as a notification / on stderr)."""
+
+
+# ── text and ui ──────────────────────────────────────────────────────────────
+
+def clean(s, n=40):
+    """Plain single-line text: no control/format characters (bidi tricks), at most n chars."""
+    s = "".join(ch for ch in str(s or "") if unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp"))
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def row(s, n=100):
+    """A menu row: like clean(), but the column spacing stays."""
+    s = "".join(ch for ch in str(s) if unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp"))
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def markup(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def notify(summary, body="", critical=False, tag=""):
+    args = ["notify-send", "-a", "vpn"]
+    if critical:
+        args += ["-u", "critical"]
+    if tag:
+        # same tag: "Connected" replaces "Connecting" instead of stacking up
+        args += ["-h", f"string:x-dunst-stack-tag:vpn-{tag}"]
+    subprocess.run(args + ["--", clean(summary, 80), clean(body, 200)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    if not INTERACTIVE:
+        print(f"vpn: {summary}{': ' + body if body else ''}", file=sys.stderr)
+
+
+def menu(prompt, rows, mesg=""):
+    """Index of the chosen row (rofi-menu: -no-custom, validated) or None."""
+    if not INTERACTIVE:
+        raise Fail("this needs the menu (run `vpn` without arguments)")
+    args = [ROFI_MENU, prompt] + ([mesg] if mesg else [])
+    r = subprocess.run(args, input="\n".join(row(x) for x in rows) + "\n",
+                       capture_output=True, text=True, check=False)
+    out = r.stdout.strip()
+    return int(out) if r.returncode == 0 and out.isdigit() and int(out) < len(rows) else None
+
+
+def choose(prompt, rows, mesg=""):
+    """Like menu(), but in the terminal a numbered list."""
+    if INTERACTIVE:
+        return menu(prompt, rows, mesg)
+    if not sys.stdin.isatty():
+        raise Fail(f"{mesg or prompt}: no terminal to ask")
+    print(mesg or prompt)
+    for i, r in enumerate(rows, 1):
+        print(f"  {i}) {clean(r, 90)}")
+    val = input("> ").strip()
+    return int(val) - 1 if val.isdigit() and 0 < int(val) <= len(rows) else None
+
+
+def ask(prompt, mesg, placeholder="", password=False, default=""):
+    """One line of input (rofi entry or the terminal); None when cancelled."""
+    if not INTERACTIVE:
+        if not sys.stdin.isatty():
+            raise Fail(f"{mesg}: no terminal to ask")
+        if password:
+            import getpass
+            return getpass.getpass(f"{mesg}: ")
+        val = input(f"{mesg}{f' [{default}]' if default else ''}: ").strip()
+        return val or default
+    args = ["rofi", "-dmenu", "-p", prompt, "-theme", ROFI_THEME, "-mesg", markup(mesg),
+            "-theme-str", "listview { enabled: false; }"]
+    if placeholder:
+        # placeholder texts are constants of this script, never user input
+        args += ["-theme-str", f'entry {{ placeholder: "{placeholder}"; }}']
+    if password:
+        args.append("-password")
+    if default:
+        args += ["-filter", default]
+    r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        return None
+    return r.stdout.rstrip("\n")
+
+
+def confirm(prompt, mesg, yes):
+    if not INTERACTIVE:
+        return True
+    return menu(prompt, ["Cancel", yes], mesg) == 1
+
+
+# ── NetworkManager ───────────────────────────────────────────────────────────
+
+def client():
+    try:
+        return NM.Client.new(None)
+    except GLib.Error as e:
+        raise Fail(f"NetworkManager is not reachable ({e.message})")
+
+
+def wait_async(start, finish, timeout=120):
+    """Run an async libnm call; returns finish(result) or raises Fail."""
+    loop, out = GLib.MainLoop(), {}
+
+    def done(_src, result, *_):
+        try:
+            out["value"] = finish(result)
+        except GLib.Error as e:
+            out["error"] = e
+        loop.quit()
+
+    def expired():
+        out.setdefault("error", None)
+        loop.quit()
+        return False
+
+    start(done)
+    tid = GLib.timeout_add_seconds(timeout, expired)
+    loop.run()
+    if "value" in out:
+        GLib.source_remove(tid)
+        return out["value"]
+    raise Fail(error_text(out.get("error")))
+
+
+def error_text(e):
+    if e is None:
+        return "timed out"
+    msg = e.message or str(e)
+    if "PermissionDenied" in msg or "nsufficient privileges" in msg or "not authorized" in msg.lower():
+        return "not authorized (password prompt cancelled, or no polkit agent running)"
+    return re.sub(r"^GDBus\.Error:[\w.]+:\s*", "", msg)
+
+
+def kind(conn):
+    if conn.get_connection_type() == "wireguard":
+        return "WireGuard"
+    s = conn.get_setting_vpn()
+    svc = (s.get_service_type() if s else "") or ""
+    return KINDS.get(svc.rsplit(".", 1)[-1], (clean(svc.rsplit(".", 1)[-1], 16) or "VPN",))[0]
+
+
+def profiles(c):
+    return sorted((x for x in c.get_connections() if x.get_connection_type() in VPN_TYPES),
+                  key=lambda x: (x.get_id() or "").lower())
+
+
+def active_vpns(c):
+    return {ac.get_uuid(): ac for ac in c.get_active_connections()
+            if ac.get_connection_type() in VPN_TYPES}
+
+
+def find_profile(c, name):
+    if not name:
+        return None
+    exact = [p for p in profiles(c) if p.get_id() == name or p.get_uuid() == name]
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        raise Fail(f'"{clean(name)}" is ambiguous: use the UUID (vpn list)')
+    folded = [p for p in profiles(c) if (p.get_id() or "").lower() == name.lower()]
+    if len(folded) == 1:
+        return folded[0]
+    raise Fail(f'no VPN profile "{clean(name)}"')
+
+
+def last_used(c):
+    ps = [p for p in profiles(c) if p.get_setting_connection().get_timestamp()]
+    return max(ps, key=lambda p: p.get_setting_connection().get_timestamp()) if ps else None
+
+
+def is_system(conn):
+    return conn.get_setting_connection().get_num_permissions() == 0
+
+
+REASONS = {
+    "no-secrets": "a password or key is missing",
+    "login-failed": "login failed (wrong password?)",
+    "connect-timeout": "the server did not answer",
+    "service-start-timeout": "the VPN service did not start",
+    "service-start-failed": "the VPN service failed (plugin installed?)",
+    "service-stopped": "the VPN service stopped",
+    "ip-config-invalid": "the server sent an invalid IP configuration",
+    "device-disconnected": "the network went away",
+    "user-disconnected": "disconnected",
+}
+
+
+def activate(c, conn, timeout=60):
+    """Connect and wait until the tunnel is up. Returns (ok, reason nick)."""
+    ac = wait_async(lambda cb: c.activate_connection_async(conn, None, None, None, cb),
+                    c.activate_connection_finish, timeout)
+    loop, out = GLib.MainLoop(), {}
+    A = NM.ActiveConnectionState
+
+    def check(_ac=None, state=None, reason=None):
+        st = ac.get_state() if state is None else A(state)
+        if reason is None:
+            reason = ac.get_state_reason()
+        if st == A.ACTIVATED:
+            out["ok"] = True
+        elif st == A.DEACTIVATED or (st == A.DEACTIVATING and state is not None):
+            out["ok"] = False
+            try:
+                out["reason"] = NM.ActiveConnectionStateReason(reason).value_nick
+            except (ValueError, TypeError):
+                out["reason"] = ""
+        if "ok" in out:
+            loop.quit()
+
+    def expired():
+        out.update(ok=False, reason="connect-timeout", expired=True)
+        loop.quit()
+        return False
+
+    hid = ac.connect("state-changed", check)
+    check()
+    if "ok" not in out:
+        tid = GLib.timeout_add_seconds(timeout, expired)
+        loop.run()
+        if not out.get("expired"):
+            GLib.source_remove(tid)
+    try:
+        ac.disconnect(hid)
+    except TypeError:
+        pass
+    return out["ok"], out.get("reason", "")
+
+
+def deactivate(c, ac):
+    wait_async(lambda cb: c.deactivate_connection_async(ac, None, cb), c.deactivate_connection_finish, 30)
+
+
+def add_profile(c, conn):
+    """Add a connection system-wide (polkit asks for the password). Returns the remote one."""
+    settings = conn.to_dbus(NM.ConnectionSerializationFlags.ALL)
+    res = wait_async(lambda cb: c.add_connection2(settings, NM.SettingsAddConnection2Flags.TO_DISK,
+                                                  None, True, None, cb),
+                     c.add_connection2_finish, 180)
+    return res[0] if isinstance(res, tuple) else res
+
+
+def commit(rc):
+    wait_async(lambda cb: rc.commit_changes_async(True, None, cb), rc.commit_changes_finish, 180)
+
+
+def delete(rc):
+    wait_async(lambda cb: rc.delete_async(None, cb), rc.delete_finish, 180)
+
+
+# ── connect / disconnect ─────────────────────────────────────────────────────
+
+def connect(c, conn):
+    name = clean(conn.get_id())
+    # one tunnel at a time: two default routes or two DNS sets would fight each other
+    for uuid, ac in list(active_vpns(c).items()):
+        if uuid != conn.get_uuid():
+            deactivate(c, ac)
+    notify("Connecting", name, tag=conn.get_uuid())
+    ok, reason = activate(c, conn)
+    if ok:
+        notify("Connected", name, tag=conn.get_uuid())
+        return True
+    if reason in ("no-secrets", "login-failed") and INTERACTIVE:
+        # Profiles that ask every time (one-time passwords, ...): nmcli asks in a terminal
+        if menu("vpn", ["Cancel", f"{ICON_EDIT}  Enter the credentials in a terminal"],
+                f"{markup(name)}: {REASONS[reason]}") == 1:
+            terminal_login(conn)
+            return False
+    hint = ""
+    if reason in ("no-secrets", "login-failed") and not INTERACTIVE:
+        hint = f" (enter them: nmcli --ask connection up uuid {conn.get_uuid()})"
+    notify("Connection failed", f"{name}: {REASONS.get(reason, reason or 'unknown reason')}{hint}",
+           critical=True, tag=conn.get_uuid())
+    return False
+
+
+def terminal_login(conn):
+    uuid = conn.get_uuid()
+    if not UUID_RE.match(uuid or ""):
+        return
+    # the UUID travels as a positional parameter, never inside the script text
+    script = ('nmcli --ask connection up uuid "$1" && echo && echo "Connected." '
+              '|| { echo; echo "Connection failed."; }; printf "Press Enter to close."; read -r _')
+    subprocess.Popen([TERMINAL, "--float", "sh", "-c", script, "vpn-login", uuid],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def disconnect(c, ac):
+    name = clean(ac.get_id())
+    deactivate(c, ac)
+    notify("Disconnected", name, tag=ac.get_uuid())
+
+
+# ── import ───────────────────────────────────────────────────────────────────
+
+def read_file(path):
+    """Contents of a regular file of at most 1 MiB (checked on the open file: no races)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError as e:
+        raise Fail(f"cannot open {clean(path, 60)}: {e.strerror}")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Fail(f"{clean(path, 60)} is not a regular file")
+        if st.st_size > MAX_FILE:
+            raise Fail(f"{clean(path, 60)} is too large for a VPN config")
+        chunks, size = [], 0
+        while size <= MAX_FILE:
+            b = os.read(fd, 65536)
+            if not b:
+                break
+            chunks.append(b)
+            size += len(b)
+        if size > MAX_FILE:
+            raise Fail(f"{clean(path, 60)} is too large for a VPN config")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def detect(path, data):
+    ext = os.path.splitext(path)[1].lower()
+    text = data[:65536].decode("utf-8", "replace")
+    if re.search(r"^\s*\[Interface\]", text, re.I | re.M):
+        return "wireguard"
+    if ext == ".ovpn" or re.search(r"^\s*(client|remote\s|dev\s+tun|<ca>)", text, re.M):
+        return S_OPENVPN
+    if ext == ".pcf":
+        return S_VPNC
+    return None
+
+
+def private_dir():
+    """A fresh 0700 directory, on tmpfs when possible (key material must not hit the disk)."""
+    for base in (os.environ.get("XDG_RUNTIME_DIR"), "/dev/shm", None):
+        if base is None or (os.path.isdir(base) and os.access(base, os.W_OK)):
+            try:
+                return tempfile.TemporaryDirectory(prefix="vpn-", dir=base)
+            except OSError:
+                continue
+    raise Fail("no private temporary directory")
+
+
+def iface_name(c, stem):
+    """A free, valid interface name (WireGuard uses the profile's file name as interface)."""
+    base = re.sub(r"[^A-Za-z0-9_-]", "", stem).lstrip("-")[:15] or "wg0"
+    used = {p.get_setting_connection().get_interface_name() for p in c.get_connections()}
+    used |= set(os.listdir("/sys/class/net")) if os.path.isdir("/sys/class/net") else set()
+    name, i = base, 1
+    while name in used or not NM.utils_is_valid_iface_name(name):
+        i += 1
+        name = f"{base[:15 - len(str(i))]}{i}"
+        if i > 99:
+            raise Fail("no free interface name")
+    return name
+
+
+def covers_default(ips, v6):
+    nets = []
+    for ip in ips:
+        try:
+            nets.append(ipaddress.ip_network(ip, strict=False))
+        except ValueError:
+            pass
+    want = 6 if v6 else 4
+    nets = [n for n in nets if n.version == want]
+    if any(n.prefixlen == 0 for n in nets):
+        return True
+    # 0.0.0.0/1 + 128.0.0.0/1 (or ::/1 + 8000::/1): a default route in two halves
+    halves = {str(n) for n in nets if n.prefixlen == 1}
+    return halves >= ({"0.0.0.0/1", "128.0.0.0/1"} if not v6 else {"::/1", "8000::/1"})
+
+
+def harden_wireguard(conn):
+    """Leak protection for full tunnels; returns notes for the user."""
+    notes = []
+    w = conn.get_setting(NM.SettingWireGuard)
+    if not w.get_peer_routes():
+        return notes                      # Table = off: no routes at all, nothing to protect
+    full4 = full6 = False
+    peer4 = None
+    for i in range(w.get_peers_len()):
+        p = w.get_peer(i)
+        ips = [p.get_allowed_ip(k, None) for k in range(p.get_allowed_ips_len())]
+        if covers_default(ips, False):
+            full4, peer4 = True, i if peer4 is None else peer4
+        if covers_default(ips, True):
+            full6 = True
+    if not (full4 or full6):
+        return notes
+    if full4 and not full6:
+        # IPv6 would go around the tunnel: route it in (the server drops it if it has none)
+        p = w.get_peer(peer4).new_clone(True)
+        p.append_allowed_ip("::/0", False)
+        p.seal()
+        w.set_peer(p, peer4)
+        notes.append("IPv6 goes through the tunnel")
+    ip6 = conn.get_setting_ip6_config()
+    if ip6.get_method() in (NM.SETTING_IP6_CONFIG_METHOD_DISABLED, NM.SETTING_IP6_CONFIG_METHOD_IGNORE):
+        ip6.set_property("method", NM.SETTING_IP6_CONFIG_METHOD_LINK_LOCAL)
+    ip4 = conn.get_setting_ip4_config()
+    if ip4.get_num_dns() + ip6.get_num_dns() > 0:
+        ip4.set_property("dns-priority", -50)
+        ip6.set_property("dns-priority", -50)
+        notes.append("only the tunnel's DNS is used")
+    else:
+        notes.append("WARNING: no DNS server in the file, name lookups bypass the tunnel")
+    return notes
+
+
+def protect_dns_vpn(conn):
+    """Plugin VPNs that carry all traffic: use only their DNS servers (fail closed)."""
+    ip4 = conn.get_setting_ip4_config()
+    if ip4 is None:
+        ip4 = NM.SettingIP4Config.new()
+        ip4.set_property("method", NM.SETTING_IP4_CONFIG_METHOD_AUTO)
+        conn.add_setting(ip4)
+    if ip4.get_never_default():
+        return []
+    ip4.set_property("dns-priority", -50)
+    ip6 = conn.get_setting_ip6_config()
+    if ip6 is not None:
+        ip6.set_property("dns-priority", -50)
+    return ["only the tunnel's DNS is used"]
+
+
+def cert_notes(conn):
+    """Certificates and keys of plugin profiles stay files (NetworkManager stores the path):
+    if they sit in your home, a program running as you could swap the CA. Say so."""
+    s = conn.get_setting_vpn()
+    home = os.path.realpath(os.path.expanduser("~"))
+    files = []
+    for key in ("ca", "cert", "key", "ta", "tls-crypt", "tls-crypt-v2"):
+        v = s.get_data_item(key) or ""
+        if v.startswith("/") and os.path.realpath(v).startswith(home + "/"):
+            files.append(key)
+    if files:
+        return [f"{', '.join(files)} stay files in your home (keep them, do not edit)"]
+    return []
+
+
+def import_wireguard(c, path, data):
+    text = data.decode("utf-8", "replace")
+    notes = []
+    if WG_HOOKS.search(text):
+        notes.append("PreUp/PostUp/... scripts are ignored")
+    stem = os.path.splitext(os.path.basename(path))[0]
+    ifname = iface_name(c, stem)
+    with private_dir() as tmp:
+        f = os.path.join(tmp, ifname + ".conf")
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        try:
+            conn = NM.conn_wireguard_import(f)
+        except GLib.Error as e:
+            # name the user's file, not the private copy
+            msg = (e.message or "").replace(f, os.path.basename(path))
+            raise Fail(f"not a valid WireGuard file: {clean(msg, 120)}")
+    return conn, notes + harden_wireguard(conn)
+
+
+def vpn_plugins():
+    try:
+        return NM.VpnPluginInfo.list_load()
+    except GLib.Error:
+        return []
+
+
+def import_plugin(path, service):
+    plugins = vpn_plugins()
+    order = [p for p in plugins if p.get_service() == service] + [p for p in plugins if p.get_service() != service]
+    if service and not any(p.get_service() == service for p in plugins):
+        label, pkg = KINDS[service.rsplit(".", 1)[-1]]
+        raise Fail(f"{label} needs the NetworkManager plugin: sudo xbps-install {pkg}")
+    for info in order:
+        try:
+            editor = info.load_editor_plugin()
+        except GLib.Error:
+            continue
+        if not editor or not editor.get_capabilities() & NM.VpnEditorPluginCapability.IMPORT:
+            continue
+        try:
+            conn = editor.import_(path)
+        except GLib.Error:
+            continue
+        if conn is not None:
+            return conn
+    raise Fail("no installed VPN plugin understands this file")
+
+
+SECRET_LABELS = {
+    "password": "Password",
+    "cert-pass": "Passphrase of the private key (empty if it has none)",
+    "Xauth password": "Password",
+    "IPSec secret": "Group password / pre-shared key",
+}
+
+
+def store_secrets(conn, name):
+    """Ask for the secrets of an imported plugin profile and store them system-wide
+    (root-only), so connecting needs no secret agent. Empty = ask when connecting."""
+    s = conn.get_setting_vpn()
+    svc = s.get_service_type()
+    need, data_need = [], []
+    if svc == S_OPENVPN:
+        ctype = s.get_data_item("connection-type") or "tls"
+        if ctype in ("password", "password-tls"):
+            data_need.append(("username", "User name"))
+            need.append(("password", False))
+        if ctype in ("tls", "password-tls"):
+            need.append(("cert-pass", True))
+    elif svc == S_VPNC:
+        data_need.append(("Xauth username", "User name"))
+        need += [("Xauth password", False), ("IPSec secret", False)]
+        s.add_data_item("ipsec-secret-type", "save")
+        s.add_data_item("xauth-password-type", "save")
+    for key, label in data_need:
+        if not s.get_data_item(key):
+            val = ask("vpn", f"{label} for {name}", "user")
+            if val is None:
+                raise Fail("cancelled")
+            val = clean(val, 128)
+            if val:
+                s.add_data_item(key, val)
+    for key, optional in need:
+        if s.get_secret(key):
+            s.add_data_item(f"{key}-flags", "0")
+            continue
+        val = ask("vpn", f"{SECRET_LABELS[key]} for {name}", "password", password=True)
+        if val is None:
+            raise Fail("cancelled")
+        if val:
+            s.add_secret(key, val)
+            s.add_data_item(f"{key}-flags", "0")                     # saved, root-only
+        elif optional:
+            s.add_data_item(f"{key}-flags", str(int(NM.SettingSecretFlags.NOT_REQUIRED)))
+        else:
+            s.add_data_item(f"{key}-flags", str(int(NM.SettingSecretFlags.NOT_SAVED)))
+
+
+def finish_profile(conn, name):
+    s = conn.get_setting_connection()
+    s.set_property("id", name)
+    s.set_property("autoconnect", False)
+    while s.get_num_permissions():
+        s.remove_permission(0)              # system-wide: changing it needs the password
+    try:
+        conn.verify()
+    except GLib.Error as e:
+        raise Fail(f"the profile is invalid: {clean(e.message, 120)}")
+
+
+def import_file(c, path, name="", dry_run=False):
+    data = read_file(path)
+    typ = detect(path, data)
+    if typ == "wireguard":
+        conn, notes = import_wireguard(c, path, data)
+    else:
+        conn = import_plugin(path, typ)
+        notes = protect_dns_vpn(conn) + cert_notes(conn)
+    name = clean(name or os.path.splitext(os.path.basename(path))[0] or "VPN", 40)
+    if conn.get_connection_type() == "vpn":
+        store_secrets(conn, name)
+    finish_profile(conn, name)
+    return save(c, conn, notes, dry_run)
+
+
+def save(c, conn, notes, dry_run):
+    name = clean(conn.get_id())
+    if dry_run:
+        show_profile(conn)
+        print("notes: " + "; ".join(notes) if notes else "notes: -")
+        return None
+    rc = add_profile(c, conn)
+    notify("VPN added", f"{name} ({kind(conn)})" + (f"; {'; '.join(notes)}" if notes else ""))
+    return rc
+
+
+def show_profile(conn):
+    """Print a profile without its secrets (--dry-run)."""
+    d = conn.to_dbus(NM.ConnectionSerializationFlags.NO_SECRETS).unpack()
+    for setting in sorted(d):
+        for key in sorted(d[setting]):
+            print(f"{setting}.{key} = {d[setting][key]!r}")
+    vpn = conn.get_setting_vpn()
+    if vpn:
+        keys = []
+        vpn.foreach_secret(lambda k, v, *_: keys.append(k), None)
+        print(f"secrets stored: {', '.join(sorted(keys)) or '-'}")
+    wg = conn.get_setting(NM.SettingWireGuard)
+    if wg:
+        print(f"secrets stored: private-key{', preshared-key' if any(wg.get_peer(i).get_preshared_key() for i in range(wg.get_peers_len())) else ''}")
+
+
+# ── FRITZ!Box IPsec (vpnc) ───────────────────────────────────────────────────
+
+def valid_host(h):
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return bool(HOST_RE.match(h))
+
+
+def fritzbox(c, dry_run=False):
+    if not any(p.get_service() == S_VPNC for p in vpn_plugins()):
+        raise Fail("FRITZ!Box IPsec needs the vpnc plugin: sudo xbps-install NetworkManager-vpnc"
+                   " (FRITZ!OS 7.50 and newer: export a WireGuard file and import it instead)")
+    host = ask("fritz!box", "Server: the MyFRITZ! address or DynDNS name of the box", "xxxx.myfritz.net")
+    if host is None:
+        return None
+    host = host.strip()
+    if not valid_host(host):
+        raise Fail(f"not a host name: {clean(host)}")
+    user = ask("fritz!box", "FRITZ!Box user with VPN permission", "user")
+    if user is None:
+        return None
+    user = user.strip()
+    if not user or len(user) > 64 or clean(user, 64) != user:
+        raise Fail("invalid user name")
+    pw = ask("fritz!box", f"Password of {user}", "password", password=True)
+    if not pw:
+        return None
+    psk = ask("fritz!box", "Shared secret (FRITZ!Box: user, VPN (IPSec) settings)", "shared secret", password=True)
+    if not psk:
+        return None
+    lan = None
+    route = choose("fritz!box", ["󰋜  Only the home network", "󰖟  All traffic"],
+                   "What goes through the tunnel?")
+    if route is None:
+        return None
+    if route == 0:
+        net = ask("fritz!box", "Home network", "192.168.178.0/24", default="192.168.178.0/24")
+        if net is None:
+            return None
+        try:
+            lan = ipaddress.IPv4Network(net.strip(), strict=False)
+        except ValueError:
+            raise Fail(f"not a network: {clean(net)}")
+    name = ask("fritz!box", "Name of the profile", "name", default="FRITZ!Box") or "FRITZ!Box"
+
+    conn = NM.SimpleConnection.new()
+    s_con = NM.SettingConnection.new()
+    s_con.set_property("uuid", NM.utils_uuid_generate())
+    s_con.set_property("type", "vpn")
+    conn.add_setting(s_con)
+    s = NM.SettingVpn.new()
+    s.set_property("service-type", S_VPNC)
+    # the settings AVM's box speaks (IKEv1, XAuth + PSK, DH group 2)
+    for k, v in {"IPSec gateway": host, "IPSec ID": user, "Xauth username": user,
+                 "IKE DH Group": "dh2", "Perfect Forward Secrecy": "server",
+                 "NAT Traversal Mode": "natt", "Vendor": "cisco", "Local Port": "0",
+                 "IPSec secret-flags": "0", "Xauth password-flags": "0",
+                 "ipsec-secret-type": "save", "xauth-password-type": "save"}.items():
+        s.add_data_item(k, v)
+    s.add_secret("IPSec secret", psk)
+    s.add_secret("Xauth password", pw)
+    conn.add_setting(s)
+    ip4 = NM.SettingIP4Config.new()
+    ip4.set_property("method", NM.SETTING_IP4_CONFIG_METHOD_AUTO)
+    notes = []
+    if lan:
+        ip4.set_property("never-default", True)
+        ip4.add_route(NM.IPRoute.new(4, str(lan.network_address), lan.prefixlen, None, -1))
+    else:
+        ip4.set_property("dns-priority", -50)
+        notes.append("only the box's DNS is used; IPv6 is not tunneled by IPsec/vpnc")
+    conn.add_setting(ip4)
+    ip6 = NM.SettingIP6Config.new()
+    ip6.set_property("method", NM.SETTING_IP6_CONFIG_METHOD_IGNORE)
+    conn.add_setting(ip6)
+    finish_profile(conn, clean(name, 40))
+    return save(c, conn, notes, dry_run)
+
+
+# ── file picker ──────────────────────────────────────────────────────────────
+
+def candidates():
+    """VPN config files in the usual places, newest first (no symlinks, no hidden dirs)."""
+    home = os.path.expanduser("~")
+    roots = [(os.path.join(home, "Downloads"), 3), (os.path.join(home, "Documents"), 3),
+             (os.path.join(home, "Desktop"), 2), (home, 1)]
+    found, seen = [], set()
+    for root, depth in roots:
+        root_depth = root.rstrip("/").count("/")
+        for d, dirs, files in os.walk(root):
+            if d.count("/") - root_depth >= depth - 1:
+                dirs[:] = []
+            dirs[:] = [x for x in dirs if not x.startswith(".")]
+            for f in files:
+                if not f.lower().endswith((".conf", ".ovpn", ".pcf")) or "\n" in f:
+                    continue
+                p = os.path.join(d, f)
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE or p in seen:
+                    continue
+                if f.lower().endswith(".conf"):
+                    try:
+                        with open(p, "rb") as fh:
+                            head = fh.read(8192).decode("utf-8", "replace")
+                    except OSError:
+                        continue
+                    if not re.search(r"^\s*(\[Interface\]|remote\s|client\s*$)", head, re.I | re.M):
+                        continue
+                seen.add(p)
+                found.append((st.st_mtime, p))
+            if len(found) > 300:
+                break
+    return [p for _, p in sorted(found, reverse=True)[:100]]
+
+
+def pick_file():
+    files = candidates()
+    home = os.path.expanduser("~")
+    rows = []
+    for p in files:
+        d = os.path.dirname(p)
+        d = "~" + d[len(home):] if d.startswith(home) else d
+        rows.append(f"{ICON_FILE}  {clean(os.path.basename(p), 40):<40}  {clean(d, 40)}")
+    rows.append(f"{ICON_PATH}  Enter a path…")
+    i = menu("import", rows, "WireGuard .conf  ·  OpenVPN .ovpn  ·  Cisco .pcf  (Downloads, Documents, Desktop, ~)")
+    if i is None:
+        return None
+    if i < len(files):
+        return files[i]
+    p = ask("import", "Path of the config file", "~/path/to/file.conf")
+    return os.path.expanduser(p.strip()) if p else None
+
+
+# ── menus ────────────────────────────────────────────────────────────────────
+
+def mark(p, act):
+    ac = act.get(p.get_uuid())
+    if ac is None:
+        return "○"
+    return "●" if ac.get_state() == NM.ActiveConnectionState.ACTIVATED else "◐"
+
+
+def main_menu(c):
+    while True:
+        ps, act = profiles(c), active_vpns(c)
+        rows = [f"{mark(p, act)}  {clean(p.get_id(), 32):<32}  {kind(p)}"
+                f"{'  · auto' if p.get_setting_connection().get_autoconnect() else ''}" for p in ps]
+        rows.append(f"{ICON_ADD}  Add a VPN…")
+        if ps:
+            rows.append(f"{ICON_COG}  Manage profiles…")
+        i = menu("vpn", rows, "● connected  ·  ◐ connecting  ·  select to toggle")
+        if i is None:
+            return
+        if i < len(ps):
+            p = ps[i]
+            ac = act.get(p.get_uuid())
+            if ac is not None:
+                disconnect(c, ac)
+            else:
+                connect(c, p)
+            return
+        if i == len(ps):
+            add_menu(c)
+            return
+        manage_menu(c)
+        return
+
+
+def add_menu(c):
+    plugins = {p.get_service() for p in vpn_plugins()}
+    rows = [f"{ICON_FILE}  Import a config file      WireGuard, OpenVPN, Cisco",
+            f"{ICON_ROUTER}  FRITZ!Box (IPsec)         FRITZ!OS before 7.50",
+            f"{ICON_COG}  Other types               OpenConnect, L2TP, IKEv2 (editor)"]
+    missing = [pkg for svc, (_, pkg) in KINDS.items()
+               if f"org.freedesktop.NetworkManager.{svc}" not in plugins and svc in ("openvpn", "vpnc")]
+    mesg = "FRITZ!OS 7.50+: export the box's WireGuard file and import it"
+    if missing:
+        mesg += f"  ·  missing plugins: {', '.join(missing)}"
+    i = menu("add vpn", rows, mesg)
+    if i == 0:
+        path = pick_file()
+        if path:
+            name = ask("import", "Name of the profile", "name",
+                       default=clean(os.path.splitext(os.path.basename(path))[0], 40))
+            if name is not None:
+                import_file(c, path, name)
+    elif i == 1:
+        fritzbox(c)
+    elif i == 2:
+        editor = shutil.which("nm-connection-editor")
+        if not editor:
+            raise Fail("nm-connection-editor is missing: sudo xbps-install network-manager-applet"
+                       " (plus the plugin, e.g. NetworkManager-openconnect)")
+        subprocess.Popen([editor], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def manage_menu(c):
+    ps = profiles(c)
+    rows = [f"{clean(p.get_id(), 32):<32}  {kind(p)}{'' if is_system(p) else '  · only for you'}" for p in ps]
+    i = menu("manage", rows, "choose a profile")
+    if i is None:
+        return
+    p = ps[i]
+    name = clean(p.get_id())
+    auto = p.get_setting_connection().get_autoconnect()
+    acts = [f"{ICON_AUTO}  Autoconnect: {'on  → turn off' if auto else 'off  → turn on'}",
+            f"{ICON_DEL}  Remove"]
+    j = menu("manage", acts, markup(name))
+    if j == 0:
+        set_autoconnect(p, not auto)
+    elif j == 1:
+        remove(p)
+
+
+def set_autoconnect(p, on):
+    p.get_setting_connection().set_property("autoconnect", bool(on))
+    commit(p)
+    notify(f"Autoconnect {'on' if on else 'off'}", clean(p.get_id()))
+
+
+def remove(p):
+    name = clean(p.get_id())
+    if not confirm("remove", f"Remove the VPN profile {markup(name)}?", f"{ICON_DEL}  Remove {name}"):
+        return
+    delete(p)
+    notify("VPN removed", name)
+
+
+# ── command line ─────────────────────────────────────────────────────────────
+
+def cmd_list(c, only_active=False):
+    act = active_vpns(c)
+    rows = 0
+    for p in profiles(c):
+        if only_active and p.get_uuid() not in act:
+            continue
+        rows += 1
+        flags = [kind(p)]
+        if p.get_setting_connection().get_autoconnect():
+            flags.append("autoconnect")
+        if not is_system(p):
+            flags.append("only for you")
+        print(f"{mark(p, act)} {clean(p.get_id(), 60)}  ({', '.join(flags)})  {p.get_uuid()}")
+    return 0 if rows or not only_active else 1
+
+
+def main(argv):
+    global INTERACTIVE
+    args = argv[1:]
+    cmd = args.pop(0) if args else "menu"
+    dry = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    INTERACTIVE = cmd == "menu"
+    c = client()
+    if cmd == "menu":
+        main_menu(c)
+    elif cmd == "list":
+        return cmd_list(c)
+    elif cmd == "status":
+        return cmd_list(c, only_active=True)
+    elif cmd == "up":
+        p = find_profile(c, args[0]) if args else last_used(c)
+        if p is None:
+            raise Fail("no profile used yet: vpn up NAME")
+        return 0 if connect(c, p) else 1
+    elif cmd == "down":
+        act = active_vpns(c)
+        if args:
+            p = find_profile(c, args[0])
+            act = {k: v for k, v in act.items() if k == p.get_uuid()}
+        for ac in act.values():
+            disconnect(c, ac)
+    elif cmd == "toggle":
+        act = active_vpns(c)
+        if act:
+            for ac in act.values():
+                disconnect(c, ac)
+        else:
+            p = last_used(c)
+            if p is None:
+                INTERACTIVE = True
+                main_menu(c)
+            else:
+                return 0 if connect(c, p) else 1
+    elif cmd == "import":
+        if not args:
+            raise Fail("usage: vpn import [--dry-run] FILE [NAME]")
+        import_file(c, args[0], args[1] if len(args) > 1 else "", dry)
+    elif cmd == "fritzbox":
+        fritzbox(c, dry)
+    elif cmd == "autoconnect":
+        if len(args) != 2 or args[1] not in ("on", "off"):
+            raise Fail("usage: vpn autoconnect NAME on|off")
+        set_autoconnect(find_profile(c, args[0]), args[1] == "on")
+    elif cmd == "remove":
+        if not args:
+            raise Fail("usage: vpn remove NAME")
+        remove(find_profile(c, args[0]))
+    elif cmd in ("-h", "--help", "help"):
+        print(__doc__)
+    else:
+        raise Fail(f"unknown command {clean(cmd)} (vpn --help)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Fail as e:
+        if str(e) != "cancelled":
+            notify("VPN", str(e), critical=True)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -1,14 +1,28 @@
 #!/usr/bin/env bash
 # Event-driven status for polybar modules (tail = true).
 #
-# Usage: polybar-watch SECONDS STATUS-CMD [ARGS...] -- EVENT-CMD [ARGS...]
+# Usage: polybar-watch [--slot NAME] SECONDS STATUS-CMD [ARGS...] -- EVENT-CMD [ARGS...]
 #
 # Prints the output of STATUS-CMD at start, after every burst of lines from EVENT-CMD
 # (e.g. `nmcli monitor`, `udevadm monitor`) and at least every SECONDS as a fallback.
 # Nothing runs while nothing happens, and unchanged output is not printed again, so
 # polybar does not redraw. Example:
 #   exec = polybar-watch 30 polybar-wlan.sh --status -- nmcli monitor
+#
+# --slot NAME: also write every new output to $XDG_RUNTIME_DIR/polybar-fit/<polybar pid>/NAME,
+# where polybar-fit measures it (it hides modules when the bar would overflow).
 set -u
+
+slot_file=""
+if [[ "${1:-}" == "--slot" ]]; then
+    [[ "${2:-}" =~ ^[a-z0-9-]{1,32}$ ]] || { echo "polybar-watch: bad slot name" >&2; exit 2; }
+    # only a private runtime directory (no fallback to /tmp: other users, symlinks)
+    if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]]; then
+        slot_dir="$XDG_RUNTIME_DIR/polybar-fit/$PPID"
+        mkdir -p -m 700 "$XDG_RUNTIME_DIR/polybar-fit" "$slot_dir" 2>/dev/null && slot_file="$slot_dir/$2"
+    fi
+    shift 2
+fi
 
 every=${1:-}
 [[ "$every" =~ ^[0-9]+$ ]] && (( every > 0 )) || { echo "usage: polybar-watch SECONDS STATUS-CMD -- EVENT-CMD" >&2; exit 2; }
@@ -51,6 +65,7 @@ emit() {
     [[ "$out" == "$last" ]] && return
     last=$out
     printf '%s\n' "$out"
+    [[ -n "$slot_file" ]] && { printf '%s\n' "$out" > "$slot_file"; } 2>/dev/null
 }
 
 start_events

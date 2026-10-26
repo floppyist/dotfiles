@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+"""wifi-connect: connect to a WiFi network (the WiFi menu of polybar-wlan.sh runs this).
+
+Usage:
+    wifi-connect SSID
+    wifi-connect --dry-run SSID      show what would happen, change nothing
+
+A saved profile of the network is used as it is. The password is asked for (rofi, or the
+terminal without X) when a secured network has no profile yet or rejects the saved
+password; then the profile is created or updated and the connection is tried again
+(three attempts). A new profile that never connected is removed again.
+
+New profiles are system-wide like the existing ones: adding one, or storing a new
+password, asks for your login password through the desktop's polkit agent (polkit-gnome).
+
+Why libnm and not nmcli: `nmcli device wifi connect` takes the password on its command
+line (readable in ps) or, with --ask, from its input. --ask also starts nmcli's own text
+polkit agent, which read the WiFi password from that same input as the *login* password
+for adding the system-wide profile: every new network failed with "wrong password?".
+Here the password only travels over D-Bus to NetworkManager.
+"""
+import getpass
+import os
+import subprocess
+import sys
+import unicodedata
+
+try:
+    import gi
+    gi.require_version("NM", "1.0")
+    from gi.repository import GLib, NM
+except (ImportError, ValueError) as err:  # pragma: no cover
+    subprocess.run(["notify-send", "-a", "wifi", "-u", "critical", "WiFi menu unavailable",
+                    "Needs python3-gobject and libnm"], check=False)
+    sys.exit(f"wifi-connect: {err} (install python3-gobject and libnm)")
+
+ROFI_THEME = os.environ.get("ROFI_THEME") or os.path.expanduser("~/.config/rofi/config.rasi")
+APF = getattr(NM, "80211ApFlags")
+SEC = getattr(NM, "80211ApSecurityFlags")
+DS = NM.DeviceState
+NO_SECRETS = NM.DeviceStateReason.NO_SECRETS   # NetworkManager asked for a new password
+ATTEMPTS = 3
+
+REASONS = {
+    NM.DeviceStateReason.NO_SECRETS: "wrong password",
+    NM.DeviceStateReason.SUPPLICANT_DISCONNECT: "the access point refused the connection",
+    NM.DeviceStateReason.SUPPLICANT_TIMEOUT: "the access point did not answer",
+    NM.DeviceStateReason.SUPPLICANT_FAILED: "wpa_supplicant failed",
+    NM.DeviceStateReason.IP_CONFIG_UNAVAILABLE: "no IP address (DHCP)",
+    NM.DeviceStateReason.SSID_NOT_FOUND: "the network is out of range",
+}
+
+
+class Fail(Exception):
+    """An error for the user (notification + stderr)."""
+
+
+def clean(s, n=48):
+    """Plain single-line text (SSIDs are chosen by whoever runs the access point)."""
+    s = "".join(ch for ch in str(s or "") if unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp"))
+    s = " ".join(s.split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def markup(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def notify(summary, body="", critical=False):
+    # one stack tag: "Connected" replaces "Connecting" instead of stacking up
+    args = ["notify-send", "-a", "wifi", "-h", "string:x-dunst-stack-tag:wifi-connect"]
+    if critical:
+        args += ["-u", "critical"]
+    subprocess.run(args + ["--", summary, body], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, check=False)
+
+
+def ask_password(ssid, why=""):
+    """The password (rofi's password field, or the terminal without X); None if cancelled."""
+    text = f"{why}Password for {clean(ssid)}"
+    if not os.environ.get("DISPLAY"):
+        if not sys.stdin.isatty():
+            raise Fail("no display and no terminal to ask for the password")
+        try:
+            return getpass.getpass(f"{text}: ") or None
+        except (EOFError, KeyboardInterrupt):
+            return None
+    r = subprocess.run(["rofi", "-dmenu", "-password", "-p", "wifi", "-theme", ROFI_THEME,
+                        "-mesg", markup(text),
+                        "-theme-str", "listview { enabled: false; }",
+                        "-theme-str", 'entry { placeholder: "password"; }'],
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+    pw = r.stdout.rstrip("\n") if r.returncode == 0 else ""
+    return pw or None
+
+
+# ── NetworkManager ───────────────────────────────────────────────────────────
+
+def error_text(e):
+    if e is None:
+        return "timed out"
+    msg = e.message or str(e)
+    if "PermissionDenied" in msg or "nsufficient privileges" in msg or "not authorized" in msg.lower():
+        return "not authorized (password dialog cancelled, or no polkit agent running)"
+    return msg.split(":", 2)[-1].strip() if msg.startswith("GDBus.Error:") else msg
+
+
+def wait_async(start, finish, timeout=180):
+    """Run an async libnm call (180 s: the polkit dialog waits for you); finish(result) or Fail."""
+    loop, out = GLib.MainLoop(), {}
+
+    def done(_src, result, *_):
+        try:
+            out["value"] = finish(result)
+        except GLib.Error as e:
+            out["error"] = e
+        loop.quit()
+
+    def expired():
+        loop.quit()
+        return False
+
+    start(done)
+    tid = GLib.timeout_add_seconds(timeout, expired)
+    loop.run()
+    if "value" in out or "error" in out:
+        GLib.source_remove(tid)
+    if "value" in out:
+        return out["value"]
+    raise Fail(error_text(out.get("error")))
+
+
+def ssid_of(ap):
+    b = ap.get_ssid()
+    return NM.utils_ssid_to_utf8(b.get_data()) if b else ""
+
+
+def find_ap(c, ssid):
+    """(device, strongest access point) for the SSID, as nmcli names it."""
+    best = None
+    for d in c.get_devices():
+        if not isinstance(d, NM.DeviceWifi) or d.get_state() <= DS.UNAVAILABLE:
+            continue
+        for ap in d.get_access_points():
+            if ssid_of(ap) == ssid and (best is None or ap.get_strength() > best[1].get_strength()):
+                best = (d, ap)
+    return best or (None, None)
+
+
+def security(ap):
+    """open, owe, psk (WPA/WPA2/WPA3 personal), sae (WPA3 only), wep or enterprise."""
+    wpa, rsn = ap.get_wpa_flags(), ap.get_rsn_flags()
+    both = wpa | rsn
+    if both & (SEC.KEY_MGMT_802_1X | SEC.KEY_MGMT_EAP_SUITE_B_192):
+        return "enterprise"
+    if both & (SEC.KEY_MGMT_OWE | SEC.KEY_MGMT_OWE_TM):
+        return "owe"
+    if both & SEC.KEY_MGMT_PSK:
+        return "psk"
+    if both & SEC.KEY_MGMT_SAE:
+        return "sae"
+    if ap.get_flags() & APF.PRIVACY:
+        return "wep"
+    return "open"
+
+
+def profile_for(c, dev, ap):
+    """The saved profile for this access point, most recently used first."""
+    ps = [p for p in c.get_connections()
+          if p.get_connection_type() == "802-11-wireless" and dev.connection_valid(p)
+          and ap.connection_valid(p)]
+    ps.sort(key=lambda p: p.get_setting_connection().get_timestamp(), reverse=True)
+    return ps[0] if ps else None
+
+
+def wait_active(dev, ac, timeout=60):
+    """Wait until the connection is up. Returns (ok, NM.DeviceStateReason or None, text)."""
+    loop, out = GLib.MainLoop(), {}
+    A = NM.ActiveConnectionState
+
+    def on_device(_d, new, _old, reason):
+        if new == DS.FAILED:
+            out["reason"] = reason
+
+    def on_ac(_ac=None, state=None, _reason=None):
+        st = ac.get_state() if state is None else A(state)
+        if st == A.ACTIVATED:
+            out["ok"] = True
+        elif st == A.DEACTIVATED:
+            out["ok"] = False
+        if "ok" in out:
+            loop.quit()
+
+    def expired():
+        out.update(ok=False, timeout=True)
+        loop.quit()
+        return False
+
+    h1 = dev.connect("state-changed", on_device)
+    h2 = ac.connect("state-changed", on_ac)
+    on_ac()
+    if "ok" not in out:
+        tid = GLib.timeout_add_seconds(timeout, expired)
+        loop.run()
+        if not out.get("timeout"):
+            GLib.source_remove(tid)
+    for obj, h in ((dev, h1), (ac, h2)):
+        try:
+            obj.disconnect(h)
+        except TypeError:
+            pass
+    if out["ok"]:
+        return True, None, ""
+    if out.get("timeout"):
+        return False, None, "timed out"
+    reason = out.get("reason", dev.get_state_reason())
+    try:
+        reason = NM.DeviceStateReason(reason)
+    except ValueError:
+        return False, None, f"reason {reason}"
+    return False, reason, REASONS.get(reason, reason.value_nick.replace("-", " "))
+
+
+def activate(c, dev, ap, profile):
+    ac = wait_async(lambda cb: c.activate_connection_async(profile, dev, ap.get_path(), None, cb),
+                    c.activate_connection_finish)
+    return ac, wait_active(dev, ac)
+
+
+def add_and_activate(c, dev, ap, password):
+    """Create a system-wide profile (NetworkManager fills in the rest from the AP) and connect."""
+    partial = None
+    if password is not None:
+        partial = NM.SimpleConnection.new()
+        s = NM.SettingWirelessSecurity.new()
+        s.set_property("psk", password)
+        partial.add_setting(s)
+    ac = wait_async(lambda cb: c.add_and_activate_connection_async(partial, dev, ap.get_path(),
+                                                                   None, cb),
+                    c.add_and_activate_connection_finish)
+    return ac, wait_active(dev, ac)
+
+
+def store_password(profile, password):
+    s = profile.get_setting_wireless_security()
+    s.set_property("psk", password)
+    s.set_property("psk-flags", NM.SettingSecretFlags.NONE)  # saved by NetworkManager, root-only
+    wait_async(lambda cb: profile.commit_changes_async(True, None, cb), profile.commit_changes_finish)
+
+
+def valid_password(kind, pw):
+    """WPA personal: 8 to 63 characters or 64 hex digits (WPA3-only networks take any length)."""
+    return kind == "sae" or NM.utils_wpa_psk_valid(pw)
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def connect(c, ssid, dry_run=False):
+    dev, ap = find_ap(c, ssid)
+    if ap is None:
+        raise Fail(f"{clean(ssid)} is out of range")
+    kind = security(ap)
+    name = clean(ssid)
+    profile = profile_for(c, dev, ap)
+    secured = kind in ("psk", "sae")
+    active = dev.get_active_access_point()
+    connected = active is not None and ssid_of(active) == ssid and dev.get_state() == DS.ACTIVATED
+    if dry_run:
+        where = (f"profile {profile.get_id()!r}" if profile else
+                 "new system-wide profile (polkit asks for authorization)")
+        print(f"{dev.get_iface()}: {ssid!r} {ap.get_strength()}% {kind}, {where}"
+              f"{', asks for the password' if secured and not profile else ''}"
+              f"{', connected' if connected else ''}")
+        return
+    if connected:
+        notify("Connected", f"{name} (already)")
+        return
+    if kind == "enterprise":
+        raise Fail(f"{name} uses WPA-Enterprise (802.1X): set it up with nm-connection-editor")
+    if kind == "wep":
+        raise Fail(f"{name} uses WEP, which is broken and not supported")
+
+    notify("Connecting", name)
+    created = None
+    why = ""
+    if profile is not None:
+        _ac, (ok, reason, text) = activate(c, dev, ap, profile)
+        if ok:
+            notify("Connected", name)
+            return
+        if not (secured and reason == NO_SECRETS):
+            raise Fail(f"{name}: {text}")
+        why = "The saved password was rejected. "
+    elif not secured:
+        _ac, (ok, _reason, text) = add_and_activate(c, dev, ap, None)
+        if ok:
+            notify("Connected", name)
+            return
+        raise Fail(f"{name}: {text}")
+
+    try:
+        for _ in range(ATTEMPTS):
+            pw = ask_password(ssid, why)
+            if pw is None:
+                notify("Not connected", f"{name}: cancelled")   # replaces "Connecting"
+                return
+            if not valid_password(kind, pw):
+                why = "A WPA password has 8 to 63 characters. "
+                continue
+            notify("Authenticating", name)
+            if profile is None:
+                ac, (ok, reason, text) = add_and_activate(c, dev, ap, pw)
+                created = profile = ac.get_connection() or profile_for(c, dev, ap)
+            else:
+                store_password(profile, pw)
+                _ac, (ok, reason, text) = activate(c, dev, ap, profile)
+            if ok:
+                created = None
+                notify("Connected", name)
+                return
+            if reason != NO_SECRETS:
+                raise Fail(f"{name}: {text}")
+            why = "Wrong password, try again. "
+        raise Fail(f"{name}: wrong password")
+    finally:
+        if created is not None:
+            # a profile that never worked would keep autoconnecting with the wrong password
+            try:
+                wait_async(lambda cb: created.delete_async(None, cb), created.delete_finish, 60)
+            except Fail:
+                pass
+
+
+def main(argv):
+    args = argv[1:]
+    dry = "--dry-run" in args
+    args = [a for a in args if a != "--dry-run"]
+    if len(args) != 1 or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if args and args[0] in ("-h", "--help") else 2
+    try:
+        c = NM.Client.new(None)
+    except GLib.Error as e:
+        raise Fail(f"NetworkManager is not reachable ({e.message})")
+    connect(c, args[0], dry)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Fail as e:
+        notify("Connection failed", str(e), critical=True)
+        print(f"wifi-connect: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        sys.exit(130)
