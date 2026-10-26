@@ -1,7 +1,7 @@
 # i3 config
 #
 # Mod1 (Alt)   window management
-# Mod4 (Super) system actions (lock, display, bluetooth, power)
+# Mod4 (Super) system actions (lock, display, bluetooth, vpn, power)
 
 # ── Theme from dotfiles.conf ───────────────────────────────────────────────────
 # Window colors, font, floating border width, gaps, wallpaper and idle times
@@ -92,6 +92,7 @@ bindsym Mod4+p exec --no-startup-id ~/.local/bin/display-select.sh
 # The function key that sends XF86Display is used as the Bluetooth key on this machine
 bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
 bindsym Mod4+b exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
+bindsym Mod4+v exec --no-startup-id ~/.local/bin/vpn
 
 # Volume and brightness show an on-screen bar (dunst)
 bindsym XF86AudioRaiseVolume exec --no-startup-id ~/.local/bin/volume.sh up

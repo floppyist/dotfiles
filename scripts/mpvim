@@ -252,6 +252,42 @@ def make_attrs():
 # curses never rewrites cells it believes unchanged (idcok is off, so it does not shift
 # line contents either). When the area moves or the cover goes away, a full repaint
 # (clearok) wipes the old pixels.
+# Scrolling: when lines move (playlist, help), ncurses moves whole terminal lines with a
+# scroll region (csr + newline) instead of redrawing them, and the cover pixels move along
+# (torn cover). idlok(False) does not stop that, and there is no switch for it, so mpvim
+# starts curses with a private copy of $TERM's terminfo without the scroll capabilities
+# (no_scroll_terminfo): ncurses then only ever rewrites cells in place.
+SCROLL_CAPS = re.compile(r"^\s+(csr|ind|indn|ri|rin|il|il1|dl|dl1|wind)=")
+
+
+def no_scroll_terminfo(base):
+    """Compile $TERM without its scroll capabilities into a new directory below base.
+    Returns the directory (for $TERMINFO) or None (then curses runs with the original)."""
+    term = os.environ.get("TERM", "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", term):
+        return None
+    if not (shutil.which("infocmp") and shutil.which("tic")):
+        return None
+    try:
+        src = subprocess.run(["infocmp", "-1x", "--", term], capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL, timeout=3)
+        if src.returncode != 0 or "csr=" not in src.stdout:
+            return None
+        d = tempfile.mkdtemp(prefix="terminfo-", dir=base)
+        f = os.path.join(d, "entry.src")
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(ln for ln in src.stdout.splitlines() if not SCROLL_CAPS.match(ln)) + "\n")
+        r = subprocess.run(["tic", "-x", "-o", d, f], capture_output=True,
+                           stdin=subprocess.DEVNULL, timeout=5)
+        # initscr() exits the program when it cannot load the entry: make sure it is there
+        if r.returncode != 0 or not any(os.path.isfile(os.path.join(d, sub, term))
+                                        for sub in (term[0], f"{ord(term[0]):x}")):
+            return None
+        return d
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+
+
 COVER_NAMES = ("cover", "folder", "front", "album", "albumart", "albumartsmall")
 COVER_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 SGR = re.compile(r"\x1b\[[0-9;:?]*[A-Za-z]")
@@ -1188,13 +1224,32 @@ def main():
     mpv = MPV(sock_path)
     signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))
     signal.signal(signal.SIGHUP, lambda *a: sys.exit(0))
+    # curses without scroll regions (they would move the album cover, see no_scroll_terminfo).
+    # $TERMINFO only points there while initscr() reads it: programs started later keep
+    # the original environment.
+    terminfo = no_scroll_terminfo(sock_dir)
+    saved = os.environ.get("TERMINFO")
+
+    def restore_env():
+        if saved is None:
+            os.environ.pop("TERMINFO", None)
+        else:
+            os.environ["TERMINFO"] = saved
+
+    def ui(scr):
+        restore_env()
+        App(scr, mpv).run()
+
     try:
         if not mpv.connect(proc):
             sys.exit("mpvim: could not connect to mpv")
-        curses.wrapper(lambda scr: App(scr, mpv).run())
+        if terminfo:
+            os.environ["TERMINFO"] = terminfo
+        curses.wrapper(ui)
     except KeyboardInterrupt:
         pass
     finally:
+        restore_env()
         mpv.send("quit")
         try:
             proc.wait(timeout=2)

@@ -85,6 +85,10 @@
     appname = network
     format = "<span size='small' foreground='#8ec07c'>󰩠  network</span>\n<b>%s</b>\n%b"
 
+[app_vpn]
+    appname = vpn
+    format = "<span size='small' foreground='#b8bb26'>󰦝  vpn</span>\n<b>%s</b>\n%b"
+
 # app_osd (volume / brightness bar) is defined in templates/dunst.conf
 
 # ── third-party apps ────────────────────────────────────────────────────────────
