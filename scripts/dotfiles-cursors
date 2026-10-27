@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""dotfiles-cursors - the desktop's X cursor theme, drawn from the palette
+
+usage: dotfiles-cursors build DIR [KEY=VALUE ...]       write the theme to DIR (e.g. ~/.icons/dotfiles)
+       dotfiles-cursors preview FILE.png [KEY=VALUE ...]  draw every cursor into one picture
+
+KEY=VALUE: body, edge, accent, red = #rrggbb (the fill of the shapes, their outline, the busy
+indicator, "not allowed"); size = an extra size in px besides 24, 32, 48 and 64.
+
+`dotfiles apply` runs `build ~/.icons/dotfiles` with the colors and cursor_size of
+dotfiles.conf. `build` does nothing when DIR already holds this version with these values and
+prints `built DIR` otherwise. It only replaces a DIR that it created itself.
+
+The shapes are drawn on a 32 px grid with sharp corners and scaled per size (vertices snapped
+to whole pixels). XCURSOR_SIZE / Xcursor.size picks the size.
+"""
+import hashlib
+import math
+import os
+import shutil
+import struct
+import sys
+
+try:
+    import cairo
+except ImportError:
+    print("dotfiles-cursors: python3-cairo is missing", file=sys.stderr)
+    sys.exit(4)
+
+SIZES = (24, 32, 48, 64)
+THEME = "dotfiles"
+MARKER = ".dotfiles-cursors"
+COLORS = {"body": "#ebdbb2", "edge": "#191c1c", "accent": "#cc241d", "red": "#cc241d"}
+
+
+CLIP = 1.6     # sharp tips of the outline are cut at this many outline widths from the vertex
+
+
+def unit(dx, dy):
+    n = math.hypot(dx, dy) or 1
+    return dx / n, dy / n
+
+
+def rgba(h, a=1.0):
+    return (int(h[1:3], 16) / 255, int(h[3:5], 16) / 255, int(h[5:7], 16) / 255, a)
+
+
+def mix(a, b, t):
+    """Color between a and b (t = 0..1), as #rrggbb."""
+    ca, cb = rgba(a), rgba(b)
+    return "#%02x%02x%02x" % tuple(round((x + (y - x) * t) * 255) for x, y in zip(ca[:3], cb[:3]))
+
+
+# ── geometry (design units: a 32 x 32 canvas) ────────────────────────────────────
+
+def rot(pts, deg, cx=16, cy=16):
+    a = math.radians(deg)
+    ca, sa = math.cos(a), math.sin(a)
+    return [(cx + (x - cx) * ca - (y - cy) * sa, cy + (x - cx) * sa + (y - cy) * ca) for x, y in pts]
+
+
+def mirror(pts, cx=16):
+    return [(2 * cx - x, y) for x, y in reversed(pts)]
+
+
+def shift(pts, dx, dy):
+    return [(x + dx, y + dy) for x, y in pts]
+
+
+def rect(x0, y0, x1, y1):
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+def double_arrow(length=22, shaft=2, head=10, depth=6, cx=16, cy=16):
+    """Horizontal <-> centered on (cx, cy)."""
+    l, s, h = length / 2, shaft / 2, head / 2
+    return [(cx - l, cy), (cx - l + depth, cy - h), (cx - l + depth, cy - s), (cx + l - depth, cy - s),
+            (cx + l - depth, cy - h), (cx + l, cy), (cx + l - depth, cy + h), (cx + l - depth, cy + s),
+            (cx - l + depth, cy + s), (cx - l + depth, cy + h)]
+
+
+def single_arrow(length=16, shaft=2, head=10, depth=6, tip=(16, 8)):
+    """Arrow pointing up, tip at `tip`."""
+    x, y = tip
+    s, h = shaft / 2, head / 2
+    return [(x, y), (x + h, y + depth), (x + s, y + depth), (x + s, y + length), (x - s, y + length),
+            (x - s, y + depth), (x - h, y + depth)]
+
+
+ARROW = [(7, 4), (7, 23), (11.5, 18.5), (14.5, 25.5), (17.5, 24.2), (14.6, 17.4), (20.5, 17.4)]
+
+
+# ── drawing ──────────────────────────────────────────────────────────────────────
+
+class Pen:
+    """Draws design-unit shapes on a size x size cairo surface, vertices snapped to pixels."""
+
+    def __init__(self, ctx, size, col):
+        self.c, self.size, self.col = ctx, size, col
+        self.k = size / 32
+        self.ow = max(1, round(self.k * 1.6))     # outline width (px)
+        self.thin = max(1, round(self.k))        # outline of thin shapes (crosshair)
+
+    def px(self, p):
+        return (round(p[0] * self.k), round(p[1] * self.k))
+
+    def path(self, shape):
+        c = self.c
+        kind = shape[0]
+        if kind == "poly":
+            pts = [self.px(p) for p in shape[1]]
+            c.move_to(*pts[0])
+            for p in pts[1:]:
+                c.line_to(*p)
+            c.close_path()
+        elif kind == "circle":
+            _, (x, y), r = shape
+            c.new_sub_path()
+            c.arc(x * self.k, y * self.k, r * self.k, 0, 2 * math.pi)
+            c.close_path()
+        elif kind == "ring":
+            _, (x, y), r0, r1 = shape
+            c.new_sub_path()
+            c.arc(x * self.k, y * self.k, r1 * self.k, 0, 2 * math.pi)
+            c.close_path()
+            c.new_sub_path()
+            c.arc_negative(x * self.k, y * self.k, r0 * self.k, 2 * math.pi, 0)
+            c.close_path()
+
+    def group(self, shapes, fill="body", line="edge", ow=None):
+        """Outline every shape first, then fill them: overlapping shapes merge into one body."""
+        c = self.c
+        ow = self.ow if ow is None else ow
+        c.set_fill_rule(cairo.FILL_RULE_WINDING)
+        # one fill per shape: shapes of opposite winding would cancel out where they overlap
+        if line:
+            c.set_source_rgba(*rgba(self.col[line]))
+            for s in shapes:
+                if s[0] == "poly":
+                    pts = self.grow(s[1], ow)
+                    c.move_to(*pts[0])
+                    for p in pts[1:]:
+                        c.line_to(*p)
+                    c.close_path()
+                    c.fill()
+                else:
+                    self.path(s)
+                    c.set_line_width(2 * ow)
+                    c.stroke()
+        c.set_source_rgba(*rgba(self.col[fill]) if fill in self.col else rgba(fill))
+        for s in shapes:
+            self.path(s)
+            c.fill()
+
+    def corners(self, pts, ow):
+        """Per vertex of the snapped polygon: (vertex, outward normals n1 n2, edge directions d1 d2,
+        miter vector m, convex?). The outline is the polygon grown by ow px along the normals."""
+        p = [self.px(q) for q in pts]
+        area = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(p, p[1:] + p[:1]))
+        sgn = 1 if area > 0 else -1
+        out = []
+        for i, v in enumerate(p):
+            a, b = p[i - 1], p[(i + 1) % len(p)]
+            d1, d2 = unit(v[0] - a[0], v[1] - a[1]), unit(b[0] - v[0], b[1] - v[1])
+            n1, n2 = (d1[1] * sgn, -d1[0] * sgn), (d2[1] * sgn, -d2[0] * sgn)
+            dot = max(-0.99, n1[0] * n2[0] + n1[1] * n2[1])
+            m = ((n1[0] + n2[0]) / (1 + dot), (n1[1] + n2[1]) / (1 + dot))
+            convex = (d1[0] * d2[1] - d1[1] * d2[0]) * sgn > 0
+            out.append((v, n1, n2, d1, d2, m, convex))
+        return out
+
+    def grow(self, pts, ow):
+        """Outline polygon: mitered corners, sharp tips cut off at CLIP * ow from the vertex
+        (a long miter spike would put the visible tip far from the body)."""
+        out = []
+        for v, n1, n2, d1, d2, m, convex in self.corners(pts, ow):
+            if convex and math.hypot(*m) > CLIP:
+                b = unit(*m)
+                for n, d in ((n1, d1), (n2, d2)):
+                    s = (CLIP * ow - ow * (n[0] * b[0] + n[1] * b[1])) / (d[0] * b[0] + d[1] * b[1])
+                    out.append((v[0] + ow * n[0] + s * d[0], v[1] + ow * n[1] + s * d[1]))
+            else:
+                out.append((v[0] + ow * m[0], v[1] + ow * m[1]))
+        return out
+
+    def lines(self, segs, color="edge", width=1):
+        """Plain lines (details inside a body), width in px."""
+        c = self.c
+        c.set_line_cap(cairo.LINE_CAP_BUTT)
+        c.set_line_width(width)
+        off = 0.5 if width % 2 else 0
+        for a, b in segs:
+            (x0, y0), (x1, y1) = self.px(a), self.px(b)
+            c.move_to(x0 + (off if x0 == x1 else 0), y0 + (off if y0 == y1 else 0))
+            c.line_to(x1 + (off if x0 == x1 else 0), y1 + (off if y0 == y1 else 0))
+        c.set_source_rgba(*rgba(self.col[color]))
+        c.stroke()
+
+    def tip(self, pts, i):
+        """Hotspot for the sharp vertex i: one outline width out from the body's tip, between
+        the tip of the body (what you see on dark backgrounds) and that of the outline."""
+        v, _, _, _, _, m, _ = self.corners(pts, self.ow)[i]
+        b = unit(*m)
+        x, y = v[0] + b[0] * self.ow, v[1] + b[1] * self.ow
+        return (min(self.size - 1, max(0, math.floor(x))), min(self.size - 1, max(0, math.floor(y))))
+
+    def bitmap(self, rows, x0, y0, color="edge"):
+        """Small symbols as 1-unit blocks ("#" = set): crisp where a font would blur."""
+        cells = [("poly", rect(x0 + i, y0 + j, x0 + i + 1, y0 + j + 1))
+                 for j, row in enumerate(rows) for i, ch in enumerate(row) if ch == "#"]
+        self.group(cells, fill=color, line=None)
+
+
+# ── the cursors ──────────────────────────────────────────────────────────────────
+# Each function draws one frame and returns the hotspot (px). Animated ones take a frame number.
+
+def arrow(pen, pts=ARROW, tip=0):
+    pen.group([("poly", pts)])
+    return pen.tip(pts, tip)
+
+
+def right_ptr(pen):
+    pts = mirror(ARROW)
+    pen.group([("poly", pts)])
+    return pen.tip(pts, len(pts) - 1)
+
+
+def center_ptr(pen):
+    pts = [(16, 4), (24, 22), (16, 18), (8, 22)]
+    pen.group([("poly", pts)])
+    return pen.tip(pts, 0)
+
+
+def badge(pen, draw, fill="body", line="edge"):
+    """Small square at the lower right of the arrow, for copy/link/help/... variants."""
+    pen.group([("poly", rect(17, 17, 28, 28))], fill=fill, line=line)
+    draw()
+
+
+SYMBOLS = {     # 5 x 7 / 5 x 5 blocks for the badges
+    "help": [".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."],
+    "copy": ["..#..", "..#..", "#####", "..#..", "..#.."],
+    "link": ["..###", "...##", "..#.#", ".#...", "#...."],
+    "menu": ["#####", ".....", "#####", ".....", "#####"],
+    "no": ["#...#", ".#.#.", "..#..", ".#.#.", "#...#"],
+}
+
+
+def arrow_badge(kind):
+    def f(pen):
+        hot = arrow(pen)
+        rows = SYMBOLS[kind]
+        badge(pen, lambda: pen.bitmap(rows, 20, 20 - (len(rows) - 5) // 2, "red" if kind == "no" else "edge"))
+        return hot
+    return f
+
+
+SPIN_CELLS = [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2), (1, 2), (0, 2), (0, 1)]   # clockwise
+SPIN_FRAMES = 8
+
+
+def spinner(pen, frame, x0, y0, cell, gap, pad):
+    """3 x 3 blocks, a head in the accent runs around the edge with a fading tail."""
+    n = 3 * cell + 2 * gap + 2 * pad
+    pen.group([("poly", rect(x0, y0, x0 + n, y0 + n))])
+    for i, (cx, cy) in enumerate(SPIN_CELLS):
+        age = (frame - i) % SPIN_FRAMES
+        head = pen.col["spin"]
+        color = {0: head, 1: mix(head, pen.col["idle"], 0.4),
+                 2: mix(head, pen.col["idle"], 0.75)}.get(age, pen.col["idle"])
+        x, y = x0 + pad + cx * (cell + gap), y0 + pad + cy * (cell + gap)
+        pen.group([("poly", rect(x, y, x + cell, y + cell))], fill=color, line=None)
+
+
+def wait(pen, frame):
+    spinner(pen, frame, 7.5, 7.5, 3, 2, 2.5)
+    return pen.px((16, 16))
+
+
+def progress(pen, frame):
+    hot = arrow(pen)
+    spinner(pen, frame, 16, 16, 2, 1, 2)
+    return hot
+
+
+def ibeam(pen, vertical=False):
+    pts = [(12, 5), (20, 5), (20, 7), (17, 7), (17, 25), (20, 25), (20, 27), (12, 27), (12, 25), (15, 25),
+           (15, 7), (12, 7)]
+    if vertical:
+        pts = rot(pts, 90)
+    pen.group([("poly", pts)])
+    return pen.px((16, 16))
+
+
+def hand_pointer(pen):
+    pts = [(12, 3), (16, 3), (16, 12), (24, 12), (26, 14), (26, 23), (22, 28), (14, 28), (8.5, 21.5),
+           (6, 17.5), (8, 15.5), (12, 19.5)]
+    pen.group([("poly", pts)])
+    pen.lines([((19, 12), (19, 16)), ((22.5, 12), (22.5, 16))], "edge", pen.thin)
+    x, y = pen.px((14, 3))       # middle of the fingertip
+    return x, max(0, y - 1)
+
+
+def hand_open(pen):
+    fingers = [rect(9.5, 8, 13, 17), rect(13, 5, 16.5, 17), rect(16.5, 6, 20, 17), rect(20, 9, 23.5, 17)]
+    palm = [(9.5, 16), (23.5, 16), (23.5, 24), (20.5, 28), (13, 28), (9.5, 24)]
+    thumb = [(11, 17), (5.5, 13.5), (3.5, 15.5), (12, 25)]     # ends inside the palm
+    pen.group([("poly", p) for p in fingers + [palm, thumb]])
+    pen.lines([((13, 8), (13, 16)), ((16.5, 6), (16.5, 16)), ((20, 9), (20, 16))], "edge", pen.thin)
+    return pen.px((16, 16))
+
+
+def hand_closed(pen):
+    fingers = [rect(9.5, 11, 13, 17), rect(13, 10, 16.5, 17), rect(16.5, 10.5, 20, 17), rect(20, 12, 23.5, 17)]
+    palm = [(9.5, 16), (23.5, 16), (23.5, 24), (20.5, 28), (13, 28), (9.5, 24)]
+    thumb = [(11, 17), (7, 15.5), (5.5, 17.5), (12, 24)]
+    pen.group([("poly", p) for p in fingers + [palm, thumb]])
+    pen.lines([((13, 11), (13, 16)), ((16.5, 10.5), (16.5, 16)), ((20, 12), (20, 16))], "edge", pen.thin)
+    return pen.px((16, 16))
+
+
+def resize(deg):
+    def f(pen):
+        pen.group([("poly", rot(double_arrow(), deg))])
+        return pen.px((16, 16))
+    return f
+
+
+def split(deg):
+    """col-resize / row-resize: two bars with arrows pointing away from them."""
+    def f(pen):
+        left = [(3, 16), (8, 11), (8, 15), (11, 15), (11, 17), (8, 17), (8, 21)]
+        right = mirror(left)
+        bars = [rect(13, 7, 15, 25), rect(17, 7, 19, 25)]
+        pen.group([("poly", rot(p, deg)) for p in (left, right)])
+        pen.group([("poly", rot(b, deg)) for b in bars])
+        return pen.px((16, 16))
+    return f
+
+
+def side(deg):
+    """n/e/s/w-resize: an arrow pointing at an edge. deg 0 = up (top_side)."""
+    def f(pen):
+        arrow_ = single_arrow(length=15, tip=(16, 9))
+        edge = rect(8, 5, 24, 7)
+        pen.group([("poly", rot(arrow_, deg)), ("poly", rot(edge, deg))])
+        return pen.px((16, 16))
+    return f
+
+
+def corner(deg):
+    """nw/ne/se/sw-resize: a diagonal arrow pointing into a corner. deg 0 = top left."""
+    def f(pen):
+        arrow_ = rot(single_arrow(length=18, head=9, depth=5.5, tip=(16, 16 - 8 * math.sqrt(2))), -45, 16, 16)
+        bracket = [(5, 5), (17, 5), (17, 7), (7, 7), (7, 17), (5, 17)]
+        pen.group([("poly", rot(arrow_, deg, 16, 16)), ("poly", rot(bracket, deg, 16, 16))])
+        return pen.px((16, 16))
+    return f
+
+
+def scroll_arrow(deg):
+    def f(pen):
+        pen.group([("poly", rot(single_arrow(length=20, tip=(16, 6)), deg))])
+        return pen.px((16, 16))
+    return f
+
+
+def move(pen):
+    arms = double_arrow(length=28, head=7, depth=4.5)
+    pen.group([("poly", arms), ("poly", rot(arms, 90))])
+    return pen.px((16, 16))
+
+
+def crosshair(pen):
+    arms = [rect(15, 5, 17, 13), rect(15, 19, 17, 27), rect(5, 15, 13, 17), rect(19, 15, 27, 17)]
+    pen.group([("poly", a) for a in arms], ow=pen.thin)
+    pen.group([("poly", rect(15, 15, 17, 17))], fill="accent", line=None)
+    return pen.px((16, 16))
+
+
+def cell(pen):
+    pen.group([("poly", rect(14, 6, 18, 26)), ("poly", rect(6, 14, 26, 18))])
+    return pen.px((16, 16))
+
+
+def x_cursor(pen):
+    bar = rect(14.5, 5, 17.5, 27)
+    pen.group([("poly", rot(bar, 45)), ("poly", rot(bar, -45))], fill="red")
+    return pen.px((16, 16))
+
+
+def not_allowed(pen):
+    pen.group([("ring", (16, 16), 6.5, 10), ("poly", rot(rect(14.5, 7, 17.5, 25), 45))], fill="red")
+    return pen.px((16, 16))
+
+
+def dotbox(pen):
+    pen.group([("poly", rect(7, 7, 25, 25)), ], fill="body")
+    pen.group([("poly", rect(14, 14, 18, 18))], fill="edge", line=None)
+    return pen.px((16, 16))
+
+
+def pencil(pen):
+    body = [(5, 27), (7, 21), (21, 7), (25, 11), (11, 25)]
+    pen.group([("poly", body)])
+    pen.lines([((19, 9), (23, 13)), ((7, 21), (11, 25))], "edge", pen.thin)
+    return pen.tip(body, 0)
+
+
+def zoom(sign):
+    def f(pen):
+        handle = rot(rect(19, 15, 28, 18.5), 45, 19, 16.5)
+        pen.group([("circle", (13, 13), 8.5), ("poly", shift(handle, 0.5, 2.5))])
+        bars = [rect(9, 12, 17, 14)] + ([rect(12, 9, 14, 17)] if sign == "+" else [])
+        pen.group([("poly", b) for b in bars], fill="edge", line=None)
+        return pen.px((13, 13))
+    return f
+
+
+def angle(deg):
+    """ul_angle & co: an L in the given corner (core X cursors)."""
+    def f(pen):
+        pen.group([("poly", rot([(9, 9), (23, 9), (23, 11), (11, 11), (11, 23), (9, 23)], deg))])
+        return pen.px(rot([(10, 10)], deg)[0])
+    return f
+
+
+def tee(deg):
+    """top_tee & co: a T (core X cursors). deg 0 = top_tee."""
+    def f(pen):
+        pen.group([("poly", rot(rect(8, 9, 24, 11), deg)), ("poly", rot(rect(15, 9, 17, 24), deg))])
+        return pen.px(rot([(16, 10)], deg)[0])
+    return f
+
+
+# name: (draw function, aliases). Aliases are links; the hash names are for old Qt/Motif programs.
+CURSORS = {
+    "left_ptr": (arrow, "default arrow top_left_arrow"),
+    "right_ptr": (right_ptr, "draft_large draft_small"),
+    "center_ptr": (center_ptr, ""),
+    "hand2": (hand_pointer, "pointer pointing_hand 9d800788f1b08800ae810202380a0822 "
+                            "e29285e634086352946a0e7090d73106"),
+    "hand1": (hand_open, "openhand grab"),
+    "grabbing": (hand_closed, "closedhand dnd-none dnd-move fcf21c00b30f7e3f83fe0dfd12e71cff"),
+    "xterm": (ibeam, "text ibeam"),
+    "vertical-text": (lambda pen: ibeam(pen, True), ""),
+    "wait": (wait, "watch"),
+    "left_ptr_watch": (progress, "progress 00000000000000020006000e7e9ffc3f 08e8e1c95fe2fc01f976f1e063a24ccd "
+                                 "3ecb610c1bf2410f44200f48c40d3599"),
+    "question_arrow": (arrow_badge("help"), "help whats_this left_ptr_help dnd-ask d9ce0ab605698f320427677b458ad60b "
+                                            "5c6cd98b3f3ebcb1f9c7f1c204630408"),
+    "context-menu": (arrow_badge("menu"), ""),
+    "copy": (arrow_badge("copy"), "dnd-copy b66166c04f8c3109214a4fbd64a50fc8 6407b0e94181790501fd1e167b474872 "
+                                  "1081e37283d90000800003c07f3ef6bf"),
+    "link": (arrow_badge("link"), "alias dnd-link a2a266d0498c3104214a47bd64ab0fc8 3085a0e285430894940527032f8b26df "
+                                  "640fb0e74195791501fd1ed57b41487f"),
+    "no-drop": (arrow_badge("no"), "dnd_no_drop"),
+    "not-allowed": (not_allowed, "crossed_circle circle forbidden 03b6e0fcb3499374a867c041f52298f0"),
+    "crosshair": (crosshair, "cross tcross color-picker diamond_cross cross_reverse"),
+    "cell": (cell, "plus"),
+    "fleur": (move, "move all-scroll size_all pointer-move 4498f0e0c1937ffe01fd06f973665830 "
+                    "9081237383d90e509aa00f00170e968f"),
+    "sb_h_double_arrow": (resize(0), "ew-resize h_double_arrow size_hor size-hor 14fef782d02440884392942c1120523 "
+                                     "028006030e0e7ebffc7f7070c0600140"),
+    "sb_v_double_arrow": (resize(90), "ns-resize v_double_arrow double_arrow size_ver size-ver "
+                                      "2870a09082c103050810ffdffffe0204 00008160000006810000408080010102"),
+    "fd_double_arrow": (resize(-45), "nesw-resize size_bdiag fcf1c3c7cd4491d801f1e1c78f100000"),
+    "bd_double_arrow": (resize(45), "nwse-resize size_fdiag c7088f0f3e6c8088236ef8e1e3e70000"),
+    "col-resize": (split(0), "split_h"),
+    "row-resize": (split(90), "split_v"),
+    "top_side": (side(0), "n-resize"),
+    "right_side": (side(90), "e-resize"),
+    "bottom_side": (side(180), "s-resize"),
+    "left_side": (side(270), "w-resize"),
+    "top_left_corner": (corner(0), "nw-resize"),
+    "top_right_corner": (corner(90), "ne-resize"),
+    "bottom_right_corner": (corner(180), "se-resize"),
+    "bottom_left_corner": (corner(270), "sw-resize"),
+    "sb_up_arrow": (scroll_arrow(0), "up-arrow"),
+    "sb_right_arrow": (scroll_arrow(90), "right-arrow"),
+    "sb_down_arrow": (scroll_arrow(180), "down-arrow"),
+    "sb_left_arrow": (scroll_arrow(270), "left-arrow"),
+    "X_cursor": (x_cursor, "x-cursor pirate"),
+    "dotbox": (dotbox, "target draped_box icon dot_box_mask"),
+    "pencil": (pencil, "draft"),
+    "zoom-in": (zoom("+"), ""),
+    "zoom-out": (zoom("-"), ""),
+    "ul_angle": (angle(0), ""),
+    "ur_angle": (angle(90), ""),
+    "lr_angle": (angle(180), ""),
+    "ll_angle": (angle(270), ""),
+    "top_tee": (tee(0), ""),
+    "right_tee": (tee(90), ""),
+    "bottom_tee": (tee(180), ""),
+    "left_tee": (tee(270), ""),
+}
+ANIMATED = {"wait": 90, "left_ptr_watch": 90}     # frame delay (ms)
+
+
+def draw(name, size, col, frame=0):
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    ctx = cairo.Context(surf)
+    ctx.set_antialias(cairo.ANTIALIAS_GRAY)
+    pen = Pen(ctx, size, col)
+    fn = CURSORS[name][0]
+    hot = fn(pen, frame) if name in ANIMATED else fn(pen)
+    surf.flush()
+    return surf, hot
+
+
+def pixels(surf):
+    data = bytes(surf.get_data())
+    if sys.byteorder == "big":       # cairo is native-endian, Xcursor little-endian
+        import array
+        a = array.array("I", data)
+        a.byteswap()
+        data = a.tobytes()
+    return data
+
+
+def xcursor(name, col, sizes):
+    images = []
+    for size in sizes:
+        frames = range(SPIN_FRAMES) if name in ANIMATED else [0]
+        for f in frames:
+            surf, (xh, yh) = draw(name, size, col, f)
+            images.append((size, size, size, xh, yh, ANIMATED.get(name, 0), pixels(surf)))
+    out = [struct.pack("<4sIII", b"Xcur", 16, 0x10000, len(images))]
+    pos = 16 + 12 * len(images)
+    chunks = []
+    for nominal, w, h, xh, yh, delay, data in images:
+        out.append(struct.pack("<III", 0xFFFD0002, nominal, pos))
+        chunk = struct.pack("<9I", 36, 0xFFFD0002, nominal, 1, w, h, xh, yh, delay) + data
+        chunks.append(chunk)
+        pos += len(chunk)
+    return b"".join(out + chunks)
+
+
+def stamp(col, sizes):
+    h = hashlib.sha256(open(os.path.realpath(__file__), "rb").read())
+    h.update(repr((sorted(col.items()), sizes)).encode())
+    return h.hexdigest()
+
+
+def build(target, col, sizes):
+    target = os.path.abspath(target)
+    marker = os.path.join(target, MARKER)
+    want = stamp(col, sizes)
+    try:
+        if open(marker).read().strip() == want:
+            return False
+    except OSError:
+        pass
+    if os.path.lexists(target) and not os.path.isfile(marker):
+        raise SystemExit("dotfiles-cursors: %s exists and was not made by dotfiles-cursors, not touching it" % target)
+    tmp = target + ".new"
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(os.path.join(tmp, "cursors"))
+    for name, (_, aliases) in CURSORS.items():
+        with open(os.path.join(tmp, "cursors", name), "wb") as f:
+            f.write(xcursor(name, col, sizes))
+        for a in aliases.split():
+            os.symlink(name, os.path.join(tmp, "cursors", a))
+    theme = "[Icon Theme]\nName=%s\nComment=Generated by dotfiles-cursors from dotfiles.conf\nInherits=Adwaita\n" % THEME
+    for fn in ("index.theme", "cursor.theme"):
+        with open(os.path.join(tmp, fn), "w") as f:
+            f.write(theme)
+    with open(os.path.join(tmp, MARKER), "w") as f:
+        f.write(want + "\n")
+    old = target + ".old"
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.lexists(target):
+        os.rename(target, old)
+    os.rename(tmp, target)
+    shutil.rmtree(old, ignore_errors=True)
+    return True
+
+
+def preview(path, col):
+    """All cursors at 32 and 64 px on dark, mid and light backgrounds, 3x enlarged, hotspots marked."""
+    names = list(CURSORS)
+    cols, zoom_ = 10, 3
+    cw = 64 * zoom_ + 16
+    rows = math.ceil(len(names) / cols)
+    bgs = ["#191c1c", "#7f7f7f", "#f2f2f2"]
+    w, h = cols * cw, rows * len(bgs) * cw
+    out = cairo.ImageSurface(cairo.FORMAT_RGB24, w, h)
+    c = cairo.Context(out)
+    for r in range(rows):
+        for bi, bg in enumerate(bgs):
+            c.set_source_rgba(*rgba(bg))
+            c.rectangle(0, (r * len(bgs) + bi) * cw, w, cw)
+            c.fill()
+    for i, name in enumerate(names):
+        for bi in range(len(bgs)):
+            x0, y0 = (i % cols) * cw + 8, ((i // cols) * len(bgs) + bi) * cw + 8
+            size = 32 if bi != 1 else 64
+            z = zoom_ * (2 if size == 32 else 1)
+            frame = 2 if name in ANIMATED else 0
+            surf, (xh, yh) = draw(name, size, col, frame)
+            c.save()
+            c.translate(x0, y0)
+            c.scale(z, z)
+            c.set_source_surface(surf, 0, 0)
+            c.get_source().set_filter(cairo.FILTER_NEAREST)
+            c.paint()
+            c.restore()
+            c.set_source_rgba(0, 1, 1, 1)
+            c.rectangle(x0 + xh * z, y0 + yh * z, z, z)
+            c.set_line_width(1)
+            c.stroke()
+            if bi == 0:
+                c.set_source_rgba(1, 1, 1, 0.6)
+                c.select_font_face("monospace")
+                c.set_font_size(11)
+                c.move_to(x0, y0 + cw - 12)
+                c.show_text(name)
+    out.write_to_png(path)
+
+
+def main(argv):
+    if len(argv) < 3 or argv[1] not in ("build", "preview"):
+        print(__doc__.strip())
+        return 2
+    col, sizes = dict(COLORS), set(SIZES)
+    for arg in argv[3:]:
+        k, _, v = arg.partition("=")
+        if k == "size" and v.isdigit() and 8 <= int(v) <= 256:
+            sizes.add(int(v))
+        elif k in COLORS and len(v) == 7 and v[0] == "#" and all(ch in "0123456789abcdefABCDEF" for ch in v[1:]):
+            col[k] = v.lower()
+        else:
+            print("dotfiles-cursors: bad argument '%s'" % arg, file=sys.stderr)
+            return 2
+    sizes = tuple(sorted(sizes))
+    col["idle"] = mix(col["body"], col["edge"], 0.2)     # spinner blocks that are off
+    # the running block of the spinner: the accent, unless the body already is the accent
+    col["spin"] = col["edge"] if col["accent"] == col["body"] else col["accent"]
+    if argv[1] == "preview":
+        preview(argv[2], col)
+        return 0
+    if build(argv[2], col, sizes):
+        print("built %s" % argv[2])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

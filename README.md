@@ -44,7 +44,8 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 - **Bright gruvbox colors** identify things (the WiFi icon is aqua, volume blue, brightness yellow, a VPN tunnel
   green). Red, yellow and orange keep their meaning everywhere: error, warning, urgent.
 - **Capsules:** Polybar, the prompt and the tmux status line group information in `surface` blocks with a colored
-  icon, separated by a gap. Corners are sharp everywhere: windows, menus, notifications, GTK and Firefox.
+  icon, separated by a gap. Corners are sharp everywhere: windows, menus, notifications, GTK, Firefox and the
+  mouse cursor.
 
 > [!TIP]
 > Change `accent = red` in `dotfiles.conf` to `blue`, `aqua` or any `#rrggbb` and run `dotfiles apply`: every
@@ -66,9 +67,10 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | **Lock and idle** | `xss-lock`, the `nerdsaver` screensaver and `i3lock-color` (clock, input line instead of a ring, status texts) |
 | **Browser** | `Firefox` (`userChrome.css`/`userContent.css` in the desktop colors) |
 | **GTK apps** | Adwaita dark with the palette on top (file dialogs, tray menus, polkit prompts) |
+| **Mouse cursor** | its own theme, drawn in the palette by `dotfiles apply` (`scripts/dotfiles-cursors`): sharp shapes, the busy indicator in the accent; `light`, `dark` or `accent` |
 | **Mail** | `neomutt` (theme in `config/mutt/theme.muttrc`; accounts stay in `~/.muttrc`) |
 | **Music** | `mpvim`, a vim-style terminal UI for `mpv` with the album cover (embedded or `cover.jpg`; sharper with `chafa`, `:cover` toggles it) |
-| **Scripts** | Bluetooth, WiFi, VPN, display (Windows-style), power menu, volume/brightness OSD, screenshots, screensaver, mail notifications |
+| **Scripts** | Bluetooth, WiFi, VPN, display (Windows-style), power menu, volume/brightness OSD, screenshots (region or window on a frozen screen), screensaver, mail notifications |
 
 ## Keybindings
 
@@ -94,6 +96,11 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | <kbd>Super</kbd> <kbd>v</kbd> | VPN menu |
 | <kbd>Print</kbd> / <kbd>Shift</kbd> <kbd>Print</kbd> | Screenshot / region screenshot (also copied to the clipboard) |
 | Volume and brightness keys | Change the value, shows an on-screen bar |
+
+**Region screenshot** (<kbd>Shift</kbd> <kbd>Print</kbd>): the screen freezes and dims, a bar at the top shows the
+keys. Drag to take a region (its size is shown next to it), click to take the window under the pointer, <kbd>Return</kbd>
+for the whole monitor, <kbd>Esc</kbd> or a right click to cancel. Lines through the pointer show where it is. Without
+input it cancels itself after 30 s.
 
 Terminal tools started from Rofi (audio, calculus, htop, mutt, notice) open as a centered floating window
 (`terminal.sh --float`, with the terminal from `dotfiles.conf`).
@@ -174,15 +181,15 @@ dotfiles apply      # or: dotfiles edit (opens the file, applies after saving)
 ```
 
 `dotfiles apply` checks every value (unknown keys and invalid values are reported, nothing is changed then),
-renders `templates/*` into `~/.config/dotfiles/`, and reloads i3, Polybar, dunst and tmux. Alacritty, Rofi and fzf
-pick the change up by themselves, Neovim, GTK programs, Firefox and open shells on their next start. Idle times and the
-keyboard layout are applied immediately.
+renders `templates/*` into `~/.config/dotfiles/`, draws the cursor theme into `~/.icons/dotfiles`, and reloads i3,
+Polybar, dunst and tmux. Alacritty, Rofi and fzf pick the change up by themselves, Neovim, GTK programs, Firefox and
+open shells on their next start (also the new cursor). Idle times and the keyboard layout are applied immediately.
 
 | Group | Keys |
 | --- | --- |
 | Colors | `accent` (gruvbox name like `red`, `blue`, `aqua` or `#rrggbb`), `accent_text`, `bg`, `surface`, `overlay`, `fg`, `subtle`, `muted` |
 | Fonts | `font` (a Nerd Font), `font_size_terminal`, `font_size_bar`, `font_size_menu`, `font_size_notify`, `font_size_window` |
-| Layout | `bar_height`, `border_width`, `gaps`, `terminal_opacity`, `terminal_padding_x`, `terminal_padding_y` |
+| Layout | `bar_height`, `border_width`, `gaps`, `terminal_opacity`, `terminal_padding_x`, `terminal_padding_y`, `cursor_style` (`light`, `dark`, `accent`), `cursor_size` |
 | Behaviour | `terminal`, `keyboard_layout`, `wallpaper`, `screensaver_after`, `lock_after`, `display_off_after` |
 
 Other commands: `dotfiles check`, `dotfiles get accent`, `dotfiles list`.
@@ -215,7 +222,7 @@ xsetroot xset xrandr xclip scrot xbanish xprintidle \
 pipewire wireplumber libspa-bluetooth pulsemixer \
 bluez rfkill NetworkManager libnm libnotify elogind polkit-gnome \
 mpv mpv-mpris playerctl brightnessctl \
-neomutt fzf ncurses caffeine-ng python3 python3-gobject tmux ffmpeg
+neomutt fzf ncurses caffeine-ng python3 python3-gobject gtk+3 tmux ffmpeg
 ```
 
 Optional:
@@ -231,7 +238,7 @@ alacritty 0.14 (`[general] import`), fzf 0.66 (`--gutter`), NetworkManager 1.20.
 Also needed:
 - `calculus` (built separately, expects `~/.local/bin/calculus`)
 - JetBrainsMono Nerd Font (v3, `md-*` icons; on Void in `nerd-fonts-ttf`)
-- Optional: the `Bibata-Modern-Classic` cursor theme (e.g. in `~/.icons`; without it X shows its default cursor)
+- No cursor theme: `dotfiles apply` draws its own (with `python3-cairo`, which comes with `python3-gobject`)
 - Wallpaper at `~/images/wallpaper` (or set `wallpaper` in `dotfiles.conf`); screenshots go to `~/images/screenshots`
 - Optional: `numpy` for the pixel screensavers of `nerdsaver`, Wine for the games in `applications/local/`
 
@@ -293,6 +300,8 @@ locations (or put your own launchers there) and run `./install.sh` again.
 
 - The screen is locked before suspend (`xss-lock --transfer-sleep-lock`), so no content is visible on resume. If `i3lock-color` fails, plain `i3lock` is used; if that fails too, a critical notification says that the screen is **not** locked.
 - Text that other people control (song titles from websites, WiFi names, Bluetooth device names, VPN profile names) is sanitized before it reaches Polybar, which would otherwise interpret `%{A:…:}` tags as clickable shell commands.
+- The region screenshot overlay holds pointer and keyboard, which would keep `i3lock` from locking. It gives them up
+  when logind announces suspend or a lock, and before the screensaver starts.
 - System menus never act on typed text that matches no entry (`rofi -no-custom`), so a typo cannot select a random network or display mode.
 - WiFi and VPN passwords and keys never appear on a command line, in the environment or in a notification: they go from Rofi's password field to NetworkManager over D-Bus (`wifi-connect` and `vpn` use libnm), and the profiles are stored root-only. Imported VPN files are parsed, never executed.
 - The git prompt runs `git status` with `core.fsmonitor=false`, so a repository's own config cannot start a program when you `cd` into it. Control characters in directory names are replaced in the prompt (no escape sequences from a crafted directory name).
@@ -309,4 +318,8 @@ locations (or put your own launchers there) and run `./install.sh` again.
 - **Idle lock after updating these dotfiles:** `xss-lock` only starts with the session. Log out and back in once (an i3 restart is not enough).
 - **Previous Neovim colors:** set `colorscheme = "catppuccin-frappe"` in `config/nvim/lua/plugins/colorscheme.lua`.
 - **Colors look like defaults (dunst, Rofi, Alacritty):** the generated files are missing. Run `dotfiles apply`.
+- **Old mouse cursor in some programs:** programs load the cursor theme when they start, i3 when it restarts. After
+  the first `dotfiles apply` log out and back in once. Programs started without the session environment use
+  `~/.icons/default/index.theme`; put `Inherits=dotfiles` there to get the same cursor. `dotfiles apply` leaves a
+  `~/.icons/dotfiles` alone that it did not create (it says so); rename that directory.
 - **GTK program still light or unchanged:** GTK reads `~/.config/gtk-3.0/` only when a program starts; restart it. Tools like `lxappearance` replace the linked `settings.ini` with their own file, run `./install.sh` again to restore the link (your file is kept as a backup).

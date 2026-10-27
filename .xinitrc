@@ -1,9 +1,16 @@
 #!/bin/bash
 
+# Values from dotfiles.conf (keyboard layout, cursor size); defaults until `dotfiles apply` ran
+DF_KEYBOARD_LAYOUT=de
+DF_CURSOR_SIZE=64
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+
 xrdb -merge ~/.Xresources
 
-export XCURSOR_SIZE=32
-export XCURSOR_THEME=Bibata-Modern-Classic
+# Cursor theme drawn by `dotfiles apply` into ~/.icons/dotfiles (scripts/dotfiles-cursors)
+xrdb -merge <<< "Xcursor.size: $DF_CURSOR_SIZE"
+export XCURSOR_SIZE=$DF_CURSOR_SIZE
+export XCURSOR_THEME=dotfiles
 export MOZ_USE_XINPUT2=0
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
@@ -13,8 +20,6 @@ esac
 xsetroot -cursor_name left_ptr
 
 # Keyboard layout from dotfiles.conf (`keyboard_layout`, e.g. de or us,de or de(nodeadkeys))
-DF_KEYBOARD_LAYOUT=de
-. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
 layouts="" variants=""
 IFS=, read -ra _kb <<< "$DF_KEYBOARD_LAYOUT"
 for k in "${_kb[@]}"; do

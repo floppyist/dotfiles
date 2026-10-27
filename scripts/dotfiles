@@ -11,6 +11,7 @@ usage: dotfiles apply [--no-reload]   generate the theme files from dotfiles.con
 dotfiles.conf lives in the repository root. `apply` renders templates/* into
 ~/.config/dotfiles/, which the configs of i3, polybar, rofi, dunst, alacritty, tmux,
 neovim, neomutt, GTK, fzf and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
+The mouse cursor theme is drawn into ~/.icons/dotfiles (scripts/dotfiles-cursors).
 """
 import colorsys
 import glob
@@ -40,6 +41,10 @@ GRUVBOX = {
 }
 ANSI = ["red", "green", "yellow", "blue", "purple", "aqua"]  # index + 1 = ANSI color number
 TERMINALS = ["alacritty", "kitty", "wezterm", "xterm", "urxvt", "st"]
+CURSOR_STYLES = ["light", "dark", "accent"]
+CURSOR_THEME = "dotfiles"      # the name in .Xresources, .xinitrc and gtk-3.0/settings.ini
+CURSOR_DIR = os.path.join(HOME, ".icons", CURSOR_THEME)   # ~/.icons: xcb-cursor (i3) does not
+                                                          # search ~/.local/share/icons
 
 # key: (type, default, min, max). Values end up in config files that can run commands
 # (i3 exec, polybar actions, tmux, shell), so every type has a strict pattern.
@@ -64,6 +69,8 @@ SCHEMA = {
     "terminal_opacity": ("float", "0.90", 0.1, 1.0),
     "terminal_padding_x": ("int", "14", 0, 100),
     "terminal_padding_y": ("int", "10", 0, 100),
+    "cursor_style": ("choice", "light", CURSOR_STYLES),
+    "cursor_size": ("int", "32", 16, 128),
     "terminal": ("choice", "alacritty", TERMINALS),
     "keyboard_layout": ("xkb", "de"),
     "wallpaper": ("path", "~/images/wallpaper"),
@@ -205,6 +212,9 @@ def resolve(c):
     for name, (normal, br) in GRUVBOX.items():
         v[name] = normal
         v[name + "_hi"] = br
+    # mouse cursor: fill and outline of the shapes
+    v["cursor_body"], v["cursor_edge"] = {"light": (c["fg"], c["bg"]), "dark": (c["bg"], c["fg"]),
+                                         "accent": (v["accent"], c["fg"])}[c["cursor_style"]]
     v["gray"] = "#928374"
     v["black"] = "#2a3030"
     v["bright"] = "#fbf1c7"
@@ -310,7 +320,27 @@ def generate(v):
         n = symlink(os.path.join(OUT, "firefox.css"), os.path.join(chrome, "dotfiles.css"))
         if n:
             notes.append(n)
+    built, note = cursors(v)
+    if built:
+        changed.add("cursors")
+    if note:
+        notes.append(note)
     return changed, notes
+
+
+def cursors(v):
+    """Draw the cursor theme (only when colors, size or the drawing code changed)."""
+    cmd = [sys.executable, os.path.join(REPO, "scripts", "dotfiles-cursors"), "build", CURSOR_DIR,
+           "body=" + v["cursor_body"], "edge=" + v["cursor_edge"], "accent=" + v["accent"],
+           "red=" + v["red"], "size=" + v["cursor_size"]]
+    try:
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, "skipped the cursor theme (%s)" % e
+    if r.returncode != 0:
+        err = (r.stderr.strip().splitlines() or ["exit status %d" % r.returncode])[-1]
+        return False, "skipped the cursor theme: %s" % err
+    return bool(r.stdout.strip()), None
 
 
 # ── reload ─────────────────────────────────────────────────────────────────────
@@ -361,6 +391,17 @@ def reload(changed, old, v):
     if x11 and old.get("wallpaper") not in (None, v["wallpaper"]) and os.path.exists(v["wallpaper"]):
         if run(["feh", "--no-fehbg", "--bg-fill", v["wallpaper"]]):
             done.append("wallpaper")
+    if x11 and ("cursors" in changed or old.get("cursor_size") not in (None, v["cursor_size"])):
+        # the root window (desktop) right away; programs load cursors when they start
+        res = "Xcursor.theme: %s\nXcursor.size: %s\n" % (CURSOR_THEME, v["cursor_size"])
+        try:
+            subprocess.run(["xrdb", "-merge"], input=res, text=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        env = dict(os.environ, XCURSOR_THEME=CURSOR_THEME, XCURSOR_SIZE=v["cursor_size"])
+        if run(["xsetroot", "-cursor_name", "left_ptr"], env=env):
+            done.append("cursor")
     if "polybar.ini" in changed and running("polybar"):
         launch = os.path.join(XDG_CONFIG, "polybar", "launch.sh")
         if run([launch]):
@@ -392,9 +433,12 @@ def apply(no_reload):
                             ("fzfrc", "fzf (next start)"),
                             ("nvim.lua", "neovim (next start)"), ("gtk.css", "GTK programs (next start)"),
                             ("firefox.css", "firefox (restart)"),
+                            ("cursors", "programs (new cursors on their next start, i3 after a restart)"),
                             ("theme.sh", "shells and lock screen (next start)")) if f in changed]
     if later:
         print("dotfiles: picked up by %s" % ", ".join(later))
+    if old.get("cursor_size") not in (None, v["cursor_size"]):
+        print("dotfiles: the cursor size reaches every program after logging in again (XCURSOR_SIZE)")
     return 0
 
 

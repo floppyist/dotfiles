@@ -9,10 +9,16 @@ PREFIX="screenshot_"
 
 notify() { notify-send -a screenshot "$@" >/dev/null 2>&1; }
 
-# Selection frame in the accent color from dotfiles.conf
-DF_ACCENT="#cc241d"
-# shellcheck source=/dev/null
-. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+select=0
+[[ "${1:-}" == "--select" ]] && select=1
+
+if (( select )); then
+    # One selection at a time (a second Shift+Print while choosing does nothing)
+    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/screenshot-select.lock"
+    flock -n 9 || exit 0
+    tmp=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/screenshot.XXXXXX") || exit 1
+    trap 'rm -rf "$tmp"' EXIT
+fi
 
 mkdir -p "$TARGET_DIR"
 
@@ -26,12 +32,26 @@ done
 FILENAME=$(printf '%s%03d.png' "$PREFIX" $(( max + 1 )))
 FILE_PATH="$TARGET_DIR/$FILENAME"
 
-args=(-z)
-[[ "${1:-}" == "--select" ]] && args+=(--select --freeze --line mode=edge,width=2,color="$DF_ACCENT")
-
-if ! scrot "${args[@]}" "$FILE_PATH"; then
-    # Esc during region selection is not an error
-    [[ "${1:-}" == "--select" ]] && exit 0
+if (( select )); then
+    # Freeze: capture the whole screen first, then choose the region on that picture (snip
+    # shows it dimmed, with a hint bar; drag = region, click = window, Esc = cancel).
+    # timeout: never leave the pointer and keyboard grabbed if snip hangs.
+    if ! scrot -z "$tmp/full.png"; then
+        notify -u critical "Screenshot failed" "scrot could not capture the screen"
+        exit 1
+    fi
+    timeout 300 "$(dirname "$(readlink -f "$0")")/snip" "$tmp/full.png" "$FILE_PATH" 2>"$tmp/err"
+    rc=$?
+    exec 9>&-      # release the lock (xclip below stays in the background and would keep it)
+    case $rc in
+        0) ;;
+        1) exit 0 ;;   # cancelled
+        124) notify -u critical "Screenshot cancelled" "no region chosen within 5 minutes"; exit 1 ;;
+        *) err=$(tail -n 1 "$tmp/err" 2>/dev/null)
+           notify -u critical "Screenshot failed" "${err:-region selection did not start}"
+           exit 1 ;;
+    esac
+elif ! scrot -z "$FILE_PATH"; then
     notify -u critical "Screenshot failed" "scrot could not capture the screen"
     exit 1
 fi

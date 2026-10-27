@@ -9,7 +9,8 @@
 #   (e.g. to a file's old location) are simply replaced.
 # - Machine-specific launchers (applications/local/) are linked only if their program exists.
 # - Links into this repository whose file is gone (renamed or deleted here) are removed.
-# - Generates the theme files from dotfiles.conf (`dotfiles apply`, into ~/.config/dotfiles).
+# - Generates the theme files from dotfiles.conf (`dotfiles apply`, into ~/.config/dotfiles) and
+#   the mouse cursor theme (~/.icons/dotfiles).
 # - Does not touch /etc (udev rule) or Firefox profiles; those are printed as hints.
 set -euo pipefail
 

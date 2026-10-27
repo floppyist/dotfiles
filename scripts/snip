@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""snip - choose a region of a frozen screenshot (Shift+Print)
+
+usage: snip FULL.png OUT.png
+
+FULL.png is a capture of the whole X screen (screenshot.sh takes it with scrot). snip lays it
+over the screen, dimmed, so everything stays frozen while you choose:
+
+  drag              a region (the size is shown next to it)
+  click             the window under the pointer (i3); outside of windows: the monitor
+  Enter             the monitor under the pointer
+  Esc, right click  cancel
+
+Lines through the pointer show where it is even while xbanish hides it. The choice is cut out
+of FULL.png and written to OUT.png. Exit status: 0 saved, 1 cancelled, 2 error.
+
+While snip holds pointer and keyboard, i3lock could not grab them, so snip gives up on its own
+before anything locks: when logind announces suspend or a lock (PrepareForSleep, Lock), and
+after a few seconds without input, before the screensaver would start.
+
+Unlike `scrot --select --freeze` (which grabs the whole X server, so neither picom could draw
+the frame nor xbanish bring the pointer back) this is an ordinary override-redirect window.
+"""
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+os.environ["GDK_SCALE"] = "1"       # coordinates in pixels of the capture, also on HiDPI setups
+
+import gi  # noqa: E402
+
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+gi.require_version("Gtk", "3.0")
+gi.require_version("Pango", "1.0")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+import cairo  # noqa: E402
+
+DRAG = 4            # px the pointer has to move before a press becomes a region
+DIM = 0.55          # opacity of the bg color over everything outside the selection
+GRAB_TRIES = 150    # x 20 ms: i3 still holds the keyboard while Print is down
+IDLE = 30           # s without input until snip cancels (less if the screensaver starts sooner)
+
+THEME = {"accent": "#cc241d", "accent_text": "#fb4934", "on_accent": "#191c1c", "bg": "#191c1c",
+         "surface": "#252a2a", "fg": "#ebdbb2", "subtle": "#a89984", "font": "JetBrainsMono Nerd Font",
+         "font_size_menu": "13", "bar_height": "40", "border_width": "2", "screensaver_after": "60"}
+
+
+def theme():
+    """Colors and sizes from ~/.config/dotfiles/theme.sh (defaults if it is missing or odd)."""
+    t = dict(THEME)
+    path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "dotfiles", "theme.sh")
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        m = re.match(r"DF_([A-Z0-9_]+)=(.*)$", line)
+        if not m or m.group(1).lower() not in t:
+            continue
+        key = m.group(1).lower()
+        try:
+            val = (shlex.split(m.group(2)) or [""])[0]
+        except ValueError:
+            continue
+        ok = {"font": r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}"}.get(key, r"[0-9]{1,5}" if not THEME[key].startswith("#")
+                                                                else r"#[0-9a-fA-F]{6}")
+        if re.fullmatch(ok, val):
+            t[key] = val
+    return t
+
+
+def rgba(h, a=1.0):
+    return (int(h[1:3], 16) / 255, int(h[3:5], 16) / 255, int(h[5:7], 16) / 255, a)
+
+
+# ── i3: which windows are visible where ──────────────────────────────────────────
+
+def i3_windows():
+    """Client areas (x, y, w, h) of the windows visible now, from bottom to top."""
+    try:
+        out = subprocess.run(["i3-msg", "-t", "get_tree"], capture_output=True, timeout=2).stdout
+        tree = json.loads(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    found = []
+
+    def client(n):
+        r, w = n["rect"], n.get("window_rect") or {}
+        if w.get("width", 0) > 0 and w.get("height", 0) > 0:
+            return (r["x"] + w["x"], r["y"] + w["y"], w["width"], w["height"])
+        return (r["x"], r["y"], r["width"], r["height"])
+
+    def fullscreen(n):
+        if n.get("fullscreen_mode"):
+            return n
+        for k in n.get("nodes", []) + n.get("floating_nodes", []):
+            f = fullscreen(k)
+            if f:
+                return f
+        return None
+
+    def visit(n):
+        if n.get("window"):
+            found.append(client(n))
+        kids = n.get("nodes", [])
+        if n.get("layout") in ("tabbed", "stacked") and kids:      # only the front tab is visible
+            front = (n.get("focus") or [kids[0]["id"]])[0]
+            kids = [k for k in kids if k["id"] == front] or kids[:1]
+        for k in kids:
+            visit(k)
+        # floating windows: i3 raises them on focus, so the focus order is the stacking order
+        rank = {f: i for i, f in enumerate(n.get("focus", []))}
+        for k in sorted(n.get("floating_nodes", []), key=lambda k: -rank.get(k["id"], len(rank))):
+            visit(k)
+
+    for output in tree.get("nodes", []):
+        if output.get("name", "").startswith("__"):
+            continue
+        for area in output.get("nodes", []):
+            if area.get("type") == "dockarea":                     # polybar
+                for d in area.get("nodes", []):
+                    visit(d)
+            elif area.get("type") == "con":                        # the workspaces of the output
+                shown = (area.get("focus") or [None])[0]
+                for ws in area.get("nodes", []):
+                    if ws["id"] == shown:
+                        visit(fullscreen(ws) or ws)
+    return found
+
+
+def inside(r, x, y):
+    return r[0] <= x < r[0] + r[2] and r[1] <= y < r[1] + r[3]
+
+
+# ── what is shown (no GTK widgets: also drawable into an image for tests) ────────
+
+class Scene:
+    def __init__(self, image, size, monitors, windows, t, ptr):
+        self.image, (self.W, self.H) = image, size
+        self.monitors = monitors or [(0, 0, self.W, self.H)]
+        self.windows, self.t = windows, t
+        self.ptr = ptr
+        self.press = None           # where button 1 went down
+        self.dragging = False
+        self.hint_mon = self.monitor_at(*ptr)
+
+    def monitor_at(self, x, y):
+        for m in self.monitors:
+            if inside(m, x, y):
+                return m
+        return min(self.monitors, key=lambda m: abs(m[0] + m[2] / 2 - x) + abs(m[1] + m[3] / 2 - y))
+
+    def window_at(self, x, y):
+        for r in reversed(self.windows):
+            if inside(r, x, y):
+                return r
+        return None
+
+    def region(self):
+        (x0, y0), (x1, y1) = self.press, self.ptr
+        return (min(x0, x1), min(y0, y1), abs(x1 - x0) + 1, abs(y1 - y0) + 1)
+
+    def target(self):
+        """What a release here would take: the region while dragging, else the window under
+        the pointer (or its monitor)."""
+        if self.dragging:
+            return self.region()
+        return self.window_at(*self.ptr) or self.monitor_at(*self.ptr)
+
+    # events (window coordinates = screen coordinates)
+    def motion(self, x, y):
+        self.ptr = (x, y)
+        if self.press and not self.dragging:
+            self.dragging = abs(x - self.press[0]) > DRAG or abs(y - self.press[1]) > DRAG
+
+    def button_down(self, x, y):
+        self.ptr, self.press, self.dragging = (x, y), (x, y), False
+
+    def button_up(self, x, y):
+        self.motion(x, y)
+        rect = self.target()
+        self.press, self.dragging = None, False
+        return rect
+
+    # drawing
+    def layout(self, cr, markup, bold=False):
+        lay = PangoCairo.create_layout(cr)
+        fd = Pango.FontDescription.from_string("%s %s" % (self.t["font"], self.t["font_size_menu"]))
+        if bold:
+            fd.set_weight(Pango.Weight.BOLD)
+        lay.set_font_description(fd)
+        lay.set_markup(markup, -1)
+        return lay
+
+    def capsules(self, cr, parts, x, y, draw=True):
+        """Blocks side by side like the polybar capsules: [(markup, bg, fg, bold)]. Returns (w, h)."""
+        pad_x, pad_y = 14, 7
+        lays = [(self.layout(cr, m, b), bg, fg) for m, bg, fg, b in parts]
+        h = max(lay.get_pixel_size()[1] for lay, _, _ in lays) + 2 * pad_y
+        w = sum(lay.get_pixel_size()[0] + 2 * pad_x for lay, _, _ in lays)
+        if draw:
+            for lay, bg, fg in lays:
+                lw, lh = lay.get_pixel_size()
+                cr.set_source_rgba(*rgba(bg))
+                cr.rectangle(x, y, lw + 2 * pad_x, h)
+                cr.fill()
+                cr.set_source_rgba(*rgba(fg))
+                cr.move_to(x + pad_x, y + (h - lh) // 2)
+                PangoCairo.show_layout(cr, lay)
+                x += lw + 2 * pad_x
+        return w, h
+
+    def hint_parts(self):
+        t = self.t
+        keys = [("drag", "region"), ("click", "window"), ("enter", "monitor"), ("esc", "cancel")]
+        text = "   ".join("<b>%s</b> <span foreground='%s'>%s</span>" % (k, t["subtle"], v) for k, v in keys)
+        return [("\U000F0100  screenshot", t["accent"], t["on_accent"], True), (text, t["surface"], t["fg"], False)]
+
+    def hint_rect(self, cr):
+        mx, my, mw, mh = self.hint_mon
+        w, h = self.capsules(cr, self.hint_parts(), 0, 0, draw=False)
+        gap = 16
+        top = (mx + (mw - w) // 2, my + int(self.t["bar_height"]) + gap, w, h)
+        bottom = (top[0], my + mh - h - gap - 8, w, h)
+        return top, bottom
+
+    def update_hint(self, cr, rect):
+        """Keep the hint out of the way: bottom while the pointer or a region is near the top spot."""
+        top, bottom = self.hint_rect(cr)
+        near = (top[0] - 40, top[1] - 40, top[2] + 80, top[3] + 80)
+
+        def hits(r):
+            return not (r[0] + r[2] <= near[0] or r[0] >= near[0] + near[2] or
+                        r[1] + r[3] <= near[1] or r[1] >= near[1] + near[3])
+        low = inside(near, *self.ptr) or (self.dragging and hits(rect))
+        return bottom if low else top
+
+    def paint(self, cr):
+        t = self.t
+        bw = max(1, int(t["border_width"]))
+        rect = self.target()
+        cr.set_source_surface(self.image, 0, 0)
+        cr.paint()
+        # dim everything but the target
+        cr.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+        cr.rectangle(0, 0, self.W, self.H)
+        cr.rectangle(*rect)
+        cr.set_source_rgba(*rgba(t["bg"], DIM))
+        cr.fill()
+        # accent frame around it, outside, so it never covers what is taken
+        x, y, w, h = rect
+        cr.rectangle(x - bw, y - bw, w + 2 * bw, h + 2 * bw)
+        cr.rectangle(x, y, w, h)
+        cr.set_source_rgba(*rgba(t["accent"]))
+        cr.fill()
+        cr.set_fill_rule(cairo.FILL_RULE_WINDING)
+        # where the pointer is (xbanish hides it after the key press until the mouse moves)
+        if not self.dragging:
+            px, py = self.ptr
+            cr.set_source_rgba(*rgba(t["fg"], 0.35))
+            cr.rectangle(0, py, self.W, 1)
+            cr.rectangle(px, 0, 1, self.H)
+            cr.fill()
+        hint = self.update_hint(cr, rect)
+        self.paint_size(cr, rect, hint)
+        self.capsules(cr, self.hint_parts(), hint[0], hint[1])
+
+    def paint_size(self, cr, rect, hint):
+        """`W × H` below the lower right corner; above or inside if there is no room, and
+        above the hint if they would overlap."""
+        x, y, w, h = rect
+        bw = max(1, int(self.t["border_width"]))
+        parts = [("%d × %d" % (w, h), self.t["surface"], self.t["fg"], False)]
+        lw, lh = self.capsules(cr, parts, 0, 0, draw=False)
+        mx, my, mw, mh = self.monitor_at(x + w // 2, y + h // 2)
+        lx = min(max(x + w + bw - lw, mx), mx + mw - lw)
+        ly = y + h + bw + 6
+        if ly + lh > my + mh:
+            ly = y - bw - 6 - lh
+        if ly < my:
+            ly, lx = y + h - lh - 6, min(max(x + w - lw - 6, mx), mx + mw - lw)
+        hx, hy, hw, hh = hint
+        if lx < hx + hw and lx + lw > hx and ly < hy + hh and ly + lh > hy:
+            ly = hy - lh - 6
+        self.capsules(cr, parts, lx, ly)
+
+
+# ── the overlay window ───────────────────────────────────────────────────────────
+
+class Overlay(Gtk.Window):
+    def __init__(self, pix, out, t):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.pix, self.out, self.result = pix, out, 1
+        disp = Gdk.Display.get_default()
+        self.seat = disp.get_default_seat()
+        root = Gdk.get_default_root_window()
+        size = (root.get_width(), root.get_height())
+        monitors = []
+        for i in range(disp.get_n_monitors()):
+            g = disp.get_monitor(i).get_geometry()
+            monitors.append((g.x, g.y, g.width, g.height))
+        _, px, py = self.seat.get_pointer().get_position()
+        self.scene = Scene(None, size, monitors, i3_windows(), t, (px, py))
+        self.cursor = Gdk.Cursor.new_from_name(disp, "crosshair")
+        self.tries, self.done = 0, False
+        self.idle_after = max(5, min(IDLE, int(t["screensaver_after"]) - 3))
+        self.idle = GLib.timeout_add_seconds(self.idle_after, self.on_idle)
+        self.watch_logind()
+
+        self.set_app_paintable(True)
+        self.move(0, 0)
+        self.set_size_request(*size)
+        self.add_events(Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.BUTTON_PRESS_MASK |
+                        Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.KEY_PRESS_MASK)
+        self.connect("realize", self.on_realize)
+        self.connect("draw", self.on_draw)
+        self.connect("motion-notify-event", self.on_motion)
+        self.connect("button-press-event", self.on_press)
+        self.connect("button-release-event", self.on_release)
+        self.connect("key-press-event", self.on_key)
+
+    def on_realize(self, _):
+        win = self.get_window()
+        win.set_cursor(self.cursor)
+        # a server-side copy of the capture: repainting it on every motion is cheap
+        self.scene.image = Gdk.cairo_surface_create_from_pixbuf(self.pix, 1, win)
+        GLib.timeout_add(20, self.grab)
+
+    def grab(self):
+        """Pointer and keyboard to this window (an override-redirect window gets no focus)."""
+        status = self.seat.grab(self.get_window(), Gdk.SeatCapabilities.ALL, False, self.cursor, None, None)
+        if status == Gdk.GrabStatus.SUCCESS:
+            return False
+        self.tries += 1
+        if self.tries >= GRAB_TRIES:
+            print("snip: could not grab pointer and keyboard (%s)" % status.value_nick, file=sys.stderr)
+            self.finish(None, 2)
+            return False
+        return True
+
+    def watch_logind(self):
+        """Cancel as soon as the session is going to lock or sleep (xss-lock starts i3lock then)."""
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except GLib.Error:
+            return
+        for iface, signal in (("org.freedesktop.login1.Manager", "PrepareForSleep"),
+                              ("org.freedesktop.login1.Session", "Lock")):
+            bus.signal_subscribe("org.freedesktop.login1", iface, signal, None, None,
+                                 Gio.DBusSignalFlags.NONE, lambda *a: self.finish(None, 1))
+        self.bus = bus
+
+    def on_idle(self):
+        self.idle = None
+        self.finish(None, 1)
+        return False
+
+    def active(self):
+        """Input happened: restart the idle countdown."""
+        if self.idle:
+            GLib.source_remove(self.idle)
+        self.idle = GLib.timeout_add_seconds(self.idle_after, self.on_idle)
+
+    def on_draw(self, _, cr):
+        if self.scene.image is not None:
+            self.scene.paint(cr)
+        return True
+
+    def on_motion(self, _, ev):
+        self.active()
+        self.scene.motion(int(ev.x_root), int(ev.y_root))
+        self.queue_draw()
+        return True
+
+    def on_press(self, _, ev):
+        if ev.type != Gdk.EventType.BUTTON_PRESS:       # ignore the extra double-click events
+            return True
+        self.active()
+        if ev.button == 3:
+            self.finish(None, 1)
+        elif ev.button == 1:
+            self.scene.button_down(int(ev.x_root), int(ev.y_root))
+            self.queue_draw()
+        return True
+
+    def on_release(self, _, ev):
+        if ev.button == 1 and self.scene.press:
+            self.finish(self.scene.button_up(int(ev.x_root), int(ev.y_root)), 0)
+        return True
+
+    def on_key(self, _, ev):
+        self.active()
+        if ev.keyval == Gdk.KEY_Escape:
+            self.finish(None, 1)
+        elif ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.finish(self.scene.monitor_at(*self.scene.ptr), 0)
+        return True
+
+    def finish(self, rect, result):
+        if self.done:
+            return
+        self.done = True
+        self.seat.ungrab()
+        self.hide()
+        Gdk.Display.get_default().flush()
+        if rect is not None:
+            result = save(self.pix, rect, self.out)
+        self.result = result
+        Gtk.main_quit()
+
+
+def save(pix, rect, out):
+    x, y, w, h = rect
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(pix.get_width(), x + w), min(pix.get_height(), y + h)
+    if x1 <= x0 or y1 <= y0:
+        return 1
+    try:
+        pix.new_subpixbuf(x0, y0, x1 - x0, y1 - y0).savev(out, "png", [], [])
+    except GLib.Error as e:
+        print("snip: cannot write %s: %s" % (out, e.message), file=sys.stderr)
+        return 2
+    return 0
+
+
+def main(argv):
+    if len(argv) != 3:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    if Gdk.Display.get_default() is None:
+        print("snip: no X display", file=sys.stderr)
+        return 2
+    try:
+        pix = GdkPixbuf.Pixbuf.new_from_file(argv[1])
+    except GLib.Error as e:
+        print("snip: cannot read %s: %s" % (argv[1], e.message), file=sys.stderr)
+        return 2
+    GLib.set_prgname("snip")
+    Gdk.set_program_class("Snip")          # WM_CLASS, for the picom rule
+    win = Overlay(pix, argv[2], theme())
+    win.show_all()
+    Gtk.main()
+    return win.result
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
