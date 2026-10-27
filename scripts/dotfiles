@@ -224,7 +224,7 @@ def resolve(c):
     v["bar_font_offset"] = str(round(int(c["font_size_bar"]) * 0.3))
     v["bar_font_offset_small"] = str(round(small * 0.3))
     # width of the terminal's ▌ bar (half a cell, alacritty truncates): cell = pt * 96/72 px
-    # * 0.6 em (JetBrains Mono's advance). Firefox draws the selected tab's underline with it.
+    # * 0.6 em (JetBrains Mono's advance). Firefox: the selected tab's underline, the download line.
     v["term_bar_width"] = str(max(1, int(c["font_size_terminal"]) * 8 // 10 // 2))
     # notifications sit 12 px below the bar and 12 px from the right edge
     v["notify_offset_y"] = str(int(c["bar_height"]) + 12)

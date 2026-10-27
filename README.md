@@ -65,7 +65,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | **Launcher and menus** | `Rofi`, fzf-style; one shared menu helper for all system menus |
 | **Network** | WiFi menu and the `vpn` tool for NetworkManager: WireGuard, OpenVPN, Cisco, FRITZ!Box (see [WiFi and VPN](#wifi-and-vpn)) |
 | **Lock and idle** | `xss-lock`, the `nerdsaver` screensaver and `i3lock-color` (clock, input line instead of a ring, status texts) |
-| **Browser** | `Firefox` (`userChrome.css`/`userContent.css` in the desktop colors) |
+| **Browser** | `Firefox` (`userChrome.css`/`userContent.css` in the desktop colors; no buttons, a running download is an accent line under the URL bar) |
 | **GTK apps** | Adwaita dark with the palette on top (file dialogs, tray menus, polkit prompts) |
 | **Mouse cursor** | its own theme, drawn in the palette by `dotfiles apply` (`scripts/dotfiles-cursors`): sharp shapes, the busy indicator in the accent; `light`, `dark` or `accent` |
 | **Mail** | `neomutt` (theme in `config/mutt/theme.muttrc`; accounts stay in `~/.muttrc`) |

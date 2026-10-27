@@ -5,6 +5,7 @@
  *   │                             │█████████████████████████████│  selected: surface + accent line
  *   ├─────────────────────────────┴─────────────────────────────┤
  *   │                        example.org                        │  URL bar, full width
+ *   │▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄                                    │  download progress (accent)
  *   ├───────────────────────────────────────────────────────────┤
  *   │ example.org     https://example.org/                      │  results (while typing)
  *   └───────────────────────────────────────────────────────────┘
@@ -38,14 +39,30 @@
     --df-yellow: #d79921;
     --df-red: #fb4934;
     --df-font: "JetBrainsMono Nerd Font";
-    /* width of the terminal's ▌ bar (half a cell): the selected tab's underline */
+    /* width of the terminal's ▌ bar (half a cell) in screen pixels: the selected tab's
+     * underline and the download progress line */
     --df-bar: 6px;
 }
 
 :root {
     --df-tab-height: 40px;
     --df-urlbar-height: 28px;
+    /* --df-bar in CSS px, which layout.css.devPixelsPerPx (or the DPI) scales */
+    --df-line: calc(var(--df-bar) / var(--df-scale));
 }
+
+/* Screen pixels per CSS px. Firefox rounds the scale to 60/n (1.1 -> 60/55). Each step starts
+ * halfway between two common scales, so any other scale gets the nearest one. */
+:root { --df-scale: 1; }
+@media (min-resolution: 1.05dppx) { :root { --df-scale: 1.0909; } } /* 1.1 */
+@media (min-resolution: 1.15dppx) { :root { --df-scale: 1.2; } }
+@media (min-resolution: 1.22dppx) { :root { --df-scale: 1.25; } }
+@media (min-resolution: 1.29dppx) { :root { --df-scale: 1.3333; } }
+@media (min-resolution: 1.42dppx) { :root { --df-scale: 1.5; } }
+@media (min-resolution: 1.63dppx) { :root { --df-scale: 1.7647; } } /* 1.75 */
+@media (min-resolution: 1.88dppx) { :root { --df-scale: 2; } }
+@media (min-resolution: 2.25dppx) { :root { --df-scale: 2.5; } }
+@media (min-resolution: 2.75dppx) { :root { --df-scale: 3; } }
 
 /* ── 2 Reset: flat, sharp, one font, the desktop background ─────────────────── */
 
@@ -224,7 +241,7 @@
 /* selected: like rofi's selected row (surface), the accent bar as underline */
 .tabbrowser-tab[selected] .tab-content {
     background-color: var(--df-surface) !important;
-    box-shadow: inset 0 calc(-1 * var(--df-bar)) 0 var(--df-accent) !important;
+    box-shadow: inset 0 calc(-1 * var(--df-line)) 0 var(--df-accent) !important;
 }
 
 /* ── 6 URL bar: one centered line of text ───────────────────────────────────── */
@@ -261,6 +278,49 @@
 #urlbar:has(#identity-box:is(.notSecure, .mixedActiveContent, .weakCipher, .certUserOverridden,
                              .certErrorPage, .httpsOnlyErrorPage, .insecureLoginForms)) #urlbar-input {
     color: var(--df-red) !important;
+}
+
+/* Downloads: the hidden downloads button still tracks them ([progress] while one runs, the
+ * total in --download-progress-pcent, at least 10 %, also for an unknown size). Its progress
+ * element becomes an accent line along the bottom of the URL bar; the button itself stays
+ * invisible and takes no space. Needs the button in the toolbar (it is by default). */
+#nav-bar {
+    position: relative !important;
+}
+
+#downloads-button[progress] {
+    display: flex !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    visibility: hidden !important;
+}
+
+#downloads-button[progress] > .toolbarbutton-badge-stack,
+#downloads-button[progress] #downloads-indicator-progress-outer {
+    position: static !important;
+}
+
+/* Firefox makes some parts visible again (progress ring, start/finish animations) */
+#downloads-button[progress] * {
+    visibility: hidden !important;
+}
+
+#downloads-button[progress] #downloads-indicator-progress-inner {
+    visibility: visible !important;
+    position: absolute !important;
+    left: 0 !important;
+    bottom: 0 !important;
+    width: var(--download-progress-pcent) !important;
+    height: var(--df-line) !important;
+    background: var(--df-accent) !important;
+}
+
+/* the results list starts at the line: hide it while they are open */
+#nav-bar:has(#urlbar[open]) #downloads-indicator-progress-inner {
+    visibility: hidden !important;
 }
 
 /* ── 7 URL bar results: text only, like the rofi launcher ───────────────────── */
