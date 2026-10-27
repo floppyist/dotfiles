@@ -4,5 +4,6 @@ Name=Calculus
 GenericName=Calculator
 Comment=Scientific calculator
 Exec=terminal.sh --float calculus
+TryExec=calculus
 Terminal=false
 Categories=Utility;Calculator;

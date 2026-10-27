@@ -4,5 +4,6 @@ Name=htop
 GenericName=System Monitor
 Comment=Interactive process viewer
 Exec=terminal.sh --float htop
+TryExec=htop
 Terminal=false
 Categories=System;Monitor;

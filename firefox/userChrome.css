@@ -2,7 +2,7 @@
  *
  *   ┌─────────────────────────────┬─────────────────────────────┐
  *   │         First tab           │        Selected tab         │  tabs share the width
- *   │                             │═════════════════════════════│  selected: overlay + accent line
+ *   │                             │█████████████████████████████│  selected: surface + accent line
  *   ├─────────────────────────────┴─────────────────────────────┤
  *   │                        example.org                        │  URL bar, full width
  *   ├───────────────────────────────────────────────────────────┤
@@ -38,13 +38,13 @@
     --df-yellow: #d79921;
     --df-red: #fb4934;
     --df-font: "JetBrainsMono Nerd Font";
+    /* width of the terminal's ▌ bar (half a cell): the selected tab's underline */
+    --df-bar: 6px;
 }
 
 :root {
     --df-tab-height: 40px;
     --df-urlbar-height: 28px;
-    /* the selected tab's underline, like the focused workspace in polybar */
-    --df-line: 2px;
 }
 
 /* ── 2 Reset: flat, sharp, one font, the desktop background ─────────────────── */
@@ -197,7 +197,7 @@
     height: 100% !important;
     padding: 0 5px !important;
     box-sizing: border-box !important;
-    background-color: var(--df-surface) !important;
+    background-color: var(--df-bg) !important;
 }
 
 .tab-label-container,
@@ -216,9 +216,15 @@
     height: 100% !important;
 }
 
+/* other tabs: secondary text on the bar background */
+.tabbrowser-tab:not([selected]) :is(.tab-label-container, .tab-label, .tab-text) {
+    color: var(--df-subtle) !important;
+}
+
+/* selected: like rofi's selected row (surface), the accent bar as underline */
 .tabbrowser-tab[selected] .tab-content {
-    background-color: var(--df-overlay) !important;
-    box-shadow: inset 0 calc(-1 * var(--df-line)) 0 var(--df-accent) !important;
+    background-color: var(--df-surface) !important;
+    box-shadow: inset 0 calc(-1 * var(--df-bar)) 0 var(--df-accent) !important;
 }
 
 /* ── 6 URL bar: one centered line of text ───────────────────────────────────── */

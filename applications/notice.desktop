@@ -4,5 +4,6 @@ Name=Notice
 GenericName=Notes
 Comment=Kanban-style notice app
 Exec=terminal.sh --float notice --tui
+TryExec=notice
 Terminal=false
 Categories=Utility;

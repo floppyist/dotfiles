@@ -7,7 +7,8 @@
 # - Idempotent: running it again changes nothing that is already correct.
 # - A file that would be replaced is moved to *.bak-<timestamp>. Links into this repository
 #   (e.g. to a file's old location) are simply replaced.
-# - Machine-specific launchers (applications/local/) are linked only if their program exists.
+# - Desktop launchers are linked only if their program is installed (optional programs, your own
+#   tools, the machine-specific ones in applications/local/); links of removed ones are deleted.
 # - Links into this repository whose file is gone (renamed or deleted here) are removed.
 # - Generates the theme files from dotfiles.conf (`dotfiles apply`, into ~/.config/dotfiles) and
 #   the mouse cursor theme (~/.icons/dotfiles).
@@ -134,12 +135,12 @@ for src in "$DOTFILES"/scripts/*; do
     link "$src" "$HOME/.local/bin/$(basename "$src")"
 done
 
-# Desktop entries -> ~/.local/share/applications
-for src in "$DOTFILES"/applications/*.desktop; do
-    link "$src" "$HOME/.local/share/applications/$(basename "$src")"
-done
-# ... and the machine-specific ones (games, self-built programs) only where they are installed
-for src in "$DOTFILES"/applications/local/*.desktop; do
+# Desktop entries -> ~/.local/share/applications, each only where its program is installed, so
+# rofi never shows a launcher that fails. The session's PATH (.xinitrc) starts with ~/.local/bin:
+# the menus of this repository and terminal.sh are found there (linked above), also when this
+# shell's PATH does not have it yet.
+PATH="$HOME/.local/bin:$PATH"
+for src in "$DOTFILES"/applications/*.desktop "$DOTFILES"/applications/local/*.desktop; do
     [[ -f "$src" ]] || continue
     dst="$HOME/.local/share/applications/$(basename "$src")"
     if launcher_ok "$src"; then

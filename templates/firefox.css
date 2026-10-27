@@ -15,4 +15,5 @@
     --df-yellow: {{yellow}};
     --df-red: {{red_hi}};
     --df-font: "{{font}}";
+    --df-bar: {{term_bar_width}}px;
 }

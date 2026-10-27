@@ -102,7 +102,7 @@ keys. Drag to take a region (its size is shown next to it), click to take the wi
 for the whole monitor, <kbd>Esc</kbd> or a right click to cancel. Lines through the pointer show where it is. Without
 input it cancels itself after 30 s.
 
-Terminal tools started from Rofi (audio, calculus, htop, mutt, notice) open as a centered floating window
+Terminal tools started from Rofi (audio mixer, htop, neomutt) open as a centered floating window
 (`terminal.sh --float`, with the terminal from `dotfiles.conf`).
 
 ## Shell
@@ -236,7 +236,6 @@ bash 5.1 (text objects; 5.3 for the duration capsule and the prompt without subs
 alacritty 0.14 (`[general] import`), fzf 0.66 (`--gutter`), NetworkManager 1.20.
 
 Also needed:
-- `calculus` (built separately, expects `~/.local/bin/calculus`)
 - JetBrainsMono Nerd Font (v3, `md-*` icons; on Void in `nerd-fonts-ttf`)
 - No cursor theme: `dotfiles apply` draws its own (with `python3-cairo`, which comes with `python3-gobject`)
 - Wallpaper at `~/images/wallpaper` (or set `wallpaper` in `dotfiles.conf`); screenshots go to `~/images/screenshots`
@@ -264,7 +263,7 @@ cd "$DOTFILES"
 ./install.sh
 ```
 
-The script links every file of `config/` into `~/.config/` (file by file, e.g. `~/.config/i3/config`, so your own files in those directories stay), the dotfiles into `~/`, the scripts into `~/.local/bin/` and the `.desktop` files into `~/.local/share/applications/` (those in `applications/local/` only if their program is installed, see step 5). It makes the scripts executable and runs `dotfiles apply` once. Existing files it would replace are moved to `*.bak-<timestamp>`; links to files that were removed from the repository are deleted. It can be run again safely (also after `git pull`, to link new files).
+The script links every file of `config/` into `~/.config/` (file by file, e.g. `~/.config/i3/config`, so your own files in those directories stay), the dotfiles into `~/`, the scripts into `~/.local/bin/` and the `.desktop` launchers into `~/.local/share/applications/` (each only if its program is installed, see step 5). It makes the scripts executable and runs `dotfiles apply` once. Existing files it would replace are moved to `*.bak-<timestamp>`; links to files that were removed from the repository are deleted. It can be run again safely (also after `git pull`, to link new files).
 
 > [!IMPORTANT]
 > Everything is linked, not copied: editing the repository or switching git branches changes the running desktop
@@ -288,13 +287,18 @@ The script links every file of `config/` into `~/.config/` (file by file, e.g. `
   Remove your own `color`, `index_format`, `status_format`, `status_chars` and `to_chars` lines, the theme sets them.
 - **Neovim:** the gruvbox colorscheme is installed by lazy.nvim on the first start (needs network).
 
-### 5. Adjust machine-specific paths
+### 5. Launchers
+
+`install.sh` links a launcher only if its program is installed, so Rofi never lists one that fails: the menus of
+this repository (Bluetooth, WiFi, Display, VPN) always, the others (`pulsemixer`, `htop`, `neomutt`, Firefox,
+Signal and the author's own tools `calculus` and `notice`) only where their program is found (the command of
+`Exec=` and `TryExec=`). Run `./install.sh` again after installing or removing a program: it adds or removes the
+launcher.
 
 The launchers in `applications/local/` (Aseprite, Command & Conquer Generals, Factorio, World of Warcraft, Sunshine) are
-machine-specific and point to install locations under `/home/floppyist/`. `install.sh` links one only if its program
-exists (the command of `Exec=` and `TryExec=`, every absolute path in `Exec=` and `Path=`) and removes the link again
-when it is gone, so they never show up as broken entries in Rofi. Change `Exec=` and `Path=` to your install
-locations (or put your own launchers there) and run `./install.sh` again.
+machine-specific and point to install locations under `/home/floppyist/`; for them every absolute path in `Exec=` and
+`Path=` must exist as well. Change `Exec=` and `Path=` to your install locations (or put your own launchers there) and
+run `./install.sh` again.
 
 ## Security notes
 
