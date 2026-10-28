@@ -57,7 +57,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | Part | What it is |
 | --- | --- |
 | **Settings** | one file, [`dotfiles.conf`](dotfiles.conf): accent, palette, scale, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings)) |
-| **Monitors** | `displays`: resolution, refresh rate, scale, position, rotation, primary monitor in Rofi; every monitor gets its own scale from its size and resolution; layouts are remembered per set of monitors and come back on hotplug (see [Monitors and scale](#monitors-and-scale)) |
+| **Monitors** | `displays`: resolution, refresh rate, scale, position, rotation, primary monitor in Rofi; a window has the same physical size on every monitor; layouts are remembered per set of monitors and come back on hotplug (see [Monitors and scale](#monitors-and-scale)) |
 | **Window manager** | `i3wm` with `picom` |
 | **Terminal and shell** | `Alacritty`; `bash` with a two-line prompt in the Polybar style and vi mode with vim text objects; `fzf` in the Rofi style (see [Shell](#shell)) |
 | **Editor** | `Neovim` (LazyVim, gruvbox; sharp frames, Rofi-style Telescope, mode blocks in the statusline) |
@@ -192,7 +192,7 @@ open shells on their next start (also the new cursor). Idle times and the keyboa
 | Group | Keys |
 | --- | --- |
 | Colors | `accent` (gruvbox name like `red`, `blue`, `aqua` or `#rrggbb`), `accent_text`, `bg`, `surface`, `overlay`, `fg`, `subtle`, `muted` |
-| Scale | `scale` (`auto` or a number like `1.25`), `firefox_scale` (see [Monitors and scale](#monitors-and-scale)) |
+| Scale | `scale` (`auto` or a number like `1.25`), `auto_dpi`, `firefox_scale` (see [Monitors and scale](#monitors-and-scale)) |
 | Fonts | `font` (a Nerd Font), `font_size_terminal`, `font_size_bar`, `font_size_menu`, `font_size_notify`, `font_size_window` |
 | Layout | `bar_height`, `border_width`, `gaps`, `terminal_opacity`, `terminal_padding_x`, `terminal_padding_y`, `cursor_style` (`light`, `dark`, `accent`), `cursor_size` |
 | Behaviour | `terminal`, `keyboard_layout`, `wallpaper`, `screensaver_after`, `lock_after`, `display_off_after` |
@@ -210,28 +210,31 @@ To change the design itself, edit the configs or the templates in `templates/`.
 notifications, borders, gaps, the cursor, the lock screen, the screenshot overlay, Firefox, GTK and Qt programs.
 Fractional values work (`1.25`, `1.5`, `1.75`).
 
-`scale = auto` (the default) gives **every monitor its own scale**, from its resolution and physical size:
+`scale = auto` (the default) makes **a window the same physical size on every monitor**. Each monitor's scale is
+its pixel density (resolution and size from the monitor itself) divided by `auto_dpi` (125):
 
-| Monitor | auto |
-| --- | --- |
-| 14" laptop, 1920×1080 | 1 |
-| 13" laptop, 2560×1600 | 1.5 |
-| 15.6" laptop, 3840×2160 | 2 |
-| 27", 2560×1440 | 1 |
-| 27", 3840×2160 | 1.5 |
-| 32", 3840×2160 | 1.25 |
+| Monitor | dpi | scale alone |
+| --- | --- | --- |
+| 14" laptop, 1920×1080 | 158 | 1.25 |
+| 13" laptop, 2560×1600 | 227 | 1.75 |
+| 15.6" laptop, 3840×2160 | 282 | 2.25 |
+| 24", 1920×1080 | 92 | 1 |
+| 27", 2560×1440 | 109 | 1 |
+| 27", 3840×2160 | 163 | 1.25 |
 
-(Laptop panels get factor 1 at about 150 dpi, external monitors at about 110 dpi; steps of 0.25. Override it per
-monitor in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale.)
+Lower `auto_dpi` makes everything larger, higher makes it smaller. A monitor's scale can also be chosen in
+<kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale.
 
 How it works: X11 has one DPI for the whole screen. The desktop is drawn at the scale of the densest monitor
-(`Xft.dpi`, pixel-sharp there), and every other monitor shows a larger part of the screen that the graphics card
-scales down to its panel (`xrandr --scale`, the way GNOME does it on X11). So a window is the same physical
-size on every monitor. The monitors that are scaled down look a little softer and cost some GPU time; with
-monitors of the same density nothing is scaled. A fixed number (`scale = 1.5`) uses that on every monitor
-and never scales down. The graphics card scales the picture but not its hardware mouse pointer, so the
-installer's Graphics module switches to a software pointer
-(`/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf`): the same size on every monitor. `firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
+(`Xft.dpi`, in steps of 0.25, pixel-sharp there), and every other monitor shows a larger part of the screen that
+the graphics card scales down by the ratio of the densities (`xrandr --scale`, the way GNOME does it on X11).
+Example: a 14" laptop (163 dpi) and a 21.5" 1080p monitor (103 dpi): the desktop is drawn at 1.25, the monitor
+is scaled down 1.58 times, and a window that is 10 cm wide on the laptop is 10 cm wide there too. The monitors
+that are scaled down look a little softer and cost some GPU time; monitors of (almost) the same density are
+never scaled. A fixed number (`scale = 1.5`) uses that on every monitor and never scales down. The graphics
+card scales the picture but not its hardware mouse pointer, so the installer's Graphics module switches to a
+software pointer (`/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf`): the same size on every monitor.
+`firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
 
 When the scale changes (a monitor plugged in, another resolution), i3 restarts in place (the windows stay), the
 bar, Rofi, dunst and open terminals follow at once; Firefox, GTK and Qt programs on their next start. GTK draws

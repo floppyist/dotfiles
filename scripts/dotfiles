@@ -15,8 +15,9 @@ dotfiles.conf lives in the repository root. `apply` renders templates/* into
 neovim, neomutt, GTK, fzf and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
 The mouse cursor theme is drawn into ~/.icons/dotfiles (scripts/dotfiles-cursors).
 
-scale = auto takes the factor from the monitors (`displays scale`: the densest monitor's, the
-others are scaled down to their own size); without X the last applied factor is kept.
+scale = auto takes the factor from the monitors (`displays scale`: the densest monitor's density
+/ auto_dpi; the others are scaled down so a window has the same physical size everywhere);
+without X the last applied factor is kept.
 """
 import colorsys
 import glob
@@ -64,6 +65,7 @@ SCHEMA = {
     "subtle": ("color", "#a89984"),
     "muted": ("color", "#7c6f64"),
     "scale": ("scale", "auto", 0.5, 4.0),
+    "auto_dpi": ("int", "125", 72, 300),
     "firefox_scale": ("float", "1.00", 0.5, 3.0),
     "font": ("font", "JetBrainsMono Nerd Font"),
     "font_size_terminal": ("int", "15", 6, 48),

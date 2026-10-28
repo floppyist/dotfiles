@@ -12,9 +12,10 @@ usage: displays                 menu: resolution, refresh rate, scale, position,
 Per-monitor scale (dotfiles.conf: scale = auto). X11 has one DPI for the whole screen, so the desktop
 is drawn for the densest monitor (Xft.dpi, pixel-sharp there), and every other monitor gets a
 larger area of the screen that the GPU scales down to its panel (xrandr --scale, like GNOME on
-X11). Each monitor shows things at its own physical size; the scaled-down ones are a little
-softer. Each monitor's scale comes from its resolution and physical size (EDID), or from the
-menu. With a fixed `scale = 1.5` in dotfiles.conf every monitor uses that, without scaling.
+X11). A window has the same physical size on every monitor; the scaled-down ones are a little
+softer. A monitor's scale is its pixel density (resolution and physical size from the EDID) divided
+by dotfiles.conf `auto_dpi`, or chosen in the menu. With a fixed `scale = 1.5` in dotfiles.conf
+every monitor uses that, without scaling.
 
 Layouts are remembered per set of connected monitors (output name + EDID) in
 $XDG_STATE_HOME/dotfiles/displays.json. Every change in the menu that could leave a screen dark
@@ -39,13 +40,14 @@ STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.
                      "dotfiles", "displays.json")
 CONFIRM_SECONDS = 15
 ROTATIONS = ["normal", "left", "right", "inverted"]
-SCALES = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0]
+SCALES = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0]
 INTERNAL_RE = re.compile(r"(eDP|LVDS|DSI)")
 
-# Automatic scale of a monitor: the pixel density drawn at factor 1. Laptop panels are looked at
-# from closer, so they get more pixels per inch before things grow.
-AUTO_DPI_INTERNAL = 150     # 14" 1080p (158 dpi) -> 1, 13" 2560x1600 -> 1.5, 15.6" 4K -> 2
-AUTO_DPI_EXTERNAL = 110     # 27" 1440p -> 1, 27" 4K -> 1.5, 32" 4K -> 1.25, 27" 5K -> 2
+# Automatic scale: one pixel density for every monitor (dotfiles.conf `auto_dpi`), so a window
+# has the same physical size on each of them. Monitors are scaled down by the exact ratio of
+# their densities; the desktop scale (the densest monitor / auto_dpi) goes in steps of 0.25.
+AUTO_DPI = 125
+FB_SNAP = 0.05              # densities closer than 5 %: no scaling (it would only blur)
 
 # Nerd Font md-* glyphs (verified against JetBrainsMono Nerd Font)
 I_LAPTOP, I_MONITOR, I_OFF = "\U000F0322", "\U000F0379", "\U000F0D90"
@@ -164,19 +166,29 @@ def preferred(o):
     return next((n for n, p in names if p), names[0][0] if names else None)
 
 
-def fixed_scale():
-    """dotfiles.conf `scale` when it is a number (every monitor uses it), None for auto."""
+def conf_value(key):
+    """A value from dotfiles.conf (read here: `dotfiles get` would ask `displays` again)."""
     try:
         for line in open(CONF, encoding="utf-8"):
-            m = re.match(r"^\s*scale\s*=\s*(\S*)\s*$", line)
+            m = re.match(r"^\s*%s\s*=\s*(\S*)\s*$" % key, line)
             if m:
-                v = m.group(1)
-                if re.fullmatch(r"[0-9]*\.?[0-9]+", v) and 0.5 <= float(v) <= 4:
-                    return float(v)
-                return None
+                return m.group(1)
     except OSError:
         pass
     return None
+
+
+def fixed_scale():
+    """dotfiles.conf `scale` when it is a number (every monitor uses it), None for auto."""
+    v = conf_value("scale") or ""
+    if re.fullmatch(r"[0-9]*\.?[0-9]+", v) and 0.5 <= float(v) <= 4:
+        return float(v)
+    return None
+
+
+def auto_dpi():
+    v = conf_value("auto_dpi") or ""
+    return int(v) if re.fullmatch(r"[0-9]{2,3}", v) and 72 <= int(v) <= 300 else AUTO_DPI
 
 
 # ── the layout model ───────────────────────────────────────────────────────────
@@ -198,20 +210,26 @@ def size(e):
 
 
 def auto_scale(o, e):
-    """Scale for this monitor from the mode's pixels and the panel's millimetres."""
+    """(scale, dpi) of this monitor from the mode's pixels and the panel's millimetres; not
+    rounded, so monitors side by side keep the exact ratio. (None, 0) if the size is unknown."""
     mw, mh = o["mm"]
     if max(mw, mh) < 150:           # projectors and some TVs report nonsense (0, or a few cm)
-        return 1.0, 0
+        return None, 0
     w, h = (int(v) for v in re.match(r"(\d+)x(\d+)", e["mode"]).groups())
     dpi = max(w, h) / max(mw, mh) * 25.4
-    ref = AUTO_DPI_INTERNAL if INTERNAL_RE.match(o["name"]) else AUTO_DPI_EXTERNAL
-    return min(3.0, max(1.0, round(dpi / ref * 4) / 4)), round(dpi)
+    return min(4.0, max(0.5, dpi / auto_dpi())), round(dpi)
 
 
 def monitor_scale(o, e):
+    """The monitor's own scale: chosen in the menu, else automatic; None = unknown size."""
     if isinstance(e.get("scale"), (int, float)) and 0.5 <= e["scale"] <= 4:
         return float(e["scale"])
     return auto_scale(o, e)[0]
+
+
+def desktop_scale(top):
+    """The scale the desktop is drawn at: the densest monitor's, in steps of 0.25, 1 to 3."""
+    return min(3.0, max(1.0, round(top * 4) / 4))
 
 
 def active(lay):
@@ -226,9 +244,14 @@ def fit(lay, outs):
     if not on:
         return fixed or 1.0
     want = {n: monitor_scale(outs[n], lay[n]) for n in on}
-    desk = fixed or max(want.values())
+    known = [w for w in want.values() if w]
+    top = max(known) if known else 1.0
+    desk = fixed or desktop_scale(top)
     for n in on:
-        lay[n]["fb"] = 1.0 if fixed else round(desk / want[n], 4)
+        # the densest monitor shows the desktop 1:1, the others by the ratio of the densities;
+        # a monitor of unknown size like the densest one
+        fb = 1.0 if fixed or not want[n] else top / want[n]
+        lay[n]["fb"] = 1.0 if abs(fb - 1) < FB_SNAP else round(fb, 4)
     # a mirror shows exactly the area of the monitor it copies
     for n in on:
         t = lay[n].get("same_as")
@@ -572,11 +595,12 @@ def scale_report():
         return 1.0, "no active monitor"
     desk = fit(lay, outs)
     parts = []
-    for n in sorted(on, key=lambda n: -monitor_scale(outs[n], lay[n])):
+    for n in sorted(on, key=lambda n: -(monitor_scale(outs[n], lay[n]) or 0)):
         s = monitor_scale(outs[n], lay[n])
         dpi = auto_scale(outs[n], lay[n])[1]
         how = "chosen" if lay[n].get("scale") is not None else ("%d dpi" % dpi if dpi else "size unknown")
-        parts.append("%s %s (%s)" % (n, fmt(s), how))
+        fb = lay[n].get("fb", 1.0)
+        parts.append("%s %s (%s%s)" % (n, fmt(s), how, ", scaled down %s x" % fmt(fb) if fb > 1 else ""))
     return desk, ", ".join(parts)
 
 
@@ -598,7 +622,7 @@ def esc(s):
 
 
 def fmt(f):
-    return ("%.2f" % f).rstrip("0").rstrip(".")
+    return "?" if f is None else ("%.2f" % f).rstrip("0").rstrip(".")
 
 
 def where(n, lay):
@@ -623,6 +647,8 @@ def describe(n, lay, outs):
     if e.get("rate"):
         parts.append("%s Hz" % fmt(float(e["rate"])))
     parts.append("scale %s" % fmt(monitor_scale(outs[n], e)))
+    if e.get("fb", 1.0) > 1 and not e.get("same_as"):
+        parts.append("scaled down %s\u00d7" % fmt(e["fb"]))
     if e["rotate"] != "normal":
         parts.append("rotated %s" % e["rotate"])
     rel = where(n, lay)
