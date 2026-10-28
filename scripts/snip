@@ -47,7 +47,8 @@ IDLE = 30           # s without input until snip cancels (less if the screensave
 
 THEME = {"accent": "#cc241d", "accent_text": "#fb4934", "on_accent": "#191c1c", "bg": "#191c1c",
          "surface": "#252a2a", "fg": "#ebdbb2", "subtle": "#a89984", "font": "JetBrainsMono Nerd Font",
-         "font_size_menu": "13", "bar_height": "40", "border_width": "2", "screensaver_after": "60"}
+         "font_size_menu": "13", "bar_height_px": "40", "border_px": "2", "scale": "1.00",
+         "screensaver_after": "60"}
 
 
 def theme():
@@ -68,8 +69,8 @@ def theme():
             val = (shlex.split(m.group(2)) or [""])[0]
         except ValueError:
             continue
-        ok = {"font": r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}"}.get(key, r"[0-9]{1,5}" if not THEME[key].startswith("#")
-                                                                else r"#[0-9a-fA-F]{6}")
+        ok = {"font": r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}", "scale": r"[0-4]\.[0-9]{2}"}.get(
+            key, r"[0-9]{1,5}" if not THEME[key].startswith("#") else r"#[0-9a-fA-F]{6}")
         if re.fullmatch(ok, val):
             t[key] = val
     return t
@@ -145,6 +146,7 @@ class Scene:
         self.image, (self.W, self.H) = image, size
         self.monitors = monitors or [(0, 0, self.W, self.H)]
         self.windows, self.t = windows, t
+        self.s = min(4.0, max(0.5, float(t["scale"])))    # dotfiles.conf `scale`
         self.ptr = ptr
         self.press = None           # where button 1 went down
         self.dragging = False
@@ -189,8 +191,15 @@ class Scene:
         return rect
 
     # drawing
+    def px(self, n):
+        """Logical px -> screen px (dotfiles.conf `scale`)."""
+        return max(1, round(n * self.s))
+
     def layout(self, cr, markup, bold=False):
-        lay = PangoCairo.create_layout(cr)
+        # the font in points at the scaled dpi, like rofi and polybar
+        ctx = PangoCairo.create_context(cr)
+        PangoCairo.context_set_resolution(ctx, 96 * self.s)
+        lay = Pango.Layout.new(ctx)
         fd = Pango.FontDescription.from_string("%s %s" % (self.t["font"], self.t["font_size_menu"]))
         if bold:
             fd.set_weight(Pango.Weight.BOLD)
@@ -200,7 +209,7 @@ class Scene:
 
     def capsules(self, cr, parts, x, y, draw=True):
         """Blocks side by side like the polybar capsules: [(markup, bg, fg, bold)]. Returns (w, h)."""
-        pad_x, pad_y = 14, 7
+        pad_x, pad_y = self.px(14), self.px(7)
         lays = [(self.layout(cr, m, b), bg, fg) for m, bg, fg, b in parts]
         h = max(lay.get_pixel_size()[1] for lay, _, _ in lays) + 2 * pad_y
         w = sum(lay.get_pixel_size()[0] + 2 * pad_x for lay, _, _ in lays)
@@ -225,15 +234,16 @@ class Scene:
     def hint_rect(self, cr):
         mx, my, mw, mh = self.hint_mon
         w, h = self.capsules(cr, self.hint_parts(), 0, 0, draw=False)
-        gap = 16
-        top = (mx + (mw - w) // 2, my + int(self.t["bar_height"]) + gap, w, h)
-        bottom = (top[0], my + mh - h - gap - 8, w, h)
+        gap = self.px(16)
+        top = (mx + (mw - w) // 2, my + int(self.t["bar_height_px"]) + gap, w, h)
+        bottom = (top[0], my + mh - h - gap - self.px(8), w, h)
         return top, bottom
 
     def update_hint(self, cr, rect):
         """Keep the hint out of the way: bottom while the pointer or a region is near the top spot."""
         top, bottom = self.hint_rect(cr)
-        near = (top[0] - 40, top[1] - 40, top[2] + 80, top[3] + 80)
+        m = self.px(40)
+        near = (top[0] - m, top[1] - m, top[2] + 2 * m, top[3] + 2 * m)
 
         def hits(r):
             return not (r[0] + r[2] <= near[0] or r[0] >= near[0] + near[2] or
@@ -243,7 +253,7 @@ class Scene:
 
     def paint(self, cr):
         t = self.t
-        bw = max(1, int(t["border_width"]))
+        bw = max(1, int(t["border_px"]))
         rect = self.target()
         cr.set_source_surface(self.image, 0, 0)
         cr.paint()
@@ -275,19 +285,20 @@ class Scene:
         """`W × H` below the lower right corner; above or inside if there is no room, and
         above the hint if they would overlap."""
         x, y, w, h = rect
-        bw = max(1, int(self.t["border_width"]))
+        bw = max(1, int(self.t["border_px"]))
+        g = self.px(6)
         parts = [("%d × %d" % (w, h), self.t["surface"], self.t["fg"], False)]
         lw, lh = self.capsules(cr, parts, 0, 0, draw=False)
         mx, my, mw, mh = self.monitor_at(x + w // 2, y + h // 2)
         lx = min(max(x + w + bw - lw, mx), mx + mw - lw)
-        ly = y + h + bw + 6
+        ly = y + h + bw + g
         if ly + lh > my + mh:
-            ly = y - bw - 6 - lh
+            ly = y - bw - g - lh
         if ly < my:
-            ly, lx = y + h - lh - 6, min(max(x + w - lw - 6, mx), mx + mw - lw)
+            ly, lx = y + h - lh - g, min(max(x + w - lw - g, mx), mx + mw - lw)
         hx, hy, hw, hh = hint
         if lx < hx + hw and lx + lw > hx and ly < hy + hh and ly + lh > hy:
-            ly = hy - lh - 6
+            ly = hy - lh - g
         self.capsules(cr, parts, lx, ly)
 
 

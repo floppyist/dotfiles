@@ -15,7 +15,7 @@ pgrep -xu "$EUID" i3lock >/dev/null && exit 0
 # the lock working when ~/.config/dotfiles/theme.sh is missing or broken.
 DF_BG="#191c1c" DF_OVERLAY="#313838" DF_FG="#ebdbb2" DF_SUBTLE="#a89984" DF_MUTED="#7c6f64"
 DF_ACCENT="#cc241d" DF_RED="#cc241d" DF_RED_HI="#fb4934" DF_YELLOW_HI="#fabd2f"
-DF_FONT="JetBrainsMono Nerd Font"
+DF_FONT="JetBrainsMono Nerd Font" DF_SCALE_PCT=100
 # shellcheck source=/dev/null
 . "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
 hex() { local c=${1#\#}; [[ "$c" =~ ^[0-9a-fA-F]{6}$ ]] && printf '%s' "$c" || printf '%s' "$2"; }
@@ -29,6 +29,9 @@ RED=$(hex "$DF_RED" cc241d)
 RED_HI=$(hex "$DF_RED_HI" fb4934)
 YELLOW=$(hex "$DF_YELLOW_HI" fabd2f)
 FONT=${DF_FONT:-JetBrainsMono Nerd Font}
+# dotfiles.conf `scale` in percent: every size below is in logical px, S multiplies (rounded)
+S=100
+[[ "$DF_SCALE_PCT" =~ ^[0-9]{2,3}$ ]] && (( DF_SCALE_PCT >= 50 && DF_SCALE_PCT <= 400 )) && S=$DF_SCALE_PCT
 NONE=00000000
 
 #                 14:05                    clock (always shown, also while verifying)
@@ -53,23 +56,23 @@ ARGS=(
     --date-str="%A, %d. %B"
     --time-font="$FONT"
     --date-font="$FONT"
-    --time-size=72
-    --date-size=16
+    --time-size=$(( (72 * S + 50) / 100 ))
+    --date-size=$(( (16 * S + 50) / 100 ))
     --time-color="${FG}ff"
     --date-color="${SUBTLE}ff"
-    --time-pos="$CENTER:$MID-24"
-    --date-pos="tx:ty+40"
+    --time-pos="$CENTER:$MID-$(( (24 * S + 50) / 100 ))"
+    --date-pos="tx:ty+$(( (40 * S + 50) / 100 ))"
     # Input line instead of the ring: always visible, like the rofi input underline
     --indicator
     --bar-indicator
     --bar-orientation=horizontal
     --bar-direction=2
-    --bar-total-width=480
-    --bar-pos="$CENTER-240:$MID+64"
-    --bar-base-width=2
+    --bar-total-width=$(( (480 * S + 50) / 100 ))
+    --bar-pos="$CENTER-$(( (240 * S + 50) / 100 )):$MID+$(( (64 * S + 50) / 100 ))"
+    --bar-base-width=$(( (2 * S + 50) / 100 ))
     --bar-count=48
-    --bar-max-height=18
-    --bar-step=4
+    --bar-max-height=$(( (18 * S + 50) / 100 ))
+    --bar-step=$(( (4 * S + 50) / 100 ))
     --bar-periodic-step=6
     --bar-color="${OVERLAY}ff"
     --keyhl-color="${ACCENT}ff"
@@ -90,23 +93,23 @@ ARGS=(
     --lockfailed-text="󰀦  lock failed"
     --verif-font="$FONT"
     --wrong-font="$FONT"
-    --verif-size=14
-    --wrong-size=14
+    --verif-size=$(( (14 * S + 50) / 100 ))
+    --wrong-size=$(( (14 * S + 50) / 100 ))
     --verif-color="${FG}ff"
     --wrong-color="${RED_HI}ff"
-    --verif-pos="$CENTER:$MID+116"
-    --wrong-pos="$CENTER:$MID+116"
+    --verif-pos="$CENTER:$MID+$(( (116 * S + 50) / 100 ))"
+    --wrong-pos="$CENTER:$MID+$(( (116 * S + 50) / 100 ))"
     # Caps Lock / Num Lock hint (i3lock-color prints the modifier names)
-    --modif-size=12
+    --modif-size=$(( (12 * S + 50) / 100 ))
     --modif-color="${YELLOW}ff"
-    --modif-pos="$CENTER:$MID+144"
+    --modif-pos="$CENTER:$MID+$(( (144 * S + 50) / 100 ))"
     --layout-color="$NONE"
     # Greeter at the bottom
     --greeter-text="󰌾  ${USER:-$(id -un)}@${HOSTNAME:-$(uname -n)}  ·  locked"
     --greeter-font="$FONT"
-    --greeter-size=13
+    --greeter-size=$(( (13 * S + 50) / 100 ))
     --greeter-color="${MUTED}ff"
-    --greeter-pos="$CENTER:y+h-48"
+    --greeter-pos="$CENTER:y+h-$(( (48 * S + 50) / 100 ))"
 )
 
 pause_notifications() { command -v dunstctl >/dev/null && dunstctl set-paused "$1"; }

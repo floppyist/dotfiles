@@ -2,6 +2,8 @@
  * Do not edit: changes are overwritten. Imported by ~/.config/rofi/config.rasi. */
 
 configuration {
+    /* scale {{scale}}: the font follows dpi, the sizes below are scaled */
+    dpi: {{dpi}};
     drun-display-format: "{name}[<span foreground='{{muted}}'>  ·  {generic}</span>]";
 }
 
@@ -14,9 +16,19 @@ configuration {
     muted:       {{muted}};
     accent:      {{accent}};
     accent-text: {{accent_text}};
-    frame:       {{border_width}}px;
+    frame:       {{border_px}}px;
     /* rofi cannot combine "bold" with a color reference, so the whole value is one */
     match:       bold {{accent_text}};
 
     font: "{{font}} {{font_size_menu}}";
+
+    df-width:         {{px:640}}px;
+    df-input-padding: {{px:14}}px {{px:16}}px;
+    df-input-spacing: {{px:10}}px;
+    df-input-line:    0px 0px {{px:2}}px 0px;
+    df-mesg-padding:  {{px:10}}px {{px:16}}px;
+    df-mesg-line:     0px 0px {{px:1}}px 0px;
+    df-list-padding:  {{px:6}}px 0px;
+    df-row-padding:   {{px:8}}px {{px:16}}px {{px:8}}px {{px:13}}px;
+    df-row-bar:       0px 0px 0px {{px:3}}px;
 }

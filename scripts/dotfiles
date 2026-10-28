@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """dotfiles - central settings for the desktop
 
-usage: dotfiles apply [--no-reload]   generate the theme files from dotfiles.conf, reload the desktop
+usage: dotfiles apply [--no-reload] [--layout]
+                                      generate the theme files from dotfiles.conf, reload the desktop
+                                      (--layout: the monitors changed, re-place bar and wallpaper)
        dotfiles check                 only validate dotfiles.conf
        dotfiles get KEY               print one resolved value (e.g. `dotfiles get accent`)
        dotfiles list                  print all resolved values
@@ -12,9 +14,13 @@ dotfiles.conf lives in the repository root. `apply` renders templates/* into
 ~/.config/dotfiles/, which the configs of i3, polybar, rofi, dunst, alacritty, tmux,
 neovim, neomutt, GTK, fzf and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
 The mouse cursor theme is drawn into ~/.icons/dotfiles (scripts/dotfiles-cursors).
+
+scale = auto picks the factor from the pixel density of the primary monitor (xrandr);
+without X the last applied factor is kept.
 """
 import colorsys
 import glob
+import math
 import os
 import re
 import shlex
@@ -57,6 +63,8 @@ SCHEMA = {
     "fg": ("color", "#ebdbb2"),
     "subtle": ("color", "#a89984"),
     "muted": ("color", "#7c6f64"),
+    "scale": ("scale", "auto", 0.5, 4.0),
+    "firefox_scale": ("float", "1.00", 0.5, 3.0),
     "font": ("font", "JetBrainsMono Nerd Font"),
     "font_size_terminal": ("int", "15", 6, 48),
     "font_size_bar": ("int", "14", 6, 48),
@@ -136,6 +144,10 @@ def check(key, v, spec):
         if v == "":
             return ""
         typ = "color"
+    if typ == "scale":
+        if v == "auto":
+            return v
+        typ = "float"
     if typ == "int":
         if not re.fullmatch(r"[0-9]{1,6}", v) or not spec[2] <= int(v) <= spec[3]:
             raise ValueError("'%s' is not a number from %d to %d" % (v, spec[2], spec[3]))
@@ -146,7 +158,8 @@ def check(key, v, spec):
         except ValueError:
             f = None
         if f is None or not spec[2] <= f <= spec[3]:
-            raise ValueError("'%s' is not a number from %g to %g" % (v, spec[2], spec[3]))
+            what = "auto or a number" if spec[0] == "scale" else "a number"
+            raise ValueError("'%s' is not %s from %g to %g" % (v, what, spec[2], spec[3]))
         return "%.2f" % f
     if typ == "choice":
         if v not in spec[2]:
@@ -198,8 +211,93 @@ def nearest_ansi(h):
     return min(range(len(ANSI)), key=lambda i: dist(h, GRUVBOX[ANSI[i]][0])) + 1
 
 
+# scale = auto: the pixel density (dpi) that is drawn at factor 1. Laptop panels are looked at
+# from closer, so they get more pixels per inch before things grow.
+AUTO_DPI_INTERNAL = 150     # 14" 1080p (158 dpi) -> 1, 13" 2560x1600 -> 1.5, 15.6" 4K -> 2
+AUTO_DPI_EXTERNAL = 110     # 27" 1440p -> 1, 27" 4K -> 1.5, 32" 4K -> 1.25, 27" 5K -> 2
+INTERNAL_RE = re.compile(r"(eDP|LVDS|DSI)")
+XRANDR_RE = re.compile(r"^(\S+) connected (primary )?(\d+)x(\d+)\+\d+\+\d+ .*?(\d+)mm x (\d+)mm\s*$")
+
+
+def scaled(n, s):
+    """Logical px -> screen px (never 0 for a non-zero value)."""
+    n = int(n)
+    return max(1, round(n * s)) if n else 0
+
+
+def monitor_scale():
+    """(factor, reason) for the primary monitor (else the first active one); None without X."""
+    if not os.environ.get("DISPLAY") or os.environ.get("DOTFILES_NO_X"):
+        return None
+    try:
+        # --current: no re-probe of the outputs (that can take seconds and make screens flicker)
+        out = subprocess.run(["xrandr", "--current"], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    mons = [m.groups() for m in map(XRANDR_RE.match, out.splitlines()) if m]
+    if not mons:
+        return None
+    name, _, w, h, mw, mh = next((m for m in mons if m[1]), mons[0])
+    name = re.sub(r"[^A-Za-z0-9_.-]", "?", name)[:32]    # ends up in comments of the configs
+    w, h, mw, mh = (int(x) for x in (w, h, mw, mh))
+    # rotation swaps the pixels but not the millimetres; projectors and some TVs report
+    # nonsense sizes (0, or a few cm): those get factor 1
+    if max(mw, mh) < 150:
+        return 1.0, "%s reports no usable size" % name
+    dpi = max(w, h) / max(mw, mh) * 25.4
+    ref = AUTO_DPI_INTERNAL if INTERNAL_RE.match(name) else AUTO_DPI_EXTERNAL
+    f = min(3.0, max(1.0, round(dpi / ref * 4) / 4))
+    return f, "%s, %dx%d at %d dpi" % (name, w, h, round(dpi))
+
+
+def effective_scale(c):
+    if c["scale"] != "auto":
+        return float(c["scale"]), "dotfiles.conf"
+    found = monitor_scale()
+    if found:
+        return found
+    old = old_values().get("scale", "")
+    if re.fullmatch(r"[0-9]\.[0-9]{1,2}", old) and 0.5 <= float(old) <= 4:
+        return float(old), "no X display: the last applied factor"
+    return 1.0, "no X display"
+
+
+def firefox_dppx(extra, session_gdk):
+    """layout.css.devPixelsPerPx. Firefox multiplies a set value by the system text scale
+    (Xft.dpi / 96, divided by GDK_SCALE through GDK_DPI_SCALE), and -1 means GDK_SCALE times that
+    text scale, which already is `scale`. So only firefox_scale is written, times the GDK_SCALE
+    this session started with."""
+    if abs(extra - 1) < 0.005:
+        return "-1.0"
+    gdk = os.environ.get("GDK_SCALE") or str(session_gdk)
+    gdk = int(gdk) if re.fullmatch(r"[1-4]", gdk) else 1
+    return "%.2f" % (extra * gdk)
+
+
 def resolve(c):
     v = dict(c)
+    s, why = effective_scale(c)
+
+    def px(n):
+        return str(scaled(n, s))
+
+    v["scale"] = "%.2f" % s
+    v["scale_pct"] = str(round(s * 100))
+    v["scale_reason"] = why
+    v["dpi"] = str(round(96 * s))
+    # GTK draws widgets only at whole factors: from 2 on .xinitrc sets GDK_SCALE (at login) and
+    # GDK_DPI_SCALE, which takes that factor back out of the fonts (they follow Xft.dpi already)
+    gdk = int(s) if s >= 2 else 1
+    v["gdk_scale"] = str(gdk)
+    v["gdk_dpi_scale"] = "%.3f" % (1 / gdk)
+    v["firefox_dppx"] = firefox_dppx(float(c["firefox_scale"]), gdk)
+    v["bar_height_px"] = px(c["bar_height"])
+    # i3's rule for its own borders and gaps (logical_px): unscaled below 1.25, rounded up above
+    bw = int(c["border_width"])
+    v["border_px"] = str(bw if s < 1.25 else math.ceil(bw * s))
+    v["cursor_size_px"] = str(min(256, scaled(c["cursor_size"], s)))   # dotfiles-cursors: 8..256
+    v["tray_spacing_px"] = px(10)
     if c["accent"] in GRUVBOX:
         v["accent"], bright = GRUVBOX[c["accent"]]
     else:
@@ -221,11 +319,12 @@ def resolve(c):
     # polybar: the second font is the smaller one (music title); the offset centers the glyphs
     small = round(int(c["font_size_bar"]) * 0.8)
     v["font_size_bar_small"] = str(small)
-    v["bar_font_offset"] = str(round(int(c["font_size_bar"]) * 0.3))
-    v["bar_font_offset_small"] = str(round(small * 0.3))
-    # width of the terminal's ▌ bar (half a cell, alacritty truncates): cell = pt * 96/72 px
-    # * 0.6 em (JetBrains Mono's advance). Firefox: the selected tab's underline, the download line.
-    v["term_bar_width"] = str(max(1, int(c["font_size_terminal"]) * 8 // 10 // 2))
+    v["bar_font_offset"] = str(round(int(c["font_size_bar"]) * 0.3 * s))
+    v["bar_font_offset_small"] = str(round(small * 0.3 * s))
+    # width of the terminal's ▌ bar in screen px (half a cell, alacritty truncates): cell =
+    # pt * dpi/72 px * 0.6 em (JetBrains Mono's advance). Firefox: the selected tab's underline,
+    # the download line.
+    v["term_bar_width"] = str(max(1, int(int(c["font_size_terminal"]) * 0.8 * s) // 2))
     # notifications sit 12 px below the bar and 12 px from the right edge
     v["notify_offset_y"] = str(int(c["bar_height"]) + 12)
     # xset s <saver> <cycle>: xss-lock starts the saver after <saver> s and locks after <cycle> more
@@ -244,11 +343,14 @@ def load():
 # ── output ─────────────────────────────────────────────────────────────────────
 
 def render(text, v, name):
+    """{{key}} -> the value; {{px:N}} -> N logical px at the current scale."""
     def sub(m):
-        if m.group(1) not in v:
-            raise ConfError("%s: unknown placeholder {{%s}}" % (name, m.group(1)))
+        if m.group(1) == "px" and m.group(2):
+            return str(scaled(m.group(2), float(v["scale"])))
+        if m.group(1) not in v or m.group(2):
+            raise ConfError("%s: unknown placeholder {{%s}}" % (name, m.group(0)[2:-2].strip()))
         return v[m.group(1)]
-    return re.sub(r"\{\{\s*([a-z0-9_]+)\s*\}\}", sub, text)
+    return re.sub(r"\{\{\s*([a-z0-9_]+)(?::([0-9]{1,4}))?\s*\}\}", sub, text)
 
 
 def theme_sh(v):
@@ -323,6 +425,8 @@ def generate(v):
         n = symlink(os.path.join(OUT, "firefox.css"), os.path.join(chrome, "dotfiles.css"))
         if n:
             notes.append(n)
+        if firefox_scale(os.path.join(os.path.dirname(chrome), "user.js"), v["firefox_dppx"]):
+            changed.add("firefox scale")
     built, note = cursors(v)
     if built:
         changed.add("cursors")
@@ -331,11 +435,35 @@ def generate(v):
     return changed, notes
 
 
+FF_DPPX = "layout.css.devPixelsPerPx"
+
+
+def firefox_scale(path, dppx):
+    """Set the scale in the profile's user.js (Firefox copies it into its prefs on start).
+    Replaces the line in place, so a hand-written user.js keeps its order."""
+    line = 'user_pref("%s", "%s");' % (FF_DPPX, dppx)
+    try:
+        lines = open(path, encoding="utf-8").read().splitlines()
+    except FileNotFoundError:
+        lines = []
+    except OSError:
+        return False
+    hits = [i for i, l in enumerate(lines) if '"%s"' % FF_DPPX in l]
+    if len(hits) == 1 and lines[hits[0]] == line:
+        return False
+    if hits:
+        lines[hits[0]] = line
+        lines = [l for i, l in enumerate(lines) if i not in hits[1:]]
+    else:
+        lines += ["// dotfiles.conf (scale, firefox_scale), written by `dotfiles apply`", line]
+    return write(path, "\n".join(lines) + "\n")
+
+
 def cursors(v):
     """Draw the cursor theme (only when colors, size or the drawing code changed)."""
     cmd = [sys.executable, os.path.join(REPO, "scripts", "dotfiles-cursors"), "build", CURSOR_DIR,
            "body=" + v["cursor_body"], "edge=" + v["cursor_edge"], "accent=" + v["accent"],
-           "red=" + v["red"], "size=" + v["cursor_size"]]
+           "red=" + v["red"], "size=" + v["cursor_size_px"]]
     try:
         r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError) as e:
@@ -372,10 +500,41 @@ def running(name):
     return run(["pgrep", "-u", str(os.getuid()), "-x", name])
 
 
-def reload(changed, old, v):
+def xrdb_value(key):
+    try:
+        out = subprocess.run(["xrdb", "-query"], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        k, _, val = line.partition(":")
+        if k.strip() == key:
+            return val.strip()
+    return None
+
+
+def xrdb_merge(res):
+    try:
+        return subprocess.run(["xrdb", "-merge"], input=res, text=True, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def reload(changed, old, v, layout=False):
     done = []
     x11 = bool(os.environ.get("DISPLAY"))
-    if "i3.conf" in changed and running("i3") and run(["i3-msg", "reload"]):
+    # The scale: Xft.dpi is what i3, GTK, Qt, alacritty (live) and rofi's fonts follow
+    dpi_changed = x11 and xrdb_value("Xft.dpi") != v["dpi"]
+    if dpi_changed and xrdb_merge("Xft.dpi: %s\n" % v["dpi"]):
+        done.append("Xft.dpi %s" % v["dpi"])
+    # i3 reads Xft.dpi only when it starts: restart it in place (keeps the windows). Its
+    # exec_always lines re-place polybar and the wallpaper as well.
+    i3_restarted = False
+    if dpi_changed and running("i3") and run(["i3-msg", "restart"]):
+        i3_restarted = True
+        done.append("i3 (restart)")
+    elif "i3.conf" in changed and running("i3") and run(["i3-msg", "reload"]):
         done.append("i3")
     if x11 and any(old.get(k) != v[k] for k in ("screensaver_after", "lock_after", "display_off_after")):
         run(["xset", "s", "noblank"])
@@ -391,21 +550,17 @@ def reload(changed, old, v):
         cmd = ["setxkbmap", ",".join(layouts)] + (["-variant", ",".join(variants)] if any(variants) else [])
         if run(cmd):
             done.append("keyboard")
-    if x11 and old.get("wallpaper") not in (None, v["wallpaper"]) and os.path.exists(v["wallpaper"]):
+    wallpaper_moved = layout or old.get("wallpaper") not in (None, v["wallpaper"])
+    if x11 and wallpaper_moved and not i3_restarted and os.path.exists(v["wallpaper"]):
         if run(["feh", "--no-fehbg", "--bg-fill", v["wallpaper"]]):
             done.append("wallpaper")
-    if x11 and ("cursors" in changed or old.get("cursor_size") not in (None, v["cursor_size"])):
+    if x11 and ("cursors" in changed or xrdb_value("Xcursor.size") != v["cursor_size_px"]):
         # the root window (desktop) right away; programs load cursors when they start
-        res = "Xcursor.theme: %s\nXcursor.size: %s\n" % (CURSOR_THEME, v["cursor_size"])
-        try:
-            subprocess.run(["xrdb", "-merge"], input=res, text=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            pass
-        env = dict(os.environ, XCURSOR_THEME=CURSOR_THEME, XCURSOR_SIZE=v["cursor_size"])
+        xrdb_merge("Xcursor.theme: %s\nXcursor.size: %s\n" % (CURSOR_THEME, v["cursor_size_px"]))
+        env = dict(os.environ, XCURSOR_THEME=CURSOR_THEME, XCURSOR_SIZE=v["cursor_size_px"])
         if run(["xsetroot", "-cursor_name", "left_ptr"], env=env):
             done.append("cursor")
-    if "polybar.ini" in changed and running("polybar"):
+    if ("polybar.ini" in changed or layout) and not i3_restarted and running("polybar"):
         launch = os.path.join(XDG_CONFIG, "polybar", "launch.sh")
         if run([launch]):
             done.append("polybar")
@@ -417,31 +572,39 @@ def reload(changed, old, v):
     return done
 
 
-def apply(no_reload):
+def apply(no_reload, layout=False):
     old = old_values()
     v = load()
     changed, notes = generate(v)
     for n in notes:
         print(n)
-    if not changed:
-        print("dotfiles: nothing changed")
-        return 0
-    print("dotfiles: wrote %s" % ", ".join(sorted(changed)))
+    if old.get("scale") != v["scale"]:
+        print("dotfiles: scale %s (%s)" % (v["scale"], v["scale_reason"]))
+    if changed:
+        print("dotfiles: wrote %s" % ", ".join(sorted(changed)))
     if no_reload:
+        if not changed:
+            print("dotfiles: nothing changed")
         return 0
-    done = reload(changed, old, v)
+    done = reload(changed, old, v, layout)
     if done:
         print("dotfiles: reloaded %s" % ", ".join(done))
+    elif not changed:
+        print("dotfiles: nothing changed")
+        return 0
     later = [n for f, n in (("alacritty.toml", "alacritty (reloads itself)"), ("rofi.rasi", "rofi (next start)"),
                             ("fzfrc", "fzf (next start)"),
                             ("nvim.lua", "neovim (next start)"), ("gtk.css", "GTK programs (next start)"),
-                            ("firefox.css", "firefox (restart)"),
+                            ("firefox.css", "firefox (restart)"), ("firefox scale", "firefox (restart)"),
                             ("cursors", "programs (new cursors on their next start, i3 after a restart)"),
                             ("theme.sh", "shells and lock screen (next start)")) if f in changed]
     if later:
-        print("dotfiles: picked up by %s" % ", ".join(later))
-    if old.get("cursor_size") not in (None, v["cursor_size"]):
+        print("dotfiles: picked up by %s" % ", ".join(dict.fromkeys(later)))
+    if old.get("cursor_size_px") not in (None, v["cursor_size_px"]):
         print("dotfiles: the cursor size reaches every program after logging in again (XCURSOR_SIZE)")
+    if old.get("scale") not in (None, v["scale"]):
+        print("dotfiles: GTK and Qt programs pick the scale up on their next start; at 2 and above "
+              "their widgets after logging in again (GDK_SCALE)")
     return 0
 
 
@@ -449,7 +612,7 @@ def main(argv):
     cmd = argv[1] if len(argv) > 1 else "help"
     try:
         if cmd == "apply":
-            return apply("--no-reload" in argv[2:])
+            return apply("--no-reload" in argv[2:], "--layout" in argv[2:])
         if cmd == "check":
             load()
             print("dotfiles: %s is valid" % CONF)

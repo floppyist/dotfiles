@@ -31,6 +31,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | [Components](#components) | [Shell](#shell) | [Installation](#installation) |
 | [Settings](#settings) | [Polybar](#polybar) | [Security notes](#security-notes) |
 | [Idle and lock](#idle-and-lock) | [WiFi and VPN](#wifi-and-vpn) | [Troubleshooting](#troubleshooting) |
+| | [Monitors and scale](#monitors-and-scale) | |
 
 ## Design
 
@@ -55,7 +56,8 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 
 | Part | What it is |
 | --- | --- |
-| **Settings** | one file, [`dotfiles.conf`](dotfiles.conf): accent, palette, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings)) |
+| **Settings** | one file, [`dotfiles.conf`](dotfiles.conf): accent, palette, scale, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings)) |
+| **Monitors** | `displays`: resolution, refresh rate, position, rotation, primary monitor in Rofi; layouts are remembered per set of monitors and come back on hotplug; the scale follows the primary monitor (see [Monitors and scale](#monitors-and-scale)) |
 | **Window manager** | `i3wm` with `picom` |
 | **Terminal and shell** | `Alacritty`; `bash` with a two-line prompt in the Polybar style and vi mode with vim text objects; `fzf` in the Rofi style (see [Shell](#shell)) |
 | **Editor** | `Neovim` (LazyVim, gruvbox; sharp frames, Rofi-style Telescope, mode blocks in the statusline) |
@@ -70,7 +72,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | **Mouse cursor** | its own theme, drawn in the palette by `dotfiles apply` (`scripts/dotfiles-cursors`): sharp shapes, the busy indicator in the accent; `light`, `dark` or `accent` |
 | **Mail** | `neomutt` (theme in `config/mutt/theme.muttrc`; accounts stay in `~/.muttrc`) |
 | **Music** | `mpvim`, a vim-style terminal UI for `mpv` with the album cover (embedded or `cover.jpg`; sharper with `chafa`, `:cover` toggles it) |
-| **Scripts** | Bluetooth, WiFi, VPN, display (Windows-style), power menu, volume/brightness OSD, screenshots (region or window on a frozen screen), screensaver, mail notifications |
+| **Scripts** | Bluetooth, WiFi, VPN, display (Windows-style and `displays`), power menu, volume/brightness OSD, screenshots (region or window on a frozen screen), screensaver, mail notifications |
 
 ## Keybindings
 
@@ -91,7 +93,8 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>r</kbd> | Restart i3 |
 | <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>e</kbd> | Power menu (lock, suspend, log out, reboot, shut down) |
 | <kbd>Super</kbd> <kbd>l</kbd> | Lock the screen |
-| <kbd>Super</kbd> <kbd>p</kbd> | Display menu |
+| <kbd>Super</kbd> <kbd>p</kbd> | Display menu (PC screen only, duplicate, extend, second screen only, arrange) |
+| <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> | Arrange monitors (`displays`) |
 | <kbd>Super</kbd> <kbd>b</kbd> (or the display function key) | Bluetooth on/off |
 | <kbd>Super</kbd> <kbd>v</kbd> | VPN menu |
 | <kbd>Print</kbd> / <kbd>Shift</kbd> <kbd>Print</kbd> | Screenshot / region screenshot (also copied to the clipboard) |
@@ -188,6 +191,7 @@ open shells on their next start (also the new cursor). Idle times and the keyboa
 | Group | Keys |
 | --- | --- |
 | Colors | `accent` (gruvbox name like `red`, `blue`, `aqua` or `#rrggbb`), `accent_text`, `bg`, `surface`, `overlay`, `fg`, `subtle`, `muted` |
+| Scale | `scale` (`auto` or a number like `1.25`), `firefox_scale` (see [Monitors and scale](#monitors-and-scale)) |
 | Fonts | `font` (a Nerd Font), `font_size_terminal`, `font_size_bar`, `font_size_menu`, `font_size_notify`, `font_size_window` |
 | Layout | `bar_height`, `border_width`, `gaps`, `terminal_opacity`, `terminal_padding_x`, `terminal_padding_y`, `cursor_style` (`light`, `dark`, `accent`), `cursor_size` |
 | Behaviour | `terminal`, `keyboard_layout`, `wallpaper`, `screensaver_after`, `lock_after`, `display_off_after` |
@@ -198,6 +202,41 @@ The configs include the generated files (`include ~/.config/dotfiles/i3.conf`, `
 `@import` in Rofi and GTK, `import` in Alacritty, `source-file` in tmux, `FZF_DEFAULT_OPTS_FILE` for fzf, a drop-in in
 `~/.config/dunst/dunstrc.d/`). Shell scripts read `~/.config/dotfiles/theme.sh`.
 To change the design itself, edit the configs or the templates in `templates/`.
+
+## Monitors and scale
+
+**Scale.** All sizes in `dotfiles.conf` are at scale 1; `scale` multiplies all of them: fonts, the bar, Rofi,
+notifications, borders, gaps, the cursor, the lock screen, the screenshot overlay, Firefox, GTK and Qt programs.
+Fractional values work (`1.25`, `1.5`, `1.75`). `scale = auto` (the default) measures the primary monitor:
+
+| Primary monitor | auto |
+| --- | --- |
+| 14" laptop, 1920×1080 | 1 |
+| 13" laptop, 2560×1600 | 1.5 |
+| 15.6" laptop, 3840×2160 | 2 |
+| 27", 2560×1440 | 1 |
+| 27", 3840×2160 | 1.5 |
+| 32", 3840×2160 | 1.25 |
+
+(Laptop panels get factor 1 at about 150 dpi, external monitors at about 110 dpi; steps of 0.25.)
+`firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
+
+The scale is `Xft.dpi` (96 × scale) plus the sizes in the generated configs. When it changes, i3 restarts in
+place (the windows stay), the bar, Rofi, dunst and open terminals follow at once; Firefox, GTK and Qt programs on
+their next start. GTK draws its widgets (not the text) only at whole factors: from scale 2 on that is
+`GDK_SCALE`, set when you log in.
+
+> [!NOTE]
+> X11 has one scale for all monitors. With two monitors of different density side by side, the primary one
+> decides (<kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Make primary).
+
+**Arrange monitors** with <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> (or "Arrange" in <kbd>Super</kbd>
+<kbd>p</kbd>): pick a monitor, then its resolution, refresh rate, rotation, position (left of, right of, above,
+below, mirror), make it the primary one (bar, scale) or turn it off/on. A change that could leave a screen dark is
+reverted after 15 s unless you confirm it. The layout is remembered for this set of monitors
+(`~/.local/state/dotfiles/displays.json`) and comes back when you plug them in again and when you log in. A set
+of monitors without a saved layout is extended side by side, the laptop panel first. On the shell:
+`displays restore`, `displays save`.
 
 ## Idle and lock
 
@@ -228,7 +267,7 @@ The installer installs all of it (see [Installation](#installation)), in modules
 | **Neovim** | `neovim git gcc make tree-sitter-cli ripgrep fd curl unzip nodejs openjdk21` | installs the plugins of `lazy-lock.json` |
 | **Firefox** | `firefox noto-fonts-emoji` | puts the look into your profile |
 | **Mail** | `neomutt` | sources the theme in your muttrc |
-| **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | |
+| **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | links the MPRIS plugin into `~/.config/mpv/scripts` (Void installs it where mpv does not look; without it the music capsule does not see mpv) |
 | **Tools** | `htop xdg-utils` | |
 | **Start X on login** | | `startx` after logging in on tty1 |
 
@@ -358,6 +397,8 @@ run `./install.sh links` again.
 
 - **WiFi or VPN: "not authorized":** adding a profile needs a polkit agent for the password dialog. i3 starts `polkit-gnome`; check that it is installed and running.
 - **WiFi: a network keeps failing with a saved profile:** the menu asks for the password again when NetworkManager rejects the saved one. For other errors, `nmcli connection delete id "<name>"` and connect again.
+- **The music capsule ignores mpv:** mpv needs the MPRIS plugin: `mkdir -p ~/.config/mpv/scripts && ln -s /usr/lib/mpv-mpris/mpris.so ~/.config/mpv/scripts/` (the installer's Music module does that), then restart mpv. `playerctl -l` lists the players it sees.
+- **Everything too small or too large:** `dotfiles get scale_reason` shows how `scale = auto` decided; set a number instead (`scale = 1.5`) and run `dotfiles apply`. Firefox only: `firefox_scale`.
 - **Polybar hides CPU, volume or music:** the bar is full (see [Polybar](#polybar)); `polybar-fit --explain` prints the measured widths.
 - **Bluetooth "Failed to power on":** the Intel AX200 (`btusb`) can get stuck after rfkill cycles. Reload the driver with `sudo modprobe -r btusb && sudo modprobe btusb`, or reboot.
 - **Idle lock after updating these dotfiles:** `xss-lock` only starts with the session. Log out and back in once (an i3 restart is not enough).

@@ -76,8 +76,10 @@ M_STEPS[mail]="mail"
 
 M_TITLE[music]="Music"
 M_DESC[music]="mpv and mpvim, the terminal player with album covers (chafa, Pillow, ffmpeg), and \
-playerctl for the music capsule."
+playerctl for the music capsule. Links the mpv-mpris plugin into ~/.config/mpv/scripts (Void \
+installs it where mpv does not look), so the capsule shows what mpv plays."
 M_PKGS[music]="mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow"
+M_STEPS[music]="mpris"
 
 M_TITLE[tools]="Tools"
 M_DESC[tools]="htop (in Rofi as a floating window) and xdg-utils (opens files and links with the \

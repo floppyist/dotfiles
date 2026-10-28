@@ -8,7 +8,8 @@
  *  └──────────────────────────────────────────────┘
  *
  *  Colors (@bg @surface @overlay @fg @subtle @muted @accent @accent-text), the font,
- *  the frame width and drun-display-format come from dotfiles.conf (templates/rofi.rasi).
+ *  the frame width, drun-display-format and the sizes (@df-*, scaled by `scale`) come
+ *  from dotfiles.conf (templates/rofi.rasi). The defaults below are for scale 1.
  */
 
 configuration {
@@ -21,12 +22,22 @@ configuration {
 * {
     background-color: transparent;
     text-color:       @fg;
+
+    df-width:         640px;
+    df-input-padding: 14px 16px;
+    df-input-spacing: 10px;
+    df-input-line:    0px 0px 2px 0px;
+    df-mesg-padding:  10px 16px;
+    df-mesg-line:     0px 0px 1px 0px;
+    df-list-padding:  6px 0px;
+    df-row-padding:   8px 16px 8px 13px;
+    df-row-bar:       0px 0px 0px 3px;
 }
 
 window {
     location:         center;
     anchor:           center;
-    width:            640px;
+    width:            @df-width;
     background-color: @bg;
     border:           @frame;
     border-color:     @overlay;
@@ -43,9 +54,9 @@ mainbox {
 
 inputbar {
     background-color: @surface;
-    padding:          14px 16px;
-    spacing:          10px;
-    border:           0px 0px 2px 0px;
+    padding:          @df-input-padding;
+    spacing:          @df-input-spacing;
+    border:           @df-input-line;
     border-color:     @accent;
     children:         [ prompt, textbox-chevron, entry, counter ];
 }
@@ -90,8 +101,8 @@ textbox-num-sep {
 /* ── message (rofi -mesg) ───────────────────────────────────────────────── */
 
 message {
-    padding:          10px 16px;
-    border:           0px 0px 1px 0px;
+    padding:          @df-mesg-padding;
+    border:           @df-mesg-line;
     border-color:     @overlay;
     background-color: @bg;
 }
@@ -110,12 +121,12 @@ listview {
     dynamic:      true;
     scrollbar:    false;
     spacing:      0px;
-    padding:      6px 0px;
+    padding:      @df-list-padding;
 }
 
 element {
-    padding:          8px 16px 8px 13px;
-    border:           0px 0px 0px 3px;
+    padding:          @df-row-padding;
+    border:           @df-row-bar;
     border-color:     transparent;
     background-color: transparent;
     text-color:       @subtle;

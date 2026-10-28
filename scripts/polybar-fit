@@ -61,7 +61,7 @@ SLOTS = {
 }
 TRAY_PADDING_CELLS = 2      # [module/tray] format-padding = 1
 TRAY_SIZE_PCT = 50          # tray-size = 50%
-TRAY_SPACING_PX = 10        # tray-spacing = 10px
+TRAY_SPACING_PX = 10        # tray-spacing (DF_TRAY_SPACING_PX: scaled by dotfiles.conf `scale`)
 LONG_DATE = "%a %d.%m.%Y  %H:%M"   # [module/date-long] date + time
 I3_PADDING_CELLS = 4        # label-*-padding = 2
 I3_MODE_PREFIX = "󰩨 "        # label-mode
@@ -73,7 +73,7 @@ DEFAULT_ORDER = ("fit music gap-tray tray gap-net wlan ip vpn bluetooth gap-audi
 
 BLOCK_GAP_PX = 20           # polybar renderer: space between the left and the right block
 SAFETY_PX = 4
-DPI = 96                    # polybar's default dpi-x
+DPI = 96                    # [bar/main] dpi (DF_DPI: 96 x scale)
 SLOT_RE = re.compile(r"^[a-z0-9-]{1,32}$")
 TAG_RE = re.compile(r"%\{[^}]*\}")
 
@@ -83,6 +83,11 @@ def log(msg):
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+
+def num(s, default):
+    """A positive integer from theme.sh, else the default."""
+    return int(s) if s and re.fullmatch(r"[0-9]{1,4}", s) and int(s) > 0 else default
+
 
 def text_cells(s):
     """Visible width of polybar text in cells (tags removed, wide characters count 2)."""
@@ -449,8 +454,10 @@ class Layout:
         size1 = int(df.get("DF_FONT_SIZE_BAR_SMALL", "11") or 11)
         adv = font_advance(df.get("DF_FONT", "JetBrainsMono Nerd Font"))
         # cairo hints the advance to whole pixels (measured: 14 pt -> 11 px, 11 pt -> 9 px)
-        self.cell = [round(size0 * DPI / 72 * adv), round(size1 * DPI / 72 * adv)]
-        height = int(df.get("DF_BAR_HEIGHT", "40") or 40)
+        dpi = num(df.get("DF_DPI"), DPI)
+        self.cell = [round(size0 * dpi / 72 * adv), round(size1 * dpi / 72 * adv)]
+        height = num(df.get("DF_BAR_HEIGHT_PX"), 40)
+        self.tray_spacing = num(df.get("DF_TRAY_SPACING_PX"), TRAY_SPACING_PX)
         self.tray_size = round(height * TRAY_SIZE_PCT / 100)
         self.order = order
         # capsules: (gap module in front or None, [modules]); "fit" is invisible
@@ -485,7 +492,7 @@ class Layout:
             n = data["tray"]
             if n <= 0:
                 return 0
-            return n * self.tray_size + (n - 1) * TRAY_SPACING_PX + TRAY_PADDING_CELLS * c0
+            return n * self.tray_size + (n - 1) * self.tray_spacing + TRAY_PADDING_CELLS * c0
         if m in SLOTS:
             text = data["slots"].get(m, "")
             if not text.strip():

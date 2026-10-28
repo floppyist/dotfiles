@@ -25,6 +25,8 @@ exec --no-startup-id pipewire
 exec --no-startup-id pipewire-pulse
 exec --no-startup-id wireplumber
 exec --no-startup-id xbanish
+# Monitor hotplug: the saved layout for the connected monitors (or extend), then the scale
+exec --no-startup-id ~/.local/bin/displays watch
 # exec_always: i3 restart (Alt+Shift+r) brings back a crashed compositor; a second instance exits
 exec_always --no-startup-id picom -b
 exec_always --no-startup-id ~/.config/polybar/launch.sh
@@ -43,8 +45,7 @@ mode "nerdsaver" {
 }
 for_window [class="^nerdsaver$"] floating enable, border none
 
-# Terminal tools started from rofi: centered floating window
-for_window [class="^tool-float$"] floating enable, resize set 1000 650, move position center
+# Terminal tools started from rofi: centered floating window (size: templates/i3.conf)
 
 # ── Workspaces ─────────────────────────────────────────────────────────────────
 set $ws1 "1"
@@ -86,6 +87,7 @@ bindsym $mod+Shift+5 move container to workspace number $ws5
 # ── Keybinds: system (Super, media keys) ───────────────────────────────────────
 bindsym Mod4+l exec --no-startup-id ~/.local/bin/lock.sh
 bindsym Mod4+p exec --no-startup-id ~/.local/bin/display-select.sh
+bindsym Mod4+Shift+p exec --no-startup-id ~/.local/bin/displays
 # The function key that sends XF86Display is used as the Bluetooth key on this machine
 bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
 bindsym Mod4+b exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh

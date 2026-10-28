@@ -4,19 +4,20 @@
 #                          returns 1 if there is nothing to do; MODULE limits it to one module
 #   run_<step>            does it; runs in the background, output in the log (lib.sh protocol)
 
-STEP_ORDER=(update packages font services backlight alsa shell links firefox mail theme nvim autostart network)
+STEP_ORDER=(update packages font services backlight alsa shell links firefox mail mpris theme nvim autostart network)
 
 declare -A STEP_TITLE=(
     [update]="System update"  [packages]="Packages"        [font]="Font"
     [services]="Services"     [backlight]="Backlight"      [alsa]="ALSA to PipeWire"
     [shell]="Login shell"     [links]="Links"              [firefox]="Firefox"
-    [mail]="neomutt"          [theme]="Theme"              [nvim]="Neovim plugins"
+    [mail]="neomutt"          [mpris]="mpv MPRIS"          [theme]="Theme"
+    [nvim]="Neovim plugins"
     [autostart]="Start X on login"                         [network]="NetworkManager"
 )
 # share of the whole installation, for the progress bar
 declare -A STEP_WEIGHT=(
     [update]=12 [packages]=40 [font]=4 [services]=1 [backlight]=1 [alsa]=1 [shell]=1
-    [links]=3 [firefox]=3 [mail]=1 [theme]=5 [nvim]=14 [autostart]=1 [network]=3
+    [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [autostart]=1 [network]=3
 )
 declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 )
 
@@ -362,6 +363,33 @@ run_mail() {
     { printf '\n# dotfiles (install.sh): new-mail notifications, colors and formats\n'
       printf '%s\n' "${add[@]}"; } >> "$MUTTRC" || return 1
     say "added to $MUTTRC: ${add[*]}"
+}
+
+# ── mpv MPRIS (music) ─────────────────────────────────────────────────────────────
+
+# Void installs the plugin outside mpv's script directories, so mpv never loads it and the
+# music capsule (playerctl) does not see mpv: link it into the user's scripts directory
+MPRIS_SO=/usr/lib/mpv-mpris/mpris.so
+MPRIS_LINK=$CONFIG/mpv/scripts/mpris.so
+
+mpris_loaded() {
+    [[ -e $MPRIS_LINK || -e $SYSROOT/etc/mpv/scripts/mpris.so ]]
+}
+
+plan_mpris() {
+    PLAN=()
+    mpris_loaded && return 1
+    PLAN=("link $MPRIS_SO into ${MPRIS_LINK/#$HOME/\~}: mpv shows up in the music capsule")
+}
+
+run_mpris() {
+    if mpris_loaded; then say "mpv loads the MPRIS plugin already"; return 0; fi
+    if [[ ! -e $SYSROOT$MPRIS_SO ]]; then warn "$MPRIS_SO is missing (package mpv-mpris)"; return 0; fi
+    # a dangling link (old package path) is replaced, a real file is not touched (mpris_loaded)
+    [[ -L $MPRIS_LINK ]] && { rm -f "$MPRIS_LINK" || return 1; }
+    mkdir -p "${MPRIS_LINK%/*}" || return 1
+    ln -s "$SYSROOT$MPRIS_SO" "$MPRIS_LINK" || return 1
+    say "linked $MPRIS_LINK"
 }
 
 # ── Theme ─────────────────────────────────────────────────────────────────────────
