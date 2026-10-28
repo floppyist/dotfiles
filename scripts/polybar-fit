@@ -15,7 +15,7 @@ long form is reserved before it is shown, so it never pushes the clock off the b
 The estimate is exact for this bar: the font is monospaced and every glyph, the Nerd Font
 icons included, advances one cell, so width = cells x cell width; the tray follows
 polybar's own formula. Nothing polls:
-    script modules   polybar-watch --slot NAME and music.sh write their output to the
+    script modules   polybar-watch --slot NAME and polybar-music.sh write their output to the
                      state directory, watched with inotify
     workspaces       i3 IPC events (the left block)
     tray icons       X events on the bar window (the icons are its child windows)

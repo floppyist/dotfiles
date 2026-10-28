@@ -8,6 +8,7 @@
 # -no-custom: typed text that matches nothing is never returned as a selection
 # (with -format i, rofi would otherwise print an index outside the list).
 # Rows are not parsed as markup, so untrusted text (SSIDs, device names) is shown as-is.
+# MESSAGE is pango markup (rofi's -mesg): callers escape untrusted text in it (& < >).
 set -u
 
 THEME="${ROFI_THEME:-$HOME/.config/rofi/config.rasi}"

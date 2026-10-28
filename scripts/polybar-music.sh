@@ -6,8 +6,7 @@
 # or stopped nothing at all, so the module costs nothing when no music runs.
 #
 # Track titles come from websites (browser MPRIS) and media files, so they are untrusted:
-# - Polybar parses %{...} tags in script output, including click actions that run
-#   commands, so every "%{" is broken up.
+# - they go through polybar_safe (lib/polybar.sh).
 # - Numbers are validated before bash arithmetic (it evaluates expressions recursively).
 set -u
 
@@ -15,10 +14,9 @@ DF_ACCENT="#cc241d" DF_MUTED="#7c6f64"
 # shellcheck source=/dev/null
 . "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
 
-polybar_safe() { local s=${1//[[:cntrl:]]/} pat='%{' rep='% {'; printf '%s' "${s//"$pat"/"$rep"}"; }
-
-# Truncate to N characters (polybar's label-maxlen would also count and cut %{...} tags)
-truncate() { local s=$1 n=$2; (( ${#s} > n )) && s="${s:0:n-1}…"; printf '%s' "$s"; }
+# polybar_safe, truncate (next to this script, also without ~/.local/bin in PATH)
+# shellcheck source=lib/polybar.sh
+. "$(dirname "$(readlink -f "$0")")/lib/polybar.sh" || exit 1
 
 # polybar-fit measures the module to keep the bar from overflowing: write the output to its
 # slot, but only when the width can change (title, state), not on every countdown tick

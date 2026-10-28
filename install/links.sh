@@ -135,8 +135,9 @@ links_run() {
         link "$DOTFILES/$name" "$HOME/$name" || return 1
     done
 
-    # Scripts -> ~/.local/bin
+    # Scripts -> ~/.local/bin (files only: scripts/lib holds what they source)
     for src in "$DOTFILES"/scripts/*; do
+        [[ -f $src ]] || continue
         link "$src" "$HOME/.local/bin/$(basename "$src")" || return 1
     done
 
@@ -171,7 +172,10 @@ links_run() {
     (( LINKS_DRY )) && return 0
 
     # Executable bits (git tracks them, this is for copies without git)
-    chmod +x "$DOTFILES"/scripts/* "$DOTFILES"/config/polybar/launch.sh "$DOTFILES"/config/polybar/scripts/*
+    local f
+    for f in "$DOTFILES"/scripts/* "$DOTFILES"/config/polybar/launch.sh; do
+        [[ -f $f ]] && chmod +x "$f"
+    done
 
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true

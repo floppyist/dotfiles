@@ -109,7 +109,7 @@ Terminal tools started from Rofi (audio mixer, htop, neomutt) open as a centered
 
 The prompt has two lines (see the picture at the top). The first one is built like Polybar: `user@host` behind
 an accent bar (a red `ROOT@host` block for root), the directory in the accent block (last directory bold), then
-capsules for git (branch, changes, ahead/behind), the exit code or signal of the last command, background jobs
+capsules for git (branch, changes, ahead/behind; a `!` instead of the changes in a repository whose own config could run programs, see [Security notes](#security-notes)), the exit code or signal of the last command, background jobs
 and the duration of commands that took 2 s or longer. The second line is the input line; its `▌` shows the vi mode.
 
 - **Vi mode** (readline's own): <kbd>Esc</kbd> switches to normal mode (block cursor, yellow `▌`), <kbd>i</kbd>/<kbd>a</kbd>
@@ -347,8 +347,10 @@ run `./install.sh links` again.
   when logind announces suspend or a lock, and before the screensaver starts.
 - System menus never act on typed text that matches no entry (`rofi -no-custom`), so a typo cannot select a random network or display mode.
 - WiFi and VPN passwords and keys never appear on a command line, in the environment or in a notification: they go from Rofi's password field to NetworkManager over D-Bus (`wifi-connect` and `vpn` use libnm), and the profiles are stored root-only. Imported VPN files are parsed, never executed.
-- The git prompt runs `git status` with `core.fsmonitor=false`, so a repository's own config cannot start a program when you `cd` into it. Control characters in directory names are replaced in the prompt (no escape sequences from a crafted directory name).
-- Runtime files (mpv IPC socket, screensaver log/lock, Polybar module outputs) live in private directories under `$XDG_RUNTIME_DIR`, not under predictable names in `/tmp`.
+- The git prompt runs `git status` with `core.fsmonitor=false`, and not at all in a repository whose own config defines filter drivers or includes other files (the capsule then shows the branch and a `!`): both would let the repository start a program of its choice when you `cd` into it, e.g. an unpacked archive. Control characters in directory names are replaced in the prompt (no escape sequences from a crafted directory name).
+- Runtime files (mpv IPC socket, screensaver log/lock, Polybar module outputs, the region screenshot) live in private directories under `$XDG_RUNTIME_DIR` (or `~/.cache`), never under predictable names in `/tmp`.
+- Firefox hides the tab icons and the site identity box, which also show that a page uses the camera, microphone or screen: such a tab gets a red title instead (and a red line in the background). Pages without a secure connection show their address in red.
+- The installer runs as your user and asks for sudo once; it drops the permission again when it ends (`sudo -k`). The font download is checked against a fixed SHA-256. A step that is running when you press <kbd>Ctrl</kbd> <kbd>c</kbd> or close the terminal finishes first, so an xbps transaction is never cut off halfway.
 - `dotfiles.conf` values end up in configs that can run commands (i3, Polybar, tmux, shell), so `dotfiles apply` only accepts strict patterns (colors `#rrggbb`, numbers in a range, fonts and paths without quotes or shell characters).
 - A command typed with a leading space is not saved in the bash history.
 

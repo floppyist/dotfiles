@@ -13,10 +13,19 @@ select=0
 [[ "${1:-}" == "--select" ]] && select=1
 
 if (( select )); then
+    # Lock file and the frozen picture in a private directory. No fallback to /tmp: a
+    # predictable name there could be a symlink another user planted (the lock is opened
+    # for writing).
+    if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]]; then
+        run=$XDG_RUNTIME_DIR
+    else
+        run=${XDG_CACHE_HOME:-$HOME/.cache}/screenshot
+        mkdir -p -m 700 "$run" || exit 1
+    fi
     # One selection at a time (a second Shift+Print while choosing does nothing)
-    exec 9>"${XDG_RUNTIME_DIR:-/tmp}/screenshot-select.lock"
+    exec 9>>"$run/screenshot-select.lock"
     flock -n 9 || exit 0
-    tmp=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/screenshot.XXXXXX") || exit 1
+    tmp=$(mktemp -d "$run/screenshot.XXXXXX") || exit 1
     trap 'rm -rf "$tmp"' EXIT
 fi
 

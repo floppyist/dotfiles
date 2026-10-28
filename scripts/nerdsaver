@@ -287,7 +287,9 @@ class Pix:
                 if p and p[2] == 1:
                     s.txt[(y, x - 1)] = (p[0] + ch, p[1], 1)
                 continue
-            if ch < " ":
+            # control characters (C0, DEL, C1) never reach the terminal: track titles are text
+            # other people chose, and this output is written raw (not through curses)
+            if ch < " " or "\x7f" <= ch <= "\x9f":
                 continue
             w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
             if 0 <= x and x + w <= s.cols:

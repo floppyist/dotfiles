@@ -120,8 +120,9 @@ tui_glyphs() {
 # ── Text helpers (results in globals: no subshells while drawing) ─────────────────
 
 # TEXT WIDTH -> _F: exactly WIDTH characters, cut with an ellipsis or padded
+# (control characters are dropped: no text reaches the terminal as escape sequences)
 fit() {
-    local t=$1 w=$2
+    local t=${1//[[:cntrl:]]/} w=$2
     (( w > 0 )) || { _F=""; return; }
     (( ${#t} > w )) && t=${t:0:w-1}$G_ELL
     printf -v _F '%s%*s' "$t" $(( w - ${#t} )) ''
@@ -129,7 +130,7 @@ fit() {
 
 # the same, right aligned
 rfit() {
-    local t=$1 w=$2
+    local t=${1//[[:cntrl:]]/} w=$2
     (( w > 0 )) || { _F=""; return; }
     (( ${#t} > w )) && t=${t:0:w-1}$G_ELL
     printf -v _F '%*s%s' $(( w - ${#t} )) '' "$t"
@@ -148,7 +149,7 @@ wrap() {
     local IFS=$' \t\n' w=$2 line="" word
     WRAP=()
     (( w < 4 )) && w=4
-    for word in $1; do
+    for word in ${1//[[:cntrl:]]/ }; do
         while (( ${#word} > w )); do
             [[ -n $line ]] && { WRAP+=("$line"); line=""; }
             WRAP+=("${word:0:w}")
@@ -245,6 +246,7 @@ tui_header() {
         done
     fi
     for c in "$HDR_SYS" "$HDR_GPU" "$HDR_USER"; do
+        c=${c//[[:cntrl:]]/}
         [[ -n $c ]] || continue
         (( used + ${#c} + 3 + crl + 2 > W - 1 )) && break
         s+=" ${B[surface]}${F[fg]} $c $N"
@@ -1000,7 +1002,9 @@ run_steps_tui() {
         CUR=$i CUR_DONE=0 CUR_TOTAL=0 RUN_T0=$SECONDS
         ST_STATE[i]=running ST_INFO[i]=""
         printf '\n==> %s\n' "${STEP_TITLE[$st]}" >> "$LOG"
-        ( "run_$st" ) </dev/null >> "$LOG" 2>&1 &
+        # Background steps ignore SIGINT (bash does that for &), and SIGHUP here: closing the
+        # terminal must not kill an xbps transaction halfway (the installer stops after it)
+        ( trap '' HUP; "run_$st" ) </dev/null >> "$LOG" 2>&1 &
         pid=$!
         while kill -0 "$pid" 2>/dev/null; do
             log_drain

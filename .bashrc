@@ -52,7 +52,8 @@ set -o vi
 #                  parents regular, the directory itself bold, trimmed to 3 levels
 #   capsules       surface, colored icon, text in fg (polybar style):
 #                  git (icon green = clean, orange = dirty; * modified, + staged,
-#                  ? untracked, ↑/↓ ahead/behind), ✗ exit code (+ signal), 󰒓 jobs,
+#                  ? untracked, ↑/↓ ahead/behind; ! = no status, the repository's own
+#                  config could run programs), ✗ exit code (+ signal), 󰒓 jobs,
 #                  󰔛 duration (from 2 s, bash 5.3+)
 #   line 2         readline's mode string: ▌ accent = insert (bar cursor),
 #                  ▌ yellow = normal mode (block cursor, yellow like the mode badges),
@@ -138,8 +139,17 @@ _prompt_git() {
         while [[ -n $d && ! -e $d/.git ]]; do d=${d%/*}; done
         [[ -n $d ]] || return 0
     fi
-    # core.fsmonitor=false: a repository's own config could otherwise make `git status`
-    # run a program of its choice (e.g. in an unpacked archive you just cd'ed into)
+    # A repository's own config can make `git status` run a program of its choice, e.g. in an
+    # unpacked archive you just cd'ed into: core.fsmonitor (switched off here) and filter
+    # drivers, whose clean command runs for every file that looks changed. If the repository
+    # config (or a file it includes) defines filters or includes other files, the capsule
+    # shows only the branch (read without touching the work tree) and a "!".
+    out=$'\n'$(git config --show-scope --name-only --get-regexp '^(filter|include|includeif)\.' 2>/dev/null)
+    if [[ $out == *$'\n'local$'\t'* || $out == *$'\n'worktree$'\t'* ]]; then
+        branch=$(git symbolic-ref --short -q HEAD 2>/dev/null || git rev-parse --short -q HEAD 2>/dev/null)
+        _P_GIT=" $_p_surf $_p_dirty$_P_BRANCH$_p_fg${branch:-?} $_p_dirty! $_p_rst"
+        return 0
+    fi
     out=$(git -c core.fsmonitor=false --no-optional-locks status --porcelain=v1 --branch 2>/dev/null) || return 0
     head=${out%%$'\n'*}
     head=${head#'## '}

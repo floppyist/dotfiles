@@ -3,8 +3,12 @@
 # Usage: polybar-bluetooth.sh [--status|--debug]
 set -u
 
-# Shared menu helper, resolved next to this script (works without ~/.local/bin in PATH)
-ROFI_MENU="$(dirname "$(readlink -f "$0")")/rofi-menu"
+# Helpers resolved next to this script (works without ~/.local/bin in PATH)
+HERE=$(dirname "$(readlink -f "$0")")
+ROFI_MENU="$HERE/rofi-menu"
+# polybar_safe, truncate (device names are chosen by the remote device)
+# shellcheck source=lib/polybar.sh
+. "$HERE/lib/polybar.sh" || exit 1
 
 ICON_ON="󰂱"   # md-bluetooth_connect
 ICON_IDLE="󰂯" # md-bluetooth
@@ -14,14 +18,6 @@ DF_BLUE_HI="#83a598" DF_MUTED="#7c6f64"
 . "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
 
 notify() { notify-send -a bluetooth "$@" >/dev/null 2>&1; }
-
-# Device names are chosen by the remote device. Polybar parses %{...} tags in script
-# output (including click actions that run commands), so break up every "%{".
-# Replacement strings are quoted: since bash 5.2 an unquoted & in them means "the match".
-polybar_safe() { local s=${1//[[:cntrl:]]/} pat='%{' rep='% {'; printf '%s' "${s//"$pat"/"$rep"}"; }
-
-# Truncate to N characters (polybar's label-maxlen would also count and cut %{...} tags)
-truncate() { local s=$1 n=$2; (( ${#s} > n )) && s="${s:0:n-1}…"; printf '%s' "$s"; }
 
 powered() { bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; }
 

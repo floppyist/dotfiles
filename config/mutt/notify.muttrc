@@ -2,4 +2,4 @@
 # Fires only while neomutt is running. Source it from ~/.muttrc:
 #   source ~/.config/mutt/notify.muttrc
 # %n = new messages, %u = unread messages (numbers only; no folder name, see mail-notify.sh)
-set new_mail_command = "mail-notify.sh '%n' '%u'"
+set new_mail_command = "~/.local/bin/mail-notify.sh '%n' '%u'"

@@ -43,8 +43,6 @@ mode "nerdsaver" {
 }
 for_window [class="^nerdsaver$"] floating enable, border none
 
-# bindsym $mod+Shift+s exec --no-startup-id ~/.local/bin/nerdsaver-launch --now cycle 60
-
 # Terminal tools started from rofi: centered floating window
 for_window [class="^tool-float$"] floating enable, resize set 1000 650, move position center
 

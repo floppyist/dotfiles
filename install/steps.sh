@@ -93,7 +93,7 @@ run_font() {
     local tmp sum _ n
     tmp=$(mktemp -d) || return 1
     detail "downloading $FONT_VERSION"
-    if ! curl -fsSL --retry 3 --connect-timeout 20 -o "$tmp/font.tar.xz" "$FONT_URL"; then
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 -o "$tmp/font.tar.xz" "$FONT_URL"; then
         rm -rf "$tmp"; return 1
     fi
     read -r sum _ < <(sha256sum "$tmp/font.tar.xz")

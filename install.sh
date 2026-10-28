@@ -38,11 +38,17 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
     tui_stop
-    [[ -n ${SUDO_KEEP-} ]] && kill "$SUDO_KEEP" 2>/dev/null
     if (( ${WANT_REBOOT:-0} )); then
         printf 'Rebooting...\n'
         sudo reboot
-    elif [[ -n ${FLOW_DONE-} && -s $LOG ]]; then
+        return
+    fi
+    # The root permission ends with the installer (sudo would keep it for some minutes)
+    if [[ -n ${SUDO_KEEP-} ]]; then
+        kill "$SUDO_KEEP" 2>/dev/null
+        sudo -k
+    fi
+    if [[ -n ${FLOW_DONE-} && -s $LOG ]]; then
         printf 'dotfiles: the log of this run is %s\n' "$LOG"
     fi
 }
@@ -66,6 +72,8 @@ scan_machine() {
 log_header() {
     local m sel=()
     mkdir -p "$STATE_DIR"
+    # private: it lists the WiFi networks that were moved to NetworkManager
+    (umask 077; : >> "$LOG")
     for m in "${MODULES[@]}"; do (( ${SEL[$m]:-0} )) && sel+=("$m"); done
     {
         printf 'dotfiles install.sh  %(%F %T)T\n' -1
@@ -121,9 +129,11 @@ cli_step() {
             "@@note "*)  NOTES+=("${line#@@note }") ;;
             "@@warn "*)  WARNINGS+=("${line#@@warn }"); printf '    %s! %s%s\n' "${F[warn]}" "${line#@@warn }" "$N" ;;
             "@@reboot")  REBOOT=1 ;;
-            *)           printf '    %s%s%s\n' "${F[muted]}" "${line##*$'\r'}" "$N" ;;
+            *)           line=${line##*$'\r'}
+                         line=${line//$'\e'\[*([0-9;?])[@-~]/}
+                         printf '    %s%s%s\n' "${F[muted]}" "${line//[[:cntrl:]]/}" "$N" ;;
         esac
-    done < <( "run_$st" </dev/null 2>&1; printf '\n@@exit %d\n' "$?" )
+    done < <( trap '' HUP; "run_$st" </dev/null 2>&1; printf '\n@@exit %d\n' "$?" )
     [[ $rc =~ ^[0-9]+$ ]] || rc=1
     printf '<== %s: %s\n' "${STEP_TITLE[$st]}" "$( (( rc )) && echo "failed ($rc)" || echo ok)" >> "$LOG"
     return "$rc"
@@ -151,21 +161,33 @@ cli_install() {
         sudo_keepalive
     fi
     NOTES=() WARNINGS=() REBOOT=0
+    # Ctrl+C (or a closed terminal) stops after the running step: an xbps transaction is never
+    # cut off halfway (the step itself ignores both signals)
+    CLI_STOP=0
+    trap 'CLI_STOP=1; printf "\n    stopping after this step\n" >&2' INT
+    trap 'CLI_STOP=1' HUP
     for st in "${SS[@]}"; do
+        (( CLI_STOP )) && { echo "Stopped before: ${STEP_TITLE[$st]}"; break; }
         if ! cli_step "$st"; then
             failed+=("${STEP_TITLE[$st]}")
             printf '    %s%s %s failed%s\n' "${F[err]}" "$G_FAIL" "${STEP_TITLE[$st]}" "$N"
             [[ $st == @(update|packages) ]] && { echo "Stopping: the next steps need the packages."; break; }
         fi
     done
+    trap 'exit 130' INT HUP
     FLOW_DONE=1
     echo
-    (( ${#failed[@]} )) && printf '%sFailed: %s%s\n' "${F[err]}" "${failed[*]}" "$N"
-    (( ${#failed[@]} )) || printf '%s%s Done%s\n' "${F[ok]}" "$G_OK" "$N"
+    if (( ${#failed[@]} )); then
+        printf '%sFailed: %s%s\n' "${F[err]}" "${failed[*]}" "$N"
+    elif (( CLI_STOP )); then
+        printf '%sStopped.%s Run it again to finish: steps that are done are skipped.\n' "${F[warn]}" "$N"
+    else
+        printf '%s%s Done%s\n' "${F[ok]}" "$G_OK" "$N"
+    fi
     for l in "${NOTES[@]}"; do printf '  %s %s\n' "$G_DOT" "$l"; done
     for l in "${WARNINGS[@]}"; do printf '  %s! %s%s\n' "${F[warn]}" "$l" "$N"; done
     (( REBOOT )) && printf '  %s Restart the computer: new services, groups and the login shell take effect then.\n' "$G_DOT"
-    (( ${#failed[@]} == 0 ))
+    (( ${#failed[@]} == 0 && ! CLI_STOP ))
 }
 
 cli_list() {
@@ -225,8 +247,7 @@ main() {
     if [[ -n ${NVIDIA_DRIVER-} && $NVIDIA_DRIVER != @(nouveau|nvidia|nvidia580|nvidia470) ]]; then
         die "unknown NVIDIA driver '$NVIDIA_DRIVER'"
     fi
-    (( EUID == 0 )) && [[ -z $SYSROOT ]] &&
-        die "run it as your user, not as root: it sets up your home directory and uses sudo itself"
+    (( EUID == 0 )) && die "run it as your user, not as root: it sets up your home directory and uses sudo itself"
     if [[ -z $cmd ]]; then
         if [[ -t 0 && -t 1 ]]; then cmd=tui; else cmd=links; fi
     fi

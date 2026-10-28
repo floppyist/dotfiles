@@ -244,6 +244,16 @@
     box-shadow: inset 0 calc(-1 * var(--df-line)) 0 var(--df-accent) !important;
 }
 
+/* Camera, microphone or screen shared with the page: Firefox marks the tab icon, which is
+ * hidden here, so the title turns red, and a tab in the background gets a red line */
+.tabbrowser-tab[sharing] :is(.tab-label-container, .tab-label, .tab-text) {
+    color: var(--df-red) !important;
+}
+
+.tabbrowser-tab[sharing]:not([selected]) .tab-content {
+    box-shadow: inset 0 calc(-1 * var(--df-line)) 0 var(--df-red) !important;
+}
+
 /* ── 6 URL bar: one centered line of text ───────────────────────────────────── */
 
 :root,

@@ -14,13 +14,9 @@ DF_GREEN_HI="#b8bb26" DF_YELLOW_HI="#fabd2f" DF_MUTED="#7c6f64"
 # shellcheck source=/dev/null
 . "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
 
-# Profile names come from imported files (and so from whoever wrote them). Polybar parses
-# %{...} tags in script output, including click actions that run commands: break up "%{".
-# Replacement strings are quoted: since bash 5.2 an unquoted & in them means "the match".
-polybar_safe() { local s=${1//[[:cntrl:]]/} pat='%{' rep='% {'; printf '%s' "${s//"$pat"/"$rep"}"; }
-
-# Truncate to N characters (polybar's label-maxlen would also count and cut %{...} tags)
-truncate() { local s=$1 n=$2; (( ${#s} > n )) && s="${s:0:n-1}…"; printf '%s' "$s"; }
+# polybar_safe, truncate (profile names come from imported files, so from whoever wrote them)
+# shellcheck source=lib/polybar.sh
+. "$(dirname "$(readlink -f "$0")")/lib/polybar.sh" || exit 1
 
 # nmcli -t escapes ':' and '\' in values
 unescape() { local s=${1//\\:/:}; printf '%s' "${s//\\\\/\\}"; }

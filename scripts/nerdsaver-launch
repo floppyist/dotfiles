@@ -15,11 +15,24 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
-# Private runtime dir. Never fall back to /tmp: the log file there would be a predictable
-# path that another local user could pre-create as a symlink.
-RUN = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(
-    os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"), "nerdsaver")
-os.makedirs(RUN, mode=0o700, exist_ok=True)
+
+
+def private_run_dir():
+    """$XDG_RUNTIME_DIR if it is ours and private, else ~/.cache/nerdsaver. Never /tmp: the log
+    file there would be a predictable path that another local user could pre-create as a symlink."""
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    try:
+        st = os.stat(rt) if rt else None
+    except OSError:
+        st = None
+    if st is not None and os.path.isdir(rt) and st.st_uid == os.getuid() and not st.st_mode & 0o077:
+        return rt
+    d = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(HOME, ".cache"), "nerdsaver")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    return d
+
+
+RUN = private_run_dir()
 LOCKFILE = os.path.join(RUN, "nerdsaver.lock")
 LOGFILE = os.path.join(RUN, "nerdsaver.log")
 CONF = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), "nerdsaver", "config")
@@ -140,11 +153,7 @@ class X:
                 return s.info.contents.idle / 1000.0
             except Exception:
                 pass
-        try:
-            out = subprocess.run(["xprintidle"], capture_output=True, text=True, timeout=2).stdout.strip()
-            return int(out) / 1000.0
-        except Exception:
-            return None
+        return None
 
     def reset_saver(s):
         if s.ok:
