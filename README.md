@@ -88,6 +88,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | <kbd>Alt</kbd> <kbd>f</kbd> | Fullscreen |
 | <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>Space</kbd> | Toggle floating |
 | <kbd>Alt</kbd> <kbd>Space</kbd> | Focus between tiled and floating windows |
+| <kbd>Alt</kbd> + left drag / right drag | Move / resize a floating window (tiled: move it in the layout / resize the split) |
 | <kbd>Alt</kbd> <kbd>r</kbd> | Resize mode (<kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd>, leave with <kbd>Return</kbd> or <kbd>Esc</kbd>) |
 | <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>q</kbd> | Close the window |
 | <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>r</kbd> | Restart i3 |
@@ -130,7 +131,7 @@ and the duration of commands that took 2 s or longer. The second line is the inp
 
 Click the WiFi, VPN or Bluetooth capsule for its menu; right-click VPN or Bluetooth to toggle it (VPN: the last
 used profile). Click the IP address to copy it, the music to play/pause (right-click: next), the clock for the
-full date; right-click the volume for `pulsemixer`.
+full date; right-click the volume for `pulsemixer`. The mouse wheel on the volume or the brightness changes it.
 
 **When the bar gets too full** (a long song title, many workspaces, tray icons), Polybar would cut off the
 right end, the clock first. `polybar-fit` measures both halves of the bar and hides capsules until everything
@@ -228,7 +229,9 @@ How it works: X11 has one DPI for the whole screen. The desktop is drawn at the 
 scales down to its panel (`xrandr --scale`, the way GNOME does it on X11). So a window is the same physical
 size on every monitor. The monitors that are scaled down look a little softer and cost some GPU time; with
 monitors of the same density nothing is scaled. A fixed number (`scale = 1.5`) uses that on every monitor
-and never scales down. `firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
+and never scales down. The graphics card scales the picture but not its hardware mouse pointer, so the
+installer's Graphics module switches to a software pointer
+(`/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf`): the same size on every monitor. `firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
 
 When the scale changes (a monitor plugged in, another resolution), i3 restarts in place (the windows stay), the
 bar, Rofi, dunst and open terminals follow at once; Firefox, GTK and Qt programs on their next start. GTK draws
@@ -263,7 +266,7 @@ The installer installs all of it (see [Installation](#installation)), in modules
 | --- | --- | --- |
 | **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind`, links the files, generates the theme |
 | **System update** | | updates xbps and the whole system first |
-| **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi`, for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself |
+| **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi`, for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself; with `scale = auto` a software mouse pointer (`/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf`) |
 | **Audio** | `pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer` | routes ALSA programs through PipeWire |
 | **Network** | `NetworkManager libnm NetworkManager-openvpn NetworkManager-vpnc network-manager-applet` | replaces dhcpcd and wpa_supplicant, takes their WiFi networks along |
 | **Bluetooth** | `bluez libspa-bluetooth` | enables `bluetoothd` |
@@ -403,6 +406,7 @@ run `./install.sh links` again.
 - **WiFi: a network keeps failing with a saved profile:** the menu asks for the password again when NetworkManager rejects the saved one. For other errors, `nmcli connection delete id "<name>"` and connect again.
 - **The music capsule ignores mpv:** mpv needs the MPRIS plugin: `mkdir -p ~/.config/mpv/scripts && ln -s /usr/lib/mpv-mpris/mpris.so ~/.config/mpv/scripts/` (the installer's Music module does that), then restart mpv. `playerctl -l` lists the players it sees.
 - **Everything too small or too large:** `displays scale` shows each monitor's scale; change one in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale, or set a number for all (`scale = 1.5`) and run `dotfiles apply`. Firefox only: `firefox_scale`.
+- **The mouse pointer is too large on one monitor:** that monitor is scaled down and the hardware pointer is not. Run the installer's Graphics module (or `sudo install -Dm644 config/xorg/20-dotfiles-swcursor.conf /etc/X11/xorg.conf.d/`) and log in again.
 - **A monitor looks soft:** it is scaled down because another monitor is denser (see [Monitors and scale](#monitors-and-scale)). Give both the same scale, or set `scale` to a number.
 - **Polybar hides CPU, volume or music:** the bar is full (see [Polybar](#polybar)); `polybar-fit --explain` prints the measured widths.
 - **Bluetooth "Failed to power on":** the Intel AX200 (`btusb`) can get stuck after rfkill cycles. Reload the driver with `sudo modprobe -r btusb && sudo modprobe btusb`, or reboot.

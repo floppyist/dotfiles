@@ -4,22 +4,22 @@
 #                          returns 1 if there is nothing to do; MODULE limits it to one module
 #   run_<step>            does it; runs in the background, output in the log (lib.sh protocol)
 
-STEP_ORDER=(update packages font services backlight alsa shell links firefox mail mpris theme nvim autostart network)
+STEP_ORDER=(update packages font services swcursor backlight alsa shell links firefox mail mpris theme nvim autostart network)
 
 declare -A STEP_TITLE=(
     [update]="System update"  [packages]="Packages"        [font]="Font"
-    [services]="Services"     [backlight]="Backlight"      [alsa]="ALSA to PipeWire"
-    [shell]="Login shell"     [links]="Links"              [firefox]="Firefox"
-    [mail]="neomutt"          [mpris]="mpv MPRIS"          [theme]="Theme"
-    [nvim]="Neovim plugins"
-    [autostart]="Start X on login"                         [network]="NetworkManager"
+    [services]="Services"     [swcursor]="Mouse pointer"   [backlight]="Backlight"
+    [alsa]="ALSA to PipeWire" [shell]="Login shell"        [links]="Links"
+    [firefox]="Firefox"       [mail]="neomutt"             [mpris]="mpv MPRIS"
+    [theme]="Theme"           [nvim]="Neovim plugins"      [autostart]="Start X on login"
+    [network]="NetworkManager"
 )
 # share of the whole installation, for the progress bar
 declare -A STEP_WEIGHT=(
-    [update]=12 [packages]=40 [font]=4 [services]=1 [backlight]=1 [alsa]=1 [shell]=1
-    [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [autostart]=1 [network]=3
+    [update]=12 [packages]=40 [font]=4 [services]=1 [swcursor]=1 [backlight]=1 [alsa]=1
+    [shell]=1 [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [autostart]=1 [network]=3
 )
-declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 )
+declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 )
 
 plan_step() {
     PLAN=()
@@ -159,6 +159,32 @@ run_services() {
     (( changed )) && need_reboot
     (( ${#SVC[@]} )) || say "every service is enabled"
     return 0
+}
+
+# ── Software mouse pointer (graphics) ────────────────────────────────────────────
+
+SWCURSOR_CONF=$SYSROOT/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf
+
+# Per-monitor scaling is on unless dotfiles.conf has a fixed number for `scale`
+per_monitor_scale() {
+    local v
+    v=$(sed -n 's/^[[:space:]]*scale[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' "$DOTFILES/dotfiles.conf" | head -n1)
+    [[ -z $v || $v == auto ]]
+}
+
+plan_swcursor() {
+    PLAN=()
+    per_monitor_scale || return 1
+    cmp -s "$DOTFILES/config/xorg/20-dotfiles-swcursor.conf" "$SWCURSOR_CONF" && return 1
+    PLAN=("${SWCURSOR_CONF#"$SYSROOT"}: software mouse pointer, the same size on monitors that per-monitor scaling scales down (after logging in again)")
+}
+
+run_swcursor() {
+    local src=$DOTFILES/config/xorg/20-dotfiles-swcursor.conf
+    per_monitor_scale || { say "scale is a fixed number: no software pointer needed"; return 0; }
+    cmp -s "$src" "$SWCURSOR_CONF" && { say "$SWCURSOR_CONF is up to date"; return 0; }
+    as_root install -D -m644 "$src" "$SWCURSOR_CONF" || return 1
+    say "installed $SWCURSOR_CONF (takes effect after logging in again)"
 }
 
 # ── Backlight (laptop) ────────────────────────────────────────────────────────────

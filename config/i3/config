@@ -55,6 +55,10 @@ set $ws4 "4"
 set $ws5 "5"
 
 # ── Keybinds: windows (Alt) ────────────────────────────────────────────────────
+# Alt + left drag moves a floating window, Alt + right drag resizes it (tiled windows: left drag
+# moves them to another spot in the layout, right drag resizes the split)
+floating_modifier $mod
+tiling_drag modifier titlebar
 bindsym $mod+Return exec $term
 bindsym $mod+d exec $menu
 bindsym $mod+Shift+q kill

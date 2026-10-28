@@ -27,7 +27,9 @@ M_STEPS[system]="update"
 M_TITLE[graphics]="Graphics drivers"
 M_DESC[graphics]="Mesa for the GPUs of this machine: OpenGL (Alacritty and picom need it), Vulkan and \
 video decoding. mesa-dri covers Intel, AMD, nouveau and virtual machines; only the Vulkan and VA-API \
-drivers depend on the vendor."
+drivers depend on the vendor. With per-monitor scaling (scale = auto) a software mouse pointer, so it \
+has the same size on every monitor."
+M_STEPS[graphics]="swcursor"
 
 M_TITLE[audio]="Audio"
 M_DESC[audio]="PipeWire with WirePlumber and its PulseAudio server (i3 starts all three), ALSA \
