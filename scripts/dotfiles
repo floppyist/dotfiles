@@ -15,8 +15,8 @@ dotfiles.conf lives in the repository root. `apply` renders templates/* into
 neovim, neomutt, GTK, fzf and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
 The mouse cursor theme is drawn into ~/.icons/dotfiles (scripts/dotfiles-cursors).
 
-scale = auto picks the factor from the pixel density of the primary monitor (xrandr);
-without X the last applied factor is kept.
+scale = auto takes the factor from the monitors (`displays scale`: the densest monitor's, the
+others are scaled down to their own size); without X the last applied factor is kept.
 """
 import colorsys
 import glob
@@ -211,14 +211,6 @@ def nearest_ansi(h):
     return min(range(len(ANSI)), key=lambda i: dist(h, GRUVBOX[ANSI[i]][0])) + 1
 
 
-# scale = auto: the pixel density (dpi) that is drawn at factor 1. Laptop panels are looked at
-# from closer, so they get more pixels per inch before things grow.
-AUTO_DPI_INTERNAL = 150     # 14" 1080p (158 dpi) -> 1, 13" 2560x1600 -> 1.5, 15.6" 4K -> 2
-AUTO_DPI_EXTERNAL = 110     # 27" 1440p -> 1, 27" 4K -> 1.5, 32" 4K -> 1.25, 27" 5K -> 2
-INTERNAL_RE = re.compile(r"(eDP|LVDS|DSI)")
-XRANDR_RE = re.compile(r"^(\S+) connected (primary )?(\d+)x(\d+)\+\d+\+\d+ .*?(\d+)mm x (\d+)mm\s*$")
-
-
 def scaled(n, s):
     """Logical px -> screen px (never 0 for a non-zero value)."""
     n = int(n)
@@ -226,29 +218,20 @@ def scaled(n, s):
 
 
 def monitor_scale():
-    """(factor, reason) for the primary monitor (else the first active one); None without X."""
+    """(factor, reason) for scale = auto from `displays scale`: the scale of the densest monitor
+    (it scales the others down to their own size); None without X."""
     if not os.environ.get("DISPLAY") or os.environ.get("DOTFILES_NO_X"):
         return None
     try:
-        # --current: no re-probe of the outputs (that can take seconds and make screens flicker)
-        out = subprocess.run(["xrandr", "--current"], stdin=subprocess.DEVNULL, capture_output=True,
-                             text=True, timeout=5).stdout
+        r = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "displays"), "scale"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
         return None
-    mons = [m.groups() for m in map(XRANDR_RE.match, out.splitlines()) if m]
-    if not mons:
+    m = re.fullmatch(r"([0-9]\.[0-9]{2})\t(.*)", r.stdout.strip()) if r.returncode == 0 else None
+    if not m or not 0.5 <= float(m.group(1)) <= 4:
         return None
-    name, _, w, h, mw, mh = next((m for m in mons if m[1]), mons[0])
-    name = re.sub(r"[^A-Za-z0-9_.-]", "?", name)[:32]    # ends up in comments of the configs
-    w, h, mw, mh = (int(x) for x in (w, h, mw, mh))
-    # rotation swaps the pixels but not the millimetres; projectors and some TVs report
-    # nonsense sizes (0, or a few cm): those get factor 1
-    if max(mw, mh) < 150:
-        return 1.0, "%s reports no usable size" % name
-    dpi = max(w, h) / max(mw, mh) * 25.4
-    ref = AUTO_DPI_INTERNAL if INTERNAL_RE.match(name) else AUTO_DPI_EXTERNAL
-    f = min(3.0, max(1.0, round(dpi / ref * 4) / 4))
-    return f, "%s, %dx%d at %d dpi" % (name, w, h, round(dpi))
+    # the reason ends up in comments of the generated configs and in theme.sh
+    return float(m.group(1)), re.sub(r"[^A-Za-z0-9 _.,()-]", "?", m.group(2))[:160]
 
 
 def effective_scale(c):

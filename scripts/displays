@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""displays - arrange the monitors (rofi), remember the layout, follow hotplugs
+"""displays - monitors: arrangement, per-monitor scale, saved layouts, hotplug
 
-usage: displays            menu: resolution, refresh rate, position, rotation, primary, on/off
-       displays restore    put the saved layout for the connected monitors back (else: extend)
-       displays save       remember the current layout for the connected monitors
-       displays watch      follow monitor hotplugs (udev): restore, then `dotfiles apply --layout`
+usage: displays                 menu: resolution, refresh rate, scale, position, rotation, primary, on/off
+       displays restore         put the saved layout for the connected monitors back (else: extend)
+       displays save            remember the current layout for the connected monitors
+       displays watch           follow monitor hotplugs (udev): restore, then `dotfiles apply --layout`
+       displays scale           print the desktop scale and why (used by `dotfiles` for scale = auto)
+       displays preset MODE [OUTPUT]
+                                internal | mirror OUTPUT | extend OUTPUT | external OUTPUT (Super+p)
 
-Layouts are remembered per set of connected monitors (output name + EDID), in
-$XDG_STATE_HOME/dotfiles/displays.json. Every change in the menu that could leave a screen
-dark (resolution, rate, rotation, on/off) is reverted after 15 s unless confirmed.
-After a change `dotfiles apply --layout` re-places the bar and the wallpaper and, with
-scale = auto, sets the scale for the primary monitor.
+Per-monitor scale (dotfiles.conf: scale = auto). X11 has one DPI for the whole screen, so the desktop
+is drawn for the densest monitor (Xft.dpi, pixel-sharp there), and every other monitor gets a
+larger area of the screen that the GPU scales down to its panel (xrandr --scale, like GNOME on
+X11). Each monitor shows things at its own physical size; the scaled-down ones are a little
+softer. Each monitor's scale comes from its resolution and physical size (EDID), or from the
+menu. With a fixed `scale = 1.5` in dotfiles.conf every monitor uses that, without scaling.
+
+Layouts are remembered per set of connected monitors (output name + EDID) in
+$XDG_STATE_HOME/dotfiles/displays.json. Every change in the menu that could leave a screen dark
+is reverted after 15 s unless confirmed.
 """
 import fcntl
 import hashlib
@@ -26,24 +34,30 @@ import time
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROFI_MENU = os.path.join(HERE, "rofi-menu")
 DOTFILES = os.path.join(HERE, "dotfiles")
+CONF = os.environ.get("DOTFILES_CONF") or os.path.join(os.path.dirname(HERE), "dotfiles.conf")
 STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
                      "dotfiles", "displays.json")
 CONFIRM_SECONDS = 15
 ROTATIONS = ["normal", "left", "right", "inverted"]
+SCALES = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0]
 INTERNAL_RE = re.compile(r"(eDP|LVDS|DSI)")
+
+# Automatic scale of a monitor: the pixel density drawn at factor 1. Laptop panels are looked at
+# from closer, so they get more pixels per inch before things grow.
+AUTO_DPI_INTERNAL = 150     # 14" 1080p (158 dpi) -> 1, 13" 2560x1600 -> 1.5, 15.6" 4K -> 2
+AUTO_DPI_EXTERNAL = 110     # 27" 1440p -> 1, 27" 4K -> 1.5, 32" 4K -> 1.25, 27" 5K -> 2
 
 # Nerd Font md-* glyphs (verified against JetBrainsMono Nerd Font)
 I_LAPTOP, I_MONITOR, I_OFF = "\U000F0322", "\U000F0379", "\U000F0D90"
 I_RES, I_RATE, I_POS = "\U000F0A24", "\U000F04C5", "\U000F004C"
 I_ROTATE, I_PRIMARY, I_BACK = "\U000F0475", "\U000F04CE", "\U000F004D"
 I_KEEP, I_REVERT, I_DETECT = "\U000F012C", "\U000F054C", "\U000F0450"
-I_MIRROR = "\U000F0191"
+I_MIRROR, I_SCALE = "\U000F0191", "\U000F18F4"
 
 # "eDP connected primary 1920x1080+0+0 (0x57) normal (normal left inverted right x axis y axis) 309mm x 174mm"
 HEAD_RE = re.compile(r"^(\S+) (connected|disconnected)( primary)?(?: (\d+)x(\d+)\+(-?\d+)\+(-?\d+))?"
                      r"(?: \(0x[0-9a-f]+\))?(?: (normal|left|right|inverted))?")
-MODE_RE = re.compile(r"^\s+(\d+)x(\d+)(i?)\s+(.*)$")
-RATE_RE = re.compile(r"(\d+\.\d+)([ *])([ +]?)")
+MM_RE = re.compile(r"(\d+)mm x (\d+)mm\s*$")
 NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
 
@@ -67,7 +81,7 @@ def outputs(probe=False):
     text = xrandr("--verbose") if probe else xrandr("--current", "--verbose")
     if text is None:
         raise RuntimeError("xrandr failed (no X display?)")
-    outs, cur, mode, edid = {}, None, None, None
+    outs, cur, mode, edid, transform = {}, None, None, None, None
     for line in text.splitlines():
         m = HEAD_RE.match(line)
         if m:
@@ -75,13 +89,15 @@ def outputs(probe=False):
             if not NAME_RE.match(name):
                 cur = None
                 continue
+            mm = MM_RE.search(line)
             cur = {"name": name, "connected": m.group(2) == "connected", "primary": bool(m.group(3)),
                    "active": m.group(4) is not None, "rotate": m.group(8) or "normal",
-                   "modes": [], "edid": "", "mode": None, "rate": None}
+                   "mm": (int(mm.group(1)), int(mm.group(2))) if mm else (0, 0),
+                   "modes": [], "edid": "", "mode": None, "rate": None, "fb": (1.0, 1.0)}
             if cur["active"]:
                 cur["geom"] = [int(m.group(i)) for i in (4, 5, 6, 7)]
             outs[name] = cur
-            mode, edid = None, None
+            mode, edid, transform = None, None, None
             continue
         if cur is None:
             continue
@@ -94,6 +110,17 @@ def outputs(probe=False):
             edid = None
         if s == "EDID:":
             edid = []
+            continue
+        # "Transform:  1.500000 0.000000 0.000000" then "0.000000 1.500000 0.000000": the scale
+        if s.startswith("Transform:"):
+            transform = [s.split()[1:]]
+            continue
+        if transform is not None and len(transform) == 1:
+            transform.append(s.split())
+            try:
+                cur["fb"] = (float(transform[0][0]), float(transform[1][1]))
+            except (IndexError, ValueError):
+                pass
             continue
         # verbose mode lines: "  1920x1080 (0x57) 148.500MHz +HSync -VSync *current +preferred"
         mm = re.match(r"^\s+(\d+)x(\d+)(i?) \(0x[0-9a-f]+\) .*?$", line)
@@ -137,11 +164,192 @@ def preferred(o):
     return next((n for n, p in names if p), names[0][0] if names else None)
 
 
-# ── the layout model ───────────────────────────────────────────────────────────
-# {name: {"mode": "WxH", "rate": "60.00", "x": 0, "y": 0, "rotate": "normal", "primary": bool}
-#  or {"off": True}} for every connected output
+def fixed_scale():
+    """dotfiles.conf `scale` when it is a number (every monitor uses it), None for auto."""
+    try:
+        for line in open(CONF, encoding="utf-8"):
+            m = re.match(r"^\s*scale\s*=\s*(\S*)\s*$", line)
+            if m:
+                v = m.group(1)
+                if re.fullmatch(r"[0-9]*\.?[0-9]+", v) and 0.5 <= float(v) <= 4:
+                    return float(v)
+                return None
+    except OSError:
+        pass
+    return None
 
-def current_layout(outs):
+
+# ── the layout model ───────────────────────────────────────────────────────────
+# Every connected output: {"off": True}, or
+#   {"mode": "WxH", "rate": "60.00"|None, "rotate": "normal", "primary": bool, "x": 0, "y": 0,
+#    "scale": None|1.25 (None = automatic), "same_as": None|name (mirror), "fb": 1.0}
+# x/y are screen coordinates; "fb" is the factor by which the monitor's area of the screen is
+# larger than its panel (derived by fit(), applied with xrandr --scale).
+
+def mode_size(e):
+    w, h = (int(v) for v in re.match(r"(\d+)x(\d+)", e["mode"]).groups())
+    return (h, w) if e["rotate"] in ("left", "right") else (w, h)
+
+
+def size(e):
+    """The monitor's area on the screen."""
+    w, h = mode_size(e)
+    return round(w * e.get("fb", 1.0)), round(h * e.get("fb", 1.0))
+
+
+def auto_scale(o, e):
+    """Scale for this monitor from the mode's pixels and the panel's millimetres."""
+    mw, mh = o["mm"]
+    if max(mw, mh) < 150:           # projectors and some TVs report nonsense (0, or a few cm)
+        return 1.0, 0
+    w, h = (int(v) for v in re.match(r"(\d+)x(\d+)", e["mode"]).groups())
+    dpi = max(w, h) / max(mw, mh) * 25.4
+    ref = AUTO_DPI_INTERNAL if INTERNAL_RE.match(o["name"]) else AUTO_DPI_EXTERNAL
+    return min(3.0, max(1.0, round(dpi / ref * 4) / 4)), round(dpi)
+
+
+def monitor_scale(o, e):
+    if isinstance(e.get("scale"), (int, float)) and 0.5 <= e["scale"] <= 4:
+        return float(e["scale"])
+    return auto_scale(o, e)[0]
+
+
+def active(lay):
+    return [n for n, e in lay.items() if not e.get("off")]
+
+
+def fit(lay, outs):
+    """Desktop scale = the densest monitor's; every other monitor gets fb = desktop / own.
+    Returns the desktop scale."""
+    on = active(lay)
+    fixed = fixed_scale()
+    if not on:
+        return fixed or 1.0
+    want = {n: monitor_scale(outs[n], lay[n]) for n in on}
+    desk = fixed or max(want.values())
+    for n in on:
+        lay[n]["fb"] = 1.0 if fixed else round(desk / want[n], 4)
+    # a mirror shows exactly the area of the monitor it copies
+    for n in on:
+        t = lay[n].get("same_as")
+        if t in on and not lay[t].get("same_as"):
+            tw = size(lay[t])[0]
+            lay[n]["fb"] = round(tw / mode_size(lay[n])[0], 4)
+        else:
+            lay[n]["same_as"] = None
+    return desk
+
+
+def geometry(lay):
+    return {n: (e["x"], e["y"]) + size(e) for n, e in lay.items() if not e.get("off") and "x" in e}
+
+
+def relation(b, a):
+    """Where rectangle b sits next to rectangle a: (side, offset along the edge) or None."""
+    bx, by, bw, bh = b
+    ax, ay, aw, ah = a
+    if (bx, by) == (ax, ay):
+        return "same", 0
+    vert = by < ay + ah and by + bh > ay
+    horz = bx < ax + aw and bx + bw > ax
+    if bx == ax + aw and (vert or by == ay):
+        return "right", by - ay
+    if bx + bw == ax and (vert or by == ay):
+        return "left", by - ay
+    if by == ay + ah and (horz or bx == ax):
+        return "below", bx - ax
+    if by + bh == ay and (horz or bx == ax):
+        return "above", bx - ax
+    return None
+
+
+def place(lay, old):
+    """Re-place the monitors after their sizes changed, keeping who is next to whom (old =
+    geometry() before the change). Monitors without a neighbour go to the right end."""
+    on = [n for n in active(lay)]
+    if not on:
+        return lay
+    start = next((n for n in on if lay[n].get("primary") and n in old), None) or \
+        next((n for n in on if n in old), on[0])
+    placed = {start: (old[start][0], old[start][1]) if start in old else (0, 0)}
+    lay[start]["x"], lay[start]["y"] = placed[start]
+    todo = [n for n in on if n != start]
+    progress = True
+    while todo and progress:
+        progress = False
+        for b in list(todo):
+            if lay[b].get("same_as") in placed:
+                t = lay[lay[b]["same_as"]]
+                lay[b]["x"], lay[b]["y"] = t["x"], t["y"]
+            elif b in old:
+                for a in placed:
+                    if a not in old:
+                        continue
+                    rel = relation(old[b], old[a])
+                    if not rel:
+                        continue
+                    side, off = rel
+                    ax, ay = lay[a]["x"], lay[a]["y"]
+                    aw, ah = size(lay[a])
+                    bw, bh = size(lay[b])
+                    # the offset along the edge shrinks/grows with the neighbour
+                    k_h = ah / max(1, old[a][3])
+                    k_w = aw / max(1, old[a][2])
+                    lay[b]["x"], lay[b]["y"] = {
+                        "same": (ax, ay), "right": (ax + aw, ay + round(off * k_h)),
+                        "left": (ax - bw, ay + round(off * k_h)), "below": (ax + round(off * k_w), ay + ah),
+                        "above": (ax + round(off * k_w), ay - bh)}[side]
+                    break
+                else:
+                    continue
+            else:
+                continue
+            placed[b] = (lay[b]["x"], lay[b]["y"])
+            todo.remove(b)
+            progress = True
+    for b in todo:      # no neighbour: right of everything
+        x = max((lay[n]["x"] + size(lay[n])[0] for n in placed), default=0)
+        y = min((lay[n]["y"] for n in placed), default=0)
+        lay[b]["x"], lay[b]["y"] = x, y
+        placed[b] = (x, y)
+    return lay
+
+
+def normalize(lay):
+    on = active(lay)
+    if not on:
+        return lay
+    dx = min(lay[n]["x"] for n in on)
+    dy = min(lay[n]["y"] for n in on)
+    for n in on:
+        lay[n]["x"] -= dx
+        lay[n]["y"] -= dy
+    if sum(1 for n in on if lay[n].get("primary")) != 1:
+        keep = next((n for n in on if lay[n].get("primary")), None)
+        keep = keep or next((n for n in on if INTERNAL_RE.match(n)), on[0])
+        for n in on:
+            lay[n]["primary"] = n == keep
+    for e in lay.values():
+        if e.get("off"):
+            e.clear()
+            e["off"] = True
+    return lay
+
+
+def finalize(lay, outs, old):
+    """After a change: scales, positions, primary. Returns the desktop scale."""
+    for n in active(lay):
+        lay[n].setdefault("x", 0)
+        lay[n].setdefault("y", 0)
+    desk = fit(lay, outs)
+    place(lay, old)
+    normalize(lay)
+    return desk
+
+
+def current_layout(outs, saved=None):
+    """The running layout. Chosen scales (and mirrors) come from the saved layout of this setup."""
+    saved = saved if saved is not None else load_saved().get(setup_key(outs), {})
     lay = {}
     for n, o in outs.items():
         if not o["connected"]:
@@ -150,54 +358,20 @@ def current_layout(outs):
             lay[n] = {"off": True}
             continue
         g = o["geom"]
+        s = saved.get(n) if isinstance(saved, dict) else None
+        s = s if isinstance(s, dict) else {}
         lay[n] = {"mode": o["mode"], "rate": o["rate"], "x": g[2], "y": g[3], "rotate": o["rotate"],
-                  "primary": o["primary"]}
+                  "primary": o["primary"], "fb": round(o["fb"][0], 4),
+                  "scale": s.get("scale") if isinstance(s.get("scale"), (int, float)) else None,
+                  "same_as": s.get("same_as") if isinstance(s.get("same_as"), str) else None}
+    # two monitors at the same spot (e.g. xrandr --same-as): the second one mirrors the first
+    on = sorted(active(lay), key=lambda n: (not lay[n]["primary"], not INTERNAL_RE.match(n), n))
+    for i, n in enumerate(on):
+        for m in on[:i]:
+            if (lay[n]["x"], lay[n]["y"]) == (lay[m]["x"], lay[m]["y"]) and not lay[m].get("same_as"):
+                lay[n]["same_as"] = lay[n]["same_as"] or m
+                break
     return lay
-
-
-def size(entry):
-    w, h = (int(v) for v in re.match(r"(\d+)x(\d+)", entry["mode"]).groups())
-    return (h, w) if entry["rotate"] in ("left", "right") else (w, h)
-
-
-def normalize(lay):
-    on = [e for e in lay.values() if not e.get("off")]
-    if not on:
-        return lay
-    dx, dy = min(e["x"] for e in on), min(e["y"] for e in on)
-    for e in on:
-        e["x"] -= dx
-        e["y"] -= dy
-    if not any(e.get("primary") for e in on):
-        name = next((n for n, e in lay.items() if not e.get("off") and INTERNAL_RE.match(n)), None)
-        name = name or next(n for n, e in lay.items() if not e.get("off"))
-        lay[name]["primary"] = True
-    return lay
-
-
-def resize(lay, name, new_entry):
-    """Replace an output's entry; outputs right of / below it move with its new size."""
-    old = lay[name]
-    if not old.get("off"):
-        ow, oh = size(old)
-        nw, nh = size(new_entry)
-        for n, e in lay.items():
-            if n == name or e.get("off"):
-                continue
-            if e["x"] >= old["x"] + ow:
-                e["x"] += nw - ow
-            if e["y"] >= old["y"] + oh:
-                e["y"] += nh - oh
-    lay[name] = new_entry
-    return normalize(lay)
-
-
-def rightmost(lay, skip):
-    on = [(n, e) for n, e in lay.items() if n != skip and not e.get("off")]
-    if not on:
-        return 0, 0
-    n, e = max(on, key=lambda ne: ne[1]["x"] + size(ne[1])[0])
-    return e["x"] + size(e)[0], e["y"]
 
 
 def xrandr_args(lay, outs):
@@ -212,6 +386,17 @@ def xrandr_args(lay, outs):
         if e.get("rate"):
             args += ["--rate", e["rate"]]
         args += ["--pos", "%dx%d" % (e["x"], e["y"]), "--rotate", e["rotate"]]
+        fb = e.get("fb", 1.0)
+        t = e.get("same_as")
+        if t and t in lay and not lay[t].get("off"):
+            w, h = size(lay[t])
+            if e["rotate"] in ("left", "right"):
+                w, h = h, w
+            args += ["--scale-from", "%dx%d" % (w, h), "--filter", "bilinear"]
+        elif abs(fb - 1) > 0.001:
+            args += ["--scale", "%.4fx%.4f" % (fb, fb), "--filter", "bilinear"]
+        else:
+            args += ["--scale", "1x1", "--filter", "nearest"]
         if e.get("primary"):
             args += ["--primary"]
     return args
@@ -235,10 +420,11 @@ def load_saved():
         return {}
 
 
-def save(outs=None):
+def save(lay=None, outs=None):
     outs = outs or outputs()
+    lay = lay if lay is not None else current_layout(outs)
     data = load_saved()
-    data[setup_key(outs)] = current_layout(outs)
+    data[setup_key(outs)] = lay
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     tmp = STATE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -252,25 +438,35 @@ def valid_entry(e, o):
     if e.get("off") is True:
         return True
     names = [n for n, _ in mode_names(o)]
+    num = (int, float)
     return (e.get("mode") in names and isinstance(e.get("x"), int) and isinstance(e.get("y"), int)
-            and e.get("rotate") in ROTATIONS and (e.get("rate") is None or e.get("rate") in rates(o, e["mode"])))
+            and e.get("rotate") in ROTATIONS and (e.get("rate") is None or e.get("rate") in rates(o, e["mode"]))
+            and (e.get("scale") is None or (isinstance(e["scale"], num) and 0.5 <= e["scale"] <= 4))
+            and isinstance(e.get("fb", 1.0), num) and 0.2 <= e.get("fb", 1.0) <= 8
+            and (e.get("same_as") is None or isinstance(e["same_as"], str)))
 
 
-def extend(outs):
+def extend(outs, cur):
     """Layout for a setup without a saved one: every connected monitor on (running ones keep
     their mode and rotation), side by side, the laptop panel first; the primary stays."""
-    lay, x = {}, 0
-    old = current_layout(outs)
-    for n in sorted(old, key=lambda n: (not INTERNAL_RE.match(n), n)):
-        e = old[n]
+    lay = {}
+    for n in sorted(cur, key=lambda n: (not INTERNAL_RE.match(n), n)):
+        e = dict(cur[n])
         if e.get("off"):
             mode = preferred(outs[n])
             if not mode:
                 lay[n] = {"off": True}
                 continue
-            e = {"mode": mode, "rate": None, "rotate": "normal", "primary": False}
-        lay[n] = dict(e, x=x, y=0)
-        x += size(lay[n])[0]
+            e = {"mode": mode, "rate": None, "rotate": "normal", "primary": False, "scale": None,
+                 "same_as": None}
+        e["same_as"] = None
+        lay[n] = e
+    fit(lay, outs)
+    x = 0
+    for n in lay:
+        if not lay[n].get("off"):
+            lay[n]["x"], lay[n]["y"] = x, 0
+            x += size(lay[n])[0]
     return normalize(lay)
 
 
@@ -279,18 +475,73 @@ def restore(probe=False):
     Returns what was done, None when nothing had to change."""
     outs = outputs(probe)
     saved = load_saved().get(setup_key(outs))
-    cur = current_layout(outs)
-    if isinstance(saved, dict) and set(saved) == set(cur) and all(valid_entry(saved[n], outs[n]) for n in saved):
-        lay, what = normalize({n: dict(e) for n, e in saved.items()}), "saved layout"
-    elif not cur:
+    cur = current_layout(outs, saved if isinstance(saved, dict) else {})
+    if not cur:
         return None
+    if isinstance(saved, dict) and set(saved) == set(cur) and all(valid_entry(saved[n], outs[n]) for n in saved):
+        lay = {n: dict(e) for n, e in saved.items()}
+        finalize(lay, outs, geometry(lay))   # dotfiles.conf `scale` may have changed since
+        what = "saved layout"
     else:
-        lay, what = extend(outs), "extended"
+        lay, what = extend(outs, cur), "extended"
     stale = any(o["active"] and not o["connected"] for o in outs.values())
-    if lay == cur and not stale:
+    if same(lay, cur) and not stale:
         return None
     apply_layout(lay, outs)
     return what
+
+
+def same(a, b):
+    keys = ("off", "mode", "x", "y", "rotate", "primary")
+    for n in set(a) | set(b):
+        ea, eb = a.get(n, {}), b.get(n, {})
+        if any(ea.get(k) != eb.get(k) for k in keys) or abs(ea.get("fb", 1) - eb.get("fb", 1)) > 0.001:
+            return False
+        if ea.get("rate") and eb.get("rate") and ea["rate"] != eb["rate"]:
+            return False
+    return True
+
+
+def preset(mode, out=None):
+    """The Super+p choices on the model, so the scales and positions stay right."""
+    outs = outputs()
+    cur = current_layout(outs)
+    internal = next((n for n in cur if INTERNAL_RE.match(n)), None) or next(iter(cur), None)
+    if internal is None:
+        raise RuntimeError("no monitor connected")
+    if mode != "internal" and (out not in cur or out == internal):
+        raise RuntimeError("unknown output %s" % out)
+    old = geometry(cur)
+    lay = {n: dict(e) for n, e in cur.items()}
+
+    def on(n, primary):
+        e = lay[n]
+        if e.get("off"):
+            e = lay[n] = {"mode": preferred(outs[n]), "rate": None, "rotate": "normal", "scale": None}
+        e.update(primary=primary, same_as=None)
+        return e
+    for n in lay:
+        if n not in (internal, out):
+            lay[n] = {"off": True}
+    if mode == "internal":
+        on(internal, True)
+        if out in lay:
+            lay[out] = {"off": True}
+    elif mode == "external":
+        on(out, True)
+        lay[internal] = {"off": True}
+    elif mode == "extend":
+        on(internal, True)
+        on(out, False)
+        old.pop(out, None)      # goes to the right of the panel
+    elif mode == "mirror":
+        on(internal, True)
+        on(out, False)["same_as"] = internal
+    else:
+        raise RuntimeError("unknown preset %s" % mode)
+    finalize(lay, outs, old)
+    apply_layout(lay, outs)
+    return lay
 
 
 # ── desktop ────────────────────────────────────────────────────────────────────
@@ -304,7 +555,7 @@ def notify(summary, body="", urgency="normal"):
 
 
 def refresh():
-    """Bar, wallpaper and (scale = auto) the scale for the new layout."""
+    """Bar, wallpaper and (scale = auto) the desktop scale for the new layout."""
     try:
         subprocess.run([DOTFILES, "apply", "--layout"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=180)
@@ -312,11 +563,28 @@ def refresh():
         pass
 
 
+def scale_report():
+    """(desktop scale, reason) for `dotfiles` (scale = auto)."""
+    outs = outputs()
+    lay = current_layout(outs)
+    on = active(lay)
+    if not on:
+        return 1.0, "no active monitor"
+    desk = fit(lay, outs)
+    parts = []
+    for n in sorted(on, key=lambda n: -monitor_scale(outs[n], lay[n])):
+        s = monitor_scale(outs[n], lay[n])
+        dpi = auto_scale(outs[n], lay[n])[1]
+        how = "chosen" if lay[n].get("scale") is not None else ("%d dpi" % dpi if dpi else "size unknown")
+        parts.append("%s %s (%s)" % (n, fmt(s), how))
+    return desk, ", ".join(parts)
+
+
 # ── menu ───────────────────────────────────────────────────────────────────────
 
 def menu(rows, prompt="display", mesg="", timeout=None):
     """Index of the chosen row, or None."""
-    cmd = ([ "timeout", str(timeout)] if timeout else []) + [ROFI_MENU, prompt, mesg]
+    cmd = (["timeout", str(timeout)] if timeout else []) + [ROFI_MENU, prompt, mesg]
     try:
         r = subprocess.run(cmd, input="\n".join(rows) + "\n", capture_output=True, text=True)
     except OSError:
@@ -329,39 +597,40 @@ def esc(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def describe(n, e, lay):
+def fmt(f):
+    return ("%.2f" % f).rstrip("0").rstrip(".")
+
+
+def where(n, lay):
+    e = lay[n]
+    if e.get("same_as"):
+        return "mirror of %s" % e["same_as"]
+    g = geometry(lay)
+    for m in g:
+        if m != n:
+            rel = relation(g[n], g[m])
+            if rel:
+                return {"same": "same as", "right": "right of", "left": "left of", "below": "below",
+                        "above": "above"}[rel[0]] + " " + m
+    return ""
+
+
+def describe(n, lay, outs):
+    e = lay[n]
     if e.get("off"):
         return "off"
     parts = [e["mode"].replace("x", "\u00d7")]
     if e.get("rate"):
-        parts.append("%s Hz" % e["rate"].rstrip("0").rstrip("."))
+        parts.append("%s Hz" % fmt(float(e["rate"])))
+    parts.append("scale %s" % fmt(monitor_scale(outs[n], e)))
     if e["rotate"] != "normal":
         parts.append("rotated %s" % e["rotate"])
-    rel = relation(n, e, lay)
+    rel = where(n, lay)
     if rel:
         parts.append(rel)
     if e.get("primary"):
         parts.append("primary")
     return "  \u00b7  ".join(parts)
-
-
-def relation(n, e, lay):
-    w, h = size(e)
-    for m, f in lay.items():
-        if m == n or f.get("off"):
-            continue
-        fw, fh = size(f)
-        if (e["x"], e["y"]) == (f["x"], f["y"]) and (w, h) == (fw, fh):
-            return "same as %s" % m
-        if e["x"] == f["x"] + fw:
-            return "right of %s" % m
-        if e["x"] + w == f["x"]:
-            return "left of %s" % m
-        if e["y"] == f["y"] + fh:
-            return "below %s" % m
-        if e["y"] + h == f["y"]:
-            return "above %s" % m
-    return ""
 
 
 def icon(n, e):
@@ -391,7 +660,7 @@ def change(outs, lay, new, confirm):
                 notify("Display", str(e), "critical")
             notify("Layout reverted", "")
             return lay
-    save()
+    save(new, outs)
     refresh()
     return new
 
@@ -401,18 +670,21 @@ def output_menu(name, outs, lay):
         e = lay[name]
         o = outs[name]
         on = not e.get("off")
-        others = [n for n, f in lay.items() if n != name and not f.get("off")]
+        others = [n for n in active(lay) if n != name]
         rows, acts = [], []
         if on:
+            auto = auto_scale(o, e)[0]
+            sc = "%s (chosen)" % fmt(e["scale"]) if e.get("scale") is not None else "auto (%s)" % fmt(auto)
             rows += ["%s  Resolution    %s" % (I_RES, e["mode"].replace("x", "\u00d7")),
-                     "%s  Refresh rate  %s" % (I_RATE, ("%s Hz" % e["rate"].rstrip("0").rstrip(".")) if e.get("rate") else "auto"),
+                     "%s  Refresh rate  %s" % (I_RATE, ("%s Hz" % fmt(float(e["rate"]))) if e.get("rate") else "auto"),
+                     "%s  Scale         %s" % (I_SCALE, sc),
                      "%s  Rotation      %s" % (I_ROTATE, e["rotate"])]
-            acts += ["mode", "rate", "rotate"]
+            acts += ["mode", "rate", "scale", "rotate"]
             if others:
-                rows.append("%s  Position      %s" % (I_POS, relation(name, e, lay) or "%d, %d" % (e["x"], e["y"])))
+                rows.append("%s  Position      %s" % (I_POS, where(name, lay) or "%d, %d" % (e["x"], e["y"])))
                 acts.append("pos")
             if not e.get("primary"):
-                rows.append("%s  Make primary  (bar, scale)" % I_PRIMARY)
+                rows.append("%s  Make primary  (bar)" % I_PRIMARY)
                 acts.append("primary")
             if others:
                 rows.append("%s  Turn off" % I_OFF)
@@ -422,75 +694,81 @@ def output_menu(name, outs, lay):
             acts.append("on")
         rows.append("%s  Back" % I_BACK)
         acts.append("back")
-        i = menu(rows, name, esc(describe(name, e, lay)))
+        i = menu(rows, name, esc(describe(name, lay, outs)))
         if i is None or acts[i] == "back":
             return lay
         act = acts[i]
+        old = geometry(lay)
         new = {n: dict(f) for n, f in lay.items()}
+        confirm = True
         if act == "mode":
             names = mode_names(o)
             j = menu(["%s%s" % (n.replace("x", "\u00d7"), "  (recommended)" if p else "") for n, p in names],
                      "resolution", esc(name))
             if j is None:
                 continue
-            new = resize(new, name, dict(e, mode=names[j][0], rate=None))
-            lay = change(outs, lay, new, True)
+            new[name].update(mode=names[j][0], rate=None)
         elif act == "rate":
             rs = rates(o, e["mode"])
             if not rs:
                 continue
-            j = menu(["%s Hz" % r for r in rs], "refresh rate", esc("%s  \u00b7  %s" % (name, e["mode"])))
+            j = menu(["%s Hz" % fmt(float(r)) for r in rs], "refresh rate",
+                     esc("%s  \u00b7  %s" % (name, e["mode"])))
             if j is None:
                 continue
-            new[name] = dict(e, rate=rs[j])
-            lay = change(outs, lay, new, True)
+            new[name]["rate"] = rs[j]
+        elif act == "scale":
+            auto = auto_scale(o, e)
+            rows2 = ["auto  (%s, %s)" % (fmt(auto[0]), "%d dpi" % auto[1] if auto[1] else "size unknown")]
+            rows2 += [fmt(s) for s in SCALES]
+            j = menu(rows2, "scale", esc("%s  \u00b7  how large things look on this monitor" % name))
+            if j is None:
+                continue
+            new[name]["scale"] = None if j == 0 else SCALES[j - 1]
+            confirm = False
         elif act == "rotate":
             j = menu(ROTATIONS, "rotation", esc(name))
             if j is None:
                 continue
-            new = resize(new, name, dict(e, rotate=ROTATIONS[j]))
-            lay = change(outs, lay, new, True)
+            new[name]["rotate"] = ROTATIONS[j]
         elif act == "pos":
             opts = []
             for m in others:
                 opts += [("right", m), ("left", m), ("above", m), ("below", m), ("same", m)]
             labels = {"right": "right of", "left": "left of", "above": "above", "below": "below",
-                      "same": "same as (mirror)"}
+                      "same": "mirror of"}
             j = menu(["%s  %s %s" % (I_MIRROR if k == "same" else I_POS, labels[k], m) for k, m in opts],
                      "position", esc(name))
             if j is None:
                 continue
             k, m = opts[j]
-            a = new[m]
-            aw, ah = size(a)
-            w, h = size(e)
-            x, y = {"right": (a["x"] + aw, a["y"]), "left": (a["x"] - w, a["y"]),
-                    "above": (a["x"], a["y"] - h), "below": (a["x"], a["y"] + ah),
-                    "same": (a["x"], a["y"])}[k]
-            new[name] = dict(e, x=x, y=y)
-            if k == "same" and a["mode"] in [n for n, _ in mode_names(o)]:
-                new[name]["mode"], new[name]["rate"] = a["mode"], None
-            lay = change(outs, lay, normalize(new), k == "same")
+            new[name]["same_as"] = m if k == "same" else None
+            if k != "same":
+                fit(new, outs)
+                ax, ay = new[m]["x"], new[m]["y"]
+                aw, ah = size(new[m])
+                w, h = size(new[name])
+                new[name]["x"], new[name]["y"] = {"right": (ax + aw, ay), "left": (ax - w, ay),
+                                                  "above": (ax, ay - h), "below": (ax, ay + ah)}[k]
+                old = geometry(new)
+            else:
+                old.pop(name, None)
+            confirm = k == "same"
         elif act == "primary":
-            for f in new.values():
-                f.pop("primary", None) if f.get("off") else f.update(primary=False)
-            new[name]["primary"] = True
-            lay = change(outs, lay, new, False)
+            for n in active(new):
+                new[n]["primary"] = n == name
+            confirm = False
         elif act == "off":
-            new = resize(new, name, {"off": True})
-            if e.get("primary"):
-                for f in new.values():
-                    if not f.get("off"):
-                        f["primary"] = False
-                new = normalize(new)
-            lay = change(outs, lay, normalize(new), True)
+            new[name] = {"off": True}
         elif act == "on":
             mode = preferred(o)
             if not mode:
                 continue
-            x, y = rightmost(new, name)
-            new[name] = {"mode": mode, "rate": None, "x": x, "y": y, "rotate": "normal", "primary": False}
-            lay = change(outs, lay, normalize(new), True)
+            new[name] = {"mode": mode, "rate": None, "rotate": "normal", "primary": False, "scale": None,
+                         "same_as": None}
+            old.pop(name, None)
+        finalize(new, outs, old)
+        lay = change(outs, lay, new, confirm)
         outs = outputs()
 
 
@@ -499,16 +777,13 @@ def main_menu():
         outs = outputs()
         lay = current_layout(outs)
         names = sorted(lay, key=lambda n: (not INTERNAL_RE.match(n), n))
-        rows = ["%s  %s   %s" % (icon(n, lay[n]), n, describe(n, lay[n], lay)) for n in names]
+        rows = ["%s  %s   %s" % (icon(n, lay[n]), n, describe(n, lay, outs)) for n in names]
         rows.append("%s  Detect monitors" % I_DETECT)
-        scale = ""
-        try:
-            scale = subprocess.run([DOTFILES, "get", "scale"], capture_output=True, text=True,
-                                   timeout=10).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            pass
-        mesg = "scale %s  \u00b7  the primary monitor decides" % esc(scale) if scale else ""
-        i = menu(rows, "displays", mesg)
+        desk = fit({n: dict(e) for n, e in lay.items()}, outs)
+        fixed = fixed_scale()
+        mesg = ("desktop scale %s (dotfiles.conf), the same on every monitor" % fmt(fixed) if fixed else
+                "desktop drawn at scale %s, monitors with a smaller scale are scaled down to it" % fmt(desk))
+        i = menu(rows, "displays", esc(mesg))
         if i is None:
             return 0
         if i == len(names):
@@ -538,6 +813,7 @@ def watch():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return 0
+
     def die_with_parent():
         # udevadm would otherwise outlive us until its next event (SIGPIPE)
         try:
@@ -609,6 +885,13 @@ def main(argv):
             return 0
         if cmd == "save":
             save()
+            return 0
+        if cmd == "scale":
+            desk, why = scale_report()
+            print("%.2f\t%s" % (desk, why))
+            return 0
+        if cmd == "preset" and len(argv) in (3, 4):
+            preset(argv[2], argv[3] if len(argv) == 4 else None)
             return 0
         if cmd == "watch":
             return watch()

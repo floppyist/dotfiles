@@ -57,7 +57,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | Part | What it is |
 | --- | --- |
 | **Settings** | one file, [`dotfiles.conf`](dotfiles.conf): accent, palette, scale, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings)) |
-| **Monitors** | `displays`: resolution, refresh rate, position, rotation, primary monitor in Rofi; layouts are remembered per set of monitors and come back on hotplug; the scale follows the primary monitor (see [Monitors and scale](#monitors-and-scale)) |
+| **Monitors** | `displays`: resolution, refresh rate, scale, position, rotation, primary monitor in Rofi; every monitor gets its own scale from its size and resolution; layouts are remembered per set of monitors and come back on hotplug (see [Monitors and scale](#monitors-and-scale)) |
 | **Window manager** | `i3wm` with `picom` |
 | **Terminal and shell** | `Alacritty`; `bash` with a two-line prompt in the Polybar style and vi mode with vim text objects; `fzf` in the Rofi style (see [Shell](#shell)) |
 | **Editor** | `Neovim` (LazyVim, gruvbox; sharp frames, Rofi-style Telescope, mode blocks in the statusline) |
@@ -207,9 +207,11 @@ To change the design itself, edit the configs or the templates in `templates/`.
 
 **Scale.** All sizes in `dotfiles.conf` are at scale 1; `scale` multiplies all of them: fonts, the bar, Rofi,
 notifications, borders, gaps, the cursor, the lock screen, the screenshot overlay, Firefox, GTK and Qt programs.
-Fractional values work (`1.25`, `1.5`, `1.75`). `scale = auto` (the default) measures the primary monitor:
+Fractional values work (`1.25`, `1.5`, `1.75`).
 
-| Primary monitor | auto |
+`scale = auto` (the default) gives **every monitor its own scale**, from its resolution and physical size:
+
+| Monitor | auto |
 | --- | --- |
 | 14" laptop, 1920×1080 | 1 |
 | 13" laptop, 2560×1600 | 1.5 |
@@ -218,25 +220,27 @@ Fractional values work (`1.25`, `1.5`, `1.75`). `scale = auto` (the default) mea
 | 27", 3840×2160 | 1.5 |
 | 32", 3840×2160 | 1.25 |
 
-(Laptop panels get factor 1 at about 150 dpi, external monitors at about 110 dpi; steps of 0.25.)
-`firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
+(Laptop panels get factor 1 at about 150 dpi, external monitors at about 110 dpi; steps of 0.25. Override it per
+monitor in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale.)
 
-The scale is `Xft.dpi` (96 × scale) plus the sizes in the generated configs. When it changes, i3 restarts in
-place (the windows stay), the bar, Rofi, dunst and open terminals follow at once; Firefox, GTK and Qt programs on
-their next start. GTK draws its widgets (not the text) only at whole factors: from scale 2 on that is
-`GDK_SCALE`, set when you log in.
+How it works: X11 has one DPI for the whole screen. The desktop is drawn at the scale of the densest monitor
+(`Xft.dpi`, pixel-sharp there), and every other monitor shows a larger part of the screen that the graphics card
+scales down to its panel (`xrandr --scale`, the way GNOME does it on X11). So a window is the same physical
+size on every monitor. The monitors that are scaled down look a little softer and cost some GPU time; with
+monitors of the same density nothing is scaled. A fixed number (`scale = 1.5`) uses that on every monitor
+and never scales down. `firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
 
-> [!NOTE]
-> X11 has one scale for all monitors. With two monitors of different density side by side, the primary one
-> decides (<kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Make primary).
+When the scale changes (a monitor plugged in, another resolution), i3 restarts in place (the windows stay), the
+bar, Rofi, dunst and open terminals follow at once; Firefox, GTK and Qt programs on their next start. GTK draws
+its widgets (not the text) only at whole factors: from scale 2 on that is `GDK_SCALE`, set when you log in.
 
 **Arrange monitors** with <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> (or "Arrange" in <kbd>Super</kbd>
-<kbd>p</kbd>): pick a monitor, then its resolution, refresh rate, rotation, position (left of, right of, above,
-below, mirror), make it the primary one (bar, scale) or turn it off/on. A change that could leave a screen dark is
+<kbd>p</kbd>): pick a monitor, then its resolution, refresh rate, scale, rotation, position (left of, right of,
+above, below, mirror), make it the primary one (the bar) or turn it off/on. A change that could leave a screen dark is
 reverted after 15 s unless you confirm it. The layout is remembered for this set of monitors
 (`~/.local/state/dotfiles/displays.json`) and comes back when you plug them in again and when you log in. A set
 of monitors without a saved layout is extended side by side, the laptop panel first. On the shell:
-`displays restore`, `displays save`.
+`displays restore`, `displays save`, `displays scale` (the desktop scale and each monitor's).
 
 ## Idle and lock
 
@@ -398,7 +402,8 @@ run `./install.sh links` again.
 - **WiFi or VPN: "not authorized":** adding a profile needs a polkit agent for the password dialog. i3 starts `polkit-gnome`; check that it is installed and running.
 - **WiFi: a network keeps failing with a saved profile:** the menu asks for the password again when NetworkManager rejects the saved one. For other errors, `nmcli connection delete id "<name>"` and connect again.
 - **The music capsule ignores mpv:** mpv needs the MPRIS plugin: `mkdir -p ~/.config/mpv/scripts && ln -s /usr/lib/mpv-mpris/mpris.so ~/.config/mpv/scripts/` (the installer's Music module does that), then restart mpv. `playerctl -l` lists the players it sees.
-- **Everything too small or too large:** `dotfiles get scale_reason` shows how `scale = auto` decided; set a number instead (`scale = 1.5`) and run `dotfiles apply`. Firefox only: `firefox_scale`.
+- **Everything too small or too large:** `displays scale` shows each monitor's scale; change one in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale, or set a number for all (`scale = 1.5`) and run `dotfiles apply`. Firefox only: `firefox_scale`.
+- **A monitor looks soft:** it is scaled down because another monitor is denser (see [Monitors and scale](#monitors-and-scale)). Give both the same scale, or set `scale` to a number.
 - **Polybar hides CPU, volume or music:** the bar is full (see [Polybar](#polybar)); `polybar-fit --explain` prints the measured widths.
 - **Bluetooth "Failed to power on":** the Intel AX200 (`btusb`) can get stuck after rfkill cycles. Reload the driver with `sudo modprobe -r btusb && sudo modprobe btusb`, or reboot.
 - **Idle lock after updating these dotfiles:** `xss-lock` only starts with the session. Log out and back in once (an i3 restart is not enough).

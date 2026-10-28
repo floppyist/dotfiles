@@ -3,7 +3,8 @@
 # "Second screen only" turns the internal panel off; it must be confirmed within
 # 15 s, otherwise the change is reverted (a dark external screen cannot lock you out).
 # "Arrange" (and Super+Shift+p) opens `displays`: resolution, rate, position, rotation.
-# The chosen layout is remembered for these monitors (`displays save`).
+# The chosen layout is remembered for these monitors (`displays save`); `displays preset` builds
+# it, so every monitor keeps its own scale.
 set -u
 
 # Helpers next to this script (works without ~/.local/bin in PATH)
@@ -41,31 +42,24 @@ IDX=$(printf '%s\n' "${LABELS[@]}" | "$ROFI_MENU" "display" "$INTERNAL  ·  $OUT
 MODE="${MODES[$IDX]}"
 [[ "$MODE" == "Arrange" ]] && exec "$DISPLAYS"
 
-# Keep all other external displays off
-others=()
-for m in "${EXTERNALS[@]}"; do
-    [[ "$m" != "$OUT" ]] && others+=(--output "$m" --off)
-done
-
-internal_only=(--output "$INTERNAL" --auto --primary --output "$OUT" --off "${others[@]}")
-
+# The layouts are built by `displays`, so every monitor keeps its own scale (other external
+# displays are turned off)
 case "$MODE" in
-    "PC screen only")     args=("${internal_only[@]}") ;;
-    "Duplicate")          args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --same-as "$INTERNAL" "${others[@]}") ;;
-    "Extend")             args=(--output "$INTERNAL" --auto --primary --output "$OUT" --auto --right-of "$INTERNAL" "${others[@]}") ;;
-    "Second screen only") args=(--output "$OUT" --auto --primary --output "$INTERNAL" --off "${others[@]}") ;;
+    "PC screen only")     preset=(internal "$OUT") ;;
+    "Duplicate")          preset=(mirror "$OUT") ;;
+    "Extend")             preset=(extend "$OUT") ;;
+    "Second screen only") preset=(external "$OUT") ;;
     *) exit 1 ;;
 esac
-
 # Remember the layout for these monitors, then re-place the bar and the wallpaper and
-# (scale = auto) scale the desktop for the primary monitor
+# (scale = auto) set the desktop scale for the monitors
 refresh_desktop() {
     "$DISPLAYS" save >/dev/null 2>&1
     "$HERE/dotfiles" apply --layout >/dev/null 2>&1
 }
 
-if ! xrandr "${args[@]}"; then
-    notify -u critical "Display" "xrandr failed for $OUT ($MODE)"
+if ! err=$("$DISPLAYS" preset "${preset[@]}" 2>&1); then
+    notify -u critical "Display" "$MODE failed: ${err#displays: }"
     exit 1
 fi
 
@@ -74,7 +68,7 @@ if [[ "$MODE" == "Second screen only" ]]; then
     ANSWER=$(printf '%s\n' "󰕌  Revert" "󰄬  Keep this layout" |
         timeout 15 "$ROFI_MENU" "display" "Reverting in 15 s unless confirmed") || ANSWER=0
     if [[ "$ANSWER" != 1 ]]; then
-        xrandr "${internal_only[@]}"
+        "$DISPLAYS" preset internal "$OUT" >/dev/null 2>&1
         refresh_desktop
         notify "Layout reverted" "$INTERNAL is active again"
         exit 0
