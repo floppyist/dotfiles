@@ -25,7 +25,6 @@ exec --no-startup-id pipewire
 exec --no-startup-id pipewire-pulse
 exec --no-startup-id wireplumber
 exec --no-startup-id xbanish
-exec --no-startup-id caffeine-ng
 # exec_always: i3 restart (Alt+Shift+r) brings back a crashed compositor; a second instance exits
 exec_always --no-startup-id picom -b
 exec_always --no-startup-id ~/.config/polybar/launch.sh

@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Copy the WiFi networks of wpa_supplicant to NetworkManager. install.sh runs it as root.
+
+Reads /etc/wpa_supplicant/wpa_supplicant*.conf and writes a keyfile per network into
+/etc/NetworkManager/system-connections/ (root only, 0600), unless NetworkManager has a profile
+for that SSID already. Keys go from one root-only file into another: never into argv or env.
+
+Output, one line per network (tab separated):  migrated SSID  |  skipped SSID REASON
+Usage: nm-migrate [--root DIR] [--dry-run]
+"""
+
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+import uuid
+
+ESCAPES = {"n": b"\n", "r": b"\r", "t": b"\t", "e": b"\x1b", '"': b'"', "\\": b"\\"}
+
+
+def unescape_printf(s):
+    """wpa_supplicant's P"..." strings"""
+    out, i = bytearray(), 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s):
+            c = s[i + 1]
+            i += 2
+            m = re.match(r"[0-9a-fA-F]{1,2}", s[i:]) if c == "x" else None
+            if c in ESCAPES:
+                out += ESCAPES[c]
+            elif m:
+                out.append(int(m.group(), 16))
+                i += len(m.group())
+            else:
+                out += ("\\" + c).encode("utf-8", "surrogateescape")
+        else:
+            out += s[i].encode("utf-8", "surrogateescape")
+            i += 1
+    return bytes(out)
+
+
+def ssid_bytes(v):
+    """ssid="text", ssid=P"escaped" or ssid=hex"""
+    if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+        return v[1:-1].encode("utf-8", "surrogateescape")
+    if v.startswith('P"') and v.endswith('"'):
+        return unescape_printf(v[2:-1])
+    if re.fullmatch(r"(?:[0-9a-fA-F]{2})+", v):
+        return bytes.fromhex(v)
+    return None
+
+
+def networks(path):
+    nets, cur = [], None
+    with open(path, encoding="utf-8", errors="surrogateescape") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if cur is None:
+                if re.fullmatch(r"network\s*=\s*\{", line):
+                    cur = {}
+                continue
+            if line == "}":
+                nets.append(cur)
+                cur = None
+                continue
+            key, sep, value = line.partition("=")
+            if sep:
+                cur[key.strip()] = value.strip()
+    return nets
+
+
+def printable(b):
+    """SSID for the output (the installer shows it): no control characters, no tabs"""
+    s = b.decode("utf-8", "replace")
+    return "".join(c if c.isprintable() else "?" for c in s) or "?"
+
+
+def esc(s):
+    """a GKeyFile string value"""
+    s = s.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    return "\\s" + s[1:] if s.startswith(" ") else s
+
+
+def known_ssids(directory):
+    """SSIDs (bytes) of the NetworkManager profiles that exist already"""
+    found = set()
+    for path in glob.glob(os.path.join(directory, "*")):
+        try:
+            with open(path, encoding="utf-8", errors="surrogateescape") as f:
+                section = ""
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("["):
+                        section = line
+                    elif section in ("[wifi]", "[802-11-wireless]") and line.startswith("ssid="):
+                        v = line[5:]
+                        if re.fullmatch(r"(?:\d+;)+", v):
+                            found.add(bytes(int(x) for x in v.split(";") if x))
+                        else:
+                            found.add(v.replace("\\s", " ").replace("\\\\", "\\").encode("utf-8", "surrogateescape"))
+        except OSError:
+            pass
+    return found
+
+
+def keyfile(ssid, net):
+    """Keyfile text for one network, or (None, reason)"""
+    km = net.get("key_mgmt", "WPA-PSK" if "psk" in net else "NONE").split()
+    psk = net.get("psk")
+    if any(k.startswith("WPA-EAP") or k in ("IEEE8021X", "FT-EAP") for k in km):
+        return None, "WPA-Enterprise, add it with nm-connection-editor"
+    if "SAE" in km and "WPA-PSK" not in km:
+        mgmt = "sae"
+    elif any(k.startswith("WPA-PSK") or k == "FT-PSK" for k in km):
+        mgmt = "wpa-psk"
+    elif km == ["NONE"]:
+        if any(k.startswith("wep_key") for k in net):
+            return None, "WEP is not supported"
+        mgmt = None
+    else:
+        return None, "key management %s is not supported" % " ".join(km)
+    if mgmt:
+        if psk is None:
+            return None, "no key in wpa_supplicant (psk=)"
+        if len(psk) >= 2 and psk[0] == '"' and psk[-1] == '"':
+            psk = psk[1:-1]
+        elif not re.fullmatch(r"[0-9a-fA-F]{64}", psk):
+            return None, "the key has an unknown format"
+    name = printable(ssid)
+    lines = ["[connection]", "id=" + esc(name), "uuid=" + str(uuid.uuid4()), "type=wifi"]
+    try:
+        prio = max(-999, min(999, int(net.get("priority", "0"))))
+    except ValueError:
+        prio = 0
+    if prio:
+        lines.append("autoconnect-priority=%d" % prio)
+    # the SSID as bytes: NetworkManager reads any SSID this way, no escaping needed
+    lines += ["", "[wifi]", "mode=infrastructure", "ssid=" + "".join("%d;" % b for b in ssid)]
+    if net.get("scan_ssid") == "1":
+        lines.append("hidden=true")
+    if mgmt:
+        lines += ["", "[wifi-security]", "key-mgmt=" + mgmt, "psk=" + esc(psk)]
+    lines += ["", "[ipv4]", "method=auto", "", "[ipv6]", "method=auto", ""]
+    return "\n".join(lines), None
+
+
+def main():
+    root, dry = "/", False
+    args = sys.argv[1:]
+    while args:
+        a = args.pop(0)
+        if a == "--root" and args:
+            root = args.pop(0)
+        elif a == "--dry-run":
+            dry = True
+        else:
+            print(__doc__.strip(), file=sys.stderr)
+            return 2
+    target = os.path.join(root, "etc/NetworkManager/system-connections")
+    known = known_ssids(target)
+    done = set()
+    wrote = 0
+    for conf in sorted(glob.glob(os.path.join(root, "etc/wpa_supplicant/wpa_supplicant*.conf"))):
+        try:
+            nets = networks(conf)
+        except OSError as e:
+            print("error\t%s\t%s" % (conf, e.strerror))
+            continue
+        for net in nets:
+            ssid = ssid_bytes(net.get("ssid", ""))
+            if not ssid or len(ssid) > 32:
+                continue
+            name = printable(ssid)
+            if ssid in known or ssid in done:
+                continue
+            if net.get("disabled") == "1":
+                print("skipped\t%s\tdisabled in wpa_supplicant" % name)
+                continue
+            text, reason = keyfile(ssid, net)
+            if text is None:
+                print("skipped\t%s\t%s" % (name, reason))
+                continue
+            done.add(ssid)
+            if dry:
+                print("migrated\t%s" % name)
+                continue
+            os.makedirs(target, mode=0o700, exist_ok=True)
+            base = re.sub(r"[/\x00-\x1f\x7f]", "_", name).lstrip(".") or "wifi"
+            for n in range(100):
+                path = os.path.join(target, "%s%s.nmconnection" % (base, "" if n == 0 else "-%d" % n))
+                try:
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                print("skipped\t%s\tno free file name" % name)
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
+                os.fchmod(f.fileno(), 0o600)
+                f.write(text)
+            wrote += 1
+            print("migrated\t%s" % name)
+    # a running NetworkManager reads new files only when asked
+    if wrote and root == "/" and shutil.which("nmcli"):
+        if subprocess.run(["pgrep", "-x", "NetworkManager"], capture_output=True).returncode == 0:
+            subprocess.run(["nmcli", "connection", "reload"], capture_output=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

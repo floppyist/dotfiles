@@ -208,97 +208,136 @@ To change the design itself, edit the configs or the templates in `templates/`.
 | (change) | `screensaver_after`, `lock_after`, `display_off_after` in `dotfiles.conf` |
 | Suspend, lid close, `loginctl lock-session` | Screen locks **before** the system sleeps |
 
-`xss-lock` owns the locking (see `config/i3/config`). Fullscreen windows and `caffeine-ng` keep the screen awake.
+`xss-lock` owns the locking (see `config/i3/config`). While a window is fullscreen, or a program from `inhibit_procs`
+in `config/nerdsaver/config` runs (opencode, pi), neither the screensaver nor the lock starts.
 Notifications are paused while the screen is locked.
 
 ## Dependencies
 
-Package names are for Void Linux. Some binaries (e.g. `xprintidle`, the Nerd Font) may have different names on your distribution.
+The installer installs all of it (see [Installation](#installation)), in modules. Package names are Void Linux's.
 
-```bash
-sudo xbps-install -S \
-i3 i3lock-color xss-lock polybar rofi dunst picom alacritty feh \
-xsetroot xset xrandr xclip scrot xbanish xprintidle \
-pipewire wireplumber libspa-bluetooth pulsemixer \
-bluez rfkill NetworkManager libnm libnotify elogind polkit-gnome \
-mpv mpv-mpris playerctl brightnessctl \
-neomutt fzf ncurses caffeine-ng python3 python3-gobject gtk+3 tmux ffmpeg
-```
-
-Optional:
-- `NetworkManager-openvpn`, `NetworkManager-vpnc` (OpenVPN and Cisco/FRITZ!Box profiles in the VPN menu),
-  `network-manager-applet` (`nm-connection-editor` for other VPN types and WPA-Enterprise)
-- `chafa` (sharper album covers in `mpvim`; without it they are drawn with half blocks via `python3-Pillow`)
-- `python3-Pillow` also redraws the README pictures (`assets/readme/render.py`)
+| Module | Packages | It also |
+| --- | --- | --- |
+| **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind`, links the files, generates the theme |
+| **System update** | | updates xbps and the whole system first |
+| **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi`, for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself |
+| **Audio** | `pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer` | routes ALSA programs through PipeWire |
+| **Network** | `NetworkManager libnm NetworkManager-openvpn NetworkManager-vpnc network-manager-applet` | replaces dhcpcd and wpa_supplicant, takes their WiFi networks along |
+| **Bluetooth** | `bluez libspa-bluetooth` | enables `bluetoothd` |
+| **Laptop** | `brightnessctl` | udev rule for the backlight, your user in the group `video` |
+| **Neovim** | `neovim git gcc make tree-sitter-cli ripgrep fd curl unzip nodejs openjdk21` | installs the plugins of `lazy-lock.json` |
+| **Firefox** | `firefox noto-fonts-emoji` | puts the look into your profile |
+| **Mail** | `neomutt` | sources the theme in your muttrc |
+| **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | |
+| **Tools** | `htop xdg-utils` | |
+| **Start X on login** | | `startx` after logging in on tty1 |
 
 Minimum versions: i3 4.22, polybar 3.6, picom 12 (uses the `rules` syntax), rofi 1.7, dunst 1.9, scrot 1.7,
 bash 5.1 (text objects; 5.3 for the duration capsule and the prompt without subshells), tmux 3.2,
 alacritty 0.14 (`[general] import`), fzf 0.66 (`--gutter`), NetworkManager 1.20.
 
-Also needed:
-- JetBrainsMono Nerd Font (v3, `md-*` icons; on Void in `nerd-fonts-ttf`)
-- No cursor theme: `dotfiles apply` draws its own (with `python3-cairo`, which comes with `python3-gobject`)
-- Wallpaper at `~/images/wallpaper` (or set `wallpaper` in `dotfiles.conf`); screenshots go to `~/images/screenshots`
-- Optional: `numpy` for the pixel screensavers of `nerdsaver`, Wine for the games in `applications/local/`
+Other distributions: install the same programs with your package manager, then run `./install.sh`; without xbps it
+leaves out packages and services and only sets up your home directory. Optional: Wine for the games in
+`applications/local/`.
 
 ## Installation
 
-### 1. Install packages
+### 1. Get the repository
 
-See [Dependencies](#dependencies).
-
-### 2. Clone the repository
-
-Set `DOTFILES` to the directory you clone into. Replace the path with your own if you don't want `~/dotfiles`. The variable only lasts for the current shell.
+On a fresh Void Linux with i3, as your user (it has to be allowed to use sudo, the Void installer puts it in the
+group `wheel`):
 
 ```bash
-export DOTFILES=~/dotfiles
-git clone https://github.com/floppyist/dotfiles "$DOTFILES"
-cd "$DOTFILES"
+sudo xbps-install -S git
+git clone https://github.com/floppyist/dotfiles ~/dotfiles
+cd ~/dotfiles
 ```
 
-### 3. Link everything
+Any directory works; everything is linked from where the repository is.
+
+### 2. Run the installer
 
 ```bash
 ./install.sh
 ```
 
-The script links every file of `config/` into `~/.config/` (file by file, e.g. `~/.config/i3/config`, so your own files in those directories stay), the dotfiles into `~/`, the scripts into `~/.local/bin/` and the `.desktop` launchers into `~/.local/share/applications/` (each only if its program is installed, see step 5). It makes the scripts executable and runs `dotfiles apply` once. Existing files it would replace are moved to `*.bak-<timestamp>`; links to files that were removed from the repository are deleted. It can be run again safely (also after `git pull`, to link new files).
+A full-screen installer in the colors of the desktop (it needs nothing but bash, also on the Linux console):
+
+- **Complete installation** sets up everything for this machine. Modules it has no use for are left out (Bluetooth
+  without an adapter, the backlight without one, starting X when a display manager is enabled).
+- **Choose modules** lists the modules with what each one installs and changes; <kbd>Space</kbd> picks them.
+- **Update links** only links new and moved files and generates the theme again, without packages or root: for
+  after `git pull`.
+
+Before anything changes it shows the plan: the new packages with their download size, what changes as root and
+what in your home directory. sudo then asks for your password once. The steps run with a progress bar and their
+live output; a step that fails can be retried or skipped, <kbd>Ctrl</kbd> <kbd>c</kbd> stops after the current step
+(a running xbps is never interrupted). Every run writes a log to `~/.local/state/dotfiles/`.
+
+The complete installation, in this order:
+
+1. Updates the system (xbps first), then installs the packages of all modules in one transaction. The graphics
+   drivers follow the GPUs it finds; with an NVIDIA card it asks which driver (nouveau or proprietary).
+2. Downloads JetBrainsMono Nerd Font (7 MB from the Nerd Fonts release, checked against a fixed SHA-256) into
+   `~/.local/share/fonts`, instead of all Nerd Fonts from `nerd-fonts-ttf` (1.5 GB).
+3. Enables `dbus`, `elogind` and `bluetoothd`, installs the udev rule for the backlight, adds you to the group
+   `video`, routes ALSA through PipeWire, makes bash your login shell if it was `sh`.
+4. Links every file of `config/` into `~/.config/` (file by file, e.g. `~/.config/i3/config`, so your own files in
+   those directories stay), the dotfiles into `~/`, the scripts into `~/.local/bin/` and the launchers into
+   `~/.local/share/applications/` (see [Launchers](#3-launchers)). Files in the way are kept as
+   `*.bak-<timestamp>`, links to files that were removed from the repository are deleted.
+5. Firefox: links `userChrome.css` and `userContent.css` into your profile (Firefox creates one first if there is
+   none) and switches them on in `user.js`. neomutt: adds the theme to your muttrc (or creates `~/.muttrc`).
+6. Runs `dotfiles apply` (theme files, cursor theme). Without a wallpaper it puts a plain one in the background
+   color at `~/images/wallpaper`.
+7. Installs the Neovim plugins at the versions of `lazy-lock.json`; language servers and Treesitter parsers follow
+   on the first start.
+8. Makes `~/.bash_profile` start X after logging in on tty1 (`exec startx`: logging out of i3 ends the login).
+9. Last, NetworkManager replaces dhcpcd and wpa_supplicant.
+
+> [!IMPORTANT]
+> The switch to NetworkManager drops the connection for a few seconds. The WiFi networks of wpa_supplicant are
+> copied to NetworkManager (as root-only files, the keys never on a command line); WPA-Enterprise networks need
+> `nm-connection-editor`, networks saved by iwd are picked again in the WiFi menu.
+
+Then restart the computer (the installer offers it at the end) and log in on tty1: the desktop starts. With a
+display manager, pick a session that runs `~/.xinitrc`. Every step checks first what is already done, so the
+installer can run again at any time, also for a module added later.
+
+Without the menus:
+
+| Command | What it does |
+| --- | --- |
+| `./install.sh all` | the complete installation (`--skip network,neovim` leaves modules out, `--nvidia nvidia` picks the driver) |
+| `./install.sh modules audio,bluetooth` | these modules (and the desktop) |
+| `./install.sh plan [modules]` | shows what would happen, changes nothing |
+| `./install.sh list` | the modules and their state on this machine |
+| `./install.sh links` | links and theme only (also what runs without a terminal) |
+
+`all` and `modules` ask before they start; `-y` starts right away.
 
 > [!IMPORTANT]
 > Everything is linked, not copied: editing the repository or switching git branches changes the running desktop
 > (Alacritty reloads its config live, scripts and Rofi pick up changes on their next start).
 
-`~/.local/bin` must be in your `$PATH`. `.xinitrc` and `.bashrc` both export it. The `.desktop` launchers and the scripts rely on this, so start i3 through `.xinitrc`.
+`~/.local/bin` must be in your `$PATH`. `.xinitrc` and `.bashrc` both export it. The `.desktop` launchers and the
+scripts rely on this, so start i3 through `.xinitrc`.
 
-### 4. Manual steps
+neomutt: put your account settings above the two `source` lines in your muttrc, so the theme wins, and remove your
+own `color`, `index_format`, `status_format`, `status_chars` and `to_chars` lines, the theme sets them.
 
-- **udev** (backlight permissions, needs root):
-  ```bash
-  sudo install -m644 "$DOTFILES/config/udev/90-backlight.rules" /etc/udev/rules.d/
-  sudo udevadm control --reload-rules
-  ```
-- **Firefox:** open `about:config`, set `toolkit.legacyUserProfileCustomizations.stylesheets` to `true`, then link `firefox/userChrome.css` and `firefox/userContent.css` into `<your-profile>/chrome/` and run `dotfiles apply` (it links the generated colors next to them as `dotfiles.css`).
-- **neomutt:** add these lines to `~/.muttrc` (after your account settings, so the theme wins):
-  ```
-  source ~/.config/mutt/notify.muttrc   # new-mail notifications
-  source ~/.config/mutt/theme.muttrc    # colors, formats, flag glyphs
-  ```
-  Remove your own `color`, `index_format`, `status_format`, `status_chars` and `to_chars` lines, the theme sets them.
-- **Neovim:** the gruvbox colorscheme is installed by lazy.nvim on the first start (needs network).
+### 3. Launchers
 
-### 5. Launchers
-
-`install.sh` links a launcher only if its program is installed, so Rofi never lists one that fails: the menus of
+The installer links a launcher only if its program is installed, so Rofi never lists one that fails: the menus of
 this repository (Bluetooth, WiFi, Display, VPN) always, the others (`pulsemixer`, `htop`, `neomutt`, Firefox,
 Signal and the author's own tools `calculus` and `notice`) only where their program is found (the command of
-`Exec=` and `TryExec=`). Run `./install.sh` again after installing or removing a program: it adds or removes the
-launcher.
+`Exec=` and `TryExec=`). Run `./install.sh links` again after installing or removing a program: it adds or removes
+the launcher.
 
 The launchers in `applications/local/` (Aseprite, Command & Conquer Generals, Factorio, World of Warcraft, Sunshine) are
 machine-specific and point to install locations under `/home/floppyist/`; for them every absolute path in `Exec=` and
 `Path=` must exist as well. Change `Exec=` and `Path=` to your install locations (or put your own launchers there) and
-run `./install.sh` again.
+run `./install.sh links` again.
 
 ## Security notes
 
@@ -326,4 +365,4 @@ run `./install.sh` again.
   the first `dotfiles apply` log out and back in once. Programs started without the session environment use
   `~/.icons/default/index.theme`; put `Inherits=dotfiles` there to get the same cursor. `dotfiles apply` leaves a
   `~/.icons/dotfiles` alone that it did not create (it says so); rename that directory.
-- **GTK program still light or unchanged:** GTK reads `~/.config/gtk-3.0/` only when a program starts; restart it. Tools like `lxappearance` replace the linked `settings.ini` with their own file, run `./install.sh` again to restore the link (your file is kept as a backup).
+- **GTK program still light or unchanged:** GTK reads `~/.config/gtk-3.0/` only when a program starts; restart it. Tools like `lxappearance` replace the linked `settings.ini` with their own file, run `./install.sh links` again to restore the link (your file is kept as a backup).
