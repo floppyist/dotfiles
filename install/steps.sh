@@ -161,30 +161,24 @@ run_services() {
     return 0
 }
 
-# ── Software mouse pointer (graphics) ────────────────────────────────────────────
+# ── Mouse pointer (graphics) ──────────────────────────────────────────────────────
 
+# An earlier version of this installer made Xorg draw the pointer in software on every monitor.
+# Xorg does that by itself on a scaled monitor; everywhere else it only made the pointer flicker
+# and turned page flips off (tearing). Removed again.
 SWCURSOR_CONF=$SYSROOT/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf
-
-# Per-monitor scaling is on unless dotfiles.conf has a fixed number for `scale`
-per_monitor_scale() {
-    local v
-    v=$(sed -n 's/^[[:space:]]*scale[[:space:]]*=[[:space:]]*\([^[:space:]]*\).*/\1/p' "$DOTFILES/dotfiles.conf" | head -n1)
-    [[ -z $v || $v == auto ]]
-}
 
 plan_swcursor() {
     PLAN=()
-    per_monitor_scale || return 1
-    cmp -s "$DOTFILES/config/xorg/20-dotfiles-swcursor.conf" "$SWCURSOR_CONF" && return 1
-    PLAN=("${SWCURSOR_CONF#"$SYSROOT"}: software mouse pointer, the same size on monitors that per-monitor scaling scales down (after logging in again)")
+    [[ -e $SWCURSOR_CONF ]] || return 1
+    PLAN=("remove ${SWCURSOR_CONF#"$SYSROOT"} (software pointer of an earlier version: it flickered; after logging in again)")
 }
 
 run_swcursor() {
-    local src=$DOTFILES/config/xorg/20-dotfiles-swcursor.conf
-    per_monitor_scale || { say "scale is a fixed number: no software pointer needed"; return 0; }
-    cmp -s "$src" "$SWCURSOR_CONF" && { say "$SWCURSOR_CONF is up to date"; return 0; }
-    as_root install -D -m644 "$src" "$SWCURSOR_CONF" || return 1
-    say "installed $SWCURSOR_CONF (takes effect after logging in again)"
+    [[ -e $SWCURSOR_CONF ]] || { say "no software pointer configured"; return 0; }
+    as_root rm -f -- "$SWCURSOR_CONF" || return 1
+    say "removed $SWCURSOR_CONF"
+    note "Mouse pointer: log in again, the graphics card draws it again (no more flickering)."
 }
 
 # ── Backlight (laptop) ────────────────────────────────────────────────────────────

@@ -27,8 +27,9 @@ M_STEPS[system]="update"
 M_TITLE[graphics]="Graphics drivers"
 M_DESC[graphics]="Mesa for the GPUs of this machine: OpenGL (Alacritty and picom need it), Vulkan and \
 video decoding. mesa-dri covers Intel, AMD, nouveau and virtual machines; only the Vulkan and VA-API \
-drivers depend on the vendor. With per-monitor scaling (scale = auto) a software mouse pointer, so it \
-has the same size on every monitor."
+drivers depend on the vendor. AMD also gets its Xorg driver (xf86-video-amdgpu, xf86-video-ati for old \
+cards): with its TearFree a window has the same size on monitors of different sharpness, without \
+tearing."
 M_STEPS[graphics]="swcursor"
 
 M_TITLE[audio]="Audio"
@@ -100,6 +101,9 @@ mod_pkgs() {
         MP=(mesa-dri)
         (( GPU_INTEL ))  && MP+=(vulkan-loader mesa-vulkan-intel intel-video-accel)
         (( GPU_AMD ))    && MP+=(vulkan-loader mesa-vulkan-radeon mesa-vaapi)
+        # the Xorg driver of the kernel driver in use (TearFree; modesetting has none)
+        (( GPU_AMDGPU )) && MP+=(xf86-video-amdgpu)
+        (( GPU_RADEON )) && MP+=(xf86-video-ati)
         if (( GPU_NVIDIA )); then
             case ${NVIDIA_DRIVER:-nouveau} in
                 nouveau) MP+=(vulkan-loader mesa-vulkan-nouveau) ;;

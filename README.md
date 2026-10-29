@@ -57,7 +57,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | Part | What it is |
 | --- | --- |
 | **Settings** | one file, [`dotfiles.conf`](dotfiles.conf): accent, palette, scale, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings)) |
-| **Monitors** | `displays`: resolution, refresh rate, scale, position, rotation, primary monitor in Rofi; a window has the same physical size on every monitor; layouts are remembered per set of monitors and come back on hotplug (see [Monitors and scale](#monitors-and-scale)) |
+| **Monitors** | `displays`: resolution, refresh rate, scale, position, alignment, rotation, primary monitor in Rofi; a window has the same physical size on every monitor (with a TearFree driver); layouts are remembered per set of monitors and come back on hotplug (see [Monitors and scale](#monitors-and-scale)) |
 | **Window manager** | `i3wm` with `picom` |
 | **Terminal and shell** | `Alacritty`; `bash` with a two-line prompt in the Polybar style and vi mode with vim text objects; `fzf` in the Rofi style (see [Shell](#shell)) |
 | **Editor** | `Neovim` (LazyVim, gruvbox; sharp frames, Rofi-style Telescope, mode blocks in the statusline) |
@@ -210,30 +210,38 @@ To change the design itself, edit the configs or the templates in `templates/`.
 notifications, borders, gaps, the cursor, the lock screen, the screenshot overlay, Firefox, GTK and Qt programs.
 Fractional values work (`1.25`, `1.5`, `1.75`).
 
-`scale = auto` (the default) makes **a window the same physical size on every monitor**. Each monitor's scale is
-its pixel density (resolution and size from the monitor itself) divided by `auto_dpi` (125):
+`scale = auto` (the default) makes **a window the same physical size on every monitor**, measured on the
+primary monitor (the one with the bar). Its scale is its pixel density (resolution and size from the monitor itself)
+divided by `auto_dpi` (175), in steps of 0.25:
 
-| Monitor | dpi | scale alone |
+| Primary monitor | dpi | scale |
 | --- | --- | --- |
-| 14" laptop, 1920×1080 | 158 | 1.25 |
-| 13" laptop, 2560×1600 | 227 | 1.75 |
-| 15.6" laptop, 3840×2160 | 282 | 2.25 |
+| 14" laptop, 1920×1080 | 158 | 1 |
+| 13" laptop, 2560×1600 | 227 | 1.25 |
+| 15.6" laptop, 3840×2160 | 282 | 1.5 |
 | 24", 1920×1080 | 92 | 1 |
 | 27", 2560×1440 | 109 | 1 |
-| 27", 3840×2160 | 163 | 1.25 |
+| 27", 3840×2160 | 163 | 1 |
 
-Lower `auto_dpi` makes everything larger, higher makes it smaller. A monitor's scale can also be chosen in
-<kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale.
+Lower `auto_dpi` makes everything larger, higher makes it smaller (at 125: 1.25, 1.75, 2.25, 1, 1, 1.25). The
+scale can also be chosen in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale.
 
-How it works: X11 has one DPI for the whole screen. The desktop is drawn at the scale of the densest monitor
-(`Xft.dpi`, in steps of 0.25, pixel-sharp there), and every other monitor shows a larger part of the screen that
-the graphics card scales down by the ratio of the densities (`xrandr --scale`, the way GNOME does it on X11).
-Example: a 14" laptop (163 dpi) and a 21.5" 1080p monitor (103 dpi): the desktop is drawn at 1.25, the monitor
-is scaled down 1.58 times, and a window that is 10 cm wide on the laptop is 10 cm wide there too. The monitors
-that are scaled down look a little softer and cost some GPU time; monitors of (almost) the same density are
-never scaled. A fixed number (`scale = 1.5`) uses that on every monitor and never scales down. The graphics
-card scales the picture but not its hardware mouse pointer, so the installer's Graphics module switches to a
-software pointer (`/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf`): the same size on every monitor.
+How it works: X11 has one DPI for the whole screen. The desktop is drawn at the primary monitor's scale
+(`Xft.dpi`, pixel-sharp there), and every other monitor shows an area of the screen that the graphics card scales
+to its panel by the ratio of the densities (`xrandr --scale`). Example: a 14" laptop (158 dpi) as the primary and a
+24" 1080p monitor (92 dpi): the monitor is scaled down 1.71 times, and a window that is 10 cm wide on the laptop is
+10 cm wide there too. Monitors of the same density (three identical ones, say) are never scaled. A scaled monitor
+looks a little softer (the more, the larger the factor) and costs some GPU time. A fixed number (`scale = 1.5`) is
+used on every monitor, and nothing is scaled.
+
+Scaling needs a graphics driver that does it **without tearing**: TearFree in AMD's Xorg driver
+(`xf86-video-amdgpu`, `xf86-video-ati` for old cards; the installer's Graphics module installs it). While a
+monitor is scaled, `displays` turns TearFree on for every monitor (Xorg then draws the mouse pointer in software,
+which also turns off the page flips the other monitors would rely on) and back to `auto` afterwards (a
+`TearFree` option of your own in xorg.conf is overridden). Xorg's
+modesetting driver (Intel, AMD without its driver, nouveau) and NVIDIA's copy a scaled picture out of step with the
+monitor: it tears and the pointer flickers. With those every monitor shows the desktop 1:1 (sharp, no tearing, but a
+window is larger on a less dense monitor); <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> says so.
 `firefox_scale` makes Firefox larger or smaller than the rest (`1.1` = 10 % larger).
 
 When the scale changes (a monitor plugged in, another resolution), i3 restarts in place (the windows stay), the
@@ -242,11 +250,13 @@ its widgets (not the text) only at whole factors: from scale 2 on that is `GDK_S
 
 **Arrange monitors** with <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> (or "Arrange" in <kbd>Super</kbd>
 <kbd>p</kbd>): pick a monitor, then its resolution, refresh rate, scale, rotation, position (left of, right of,
-above, below, mirror), make it the primary one (the bar) or turn it off/on. A change that could leave a screen dark is
-reverted after 15 s unless you confirm it. The layout is remembered for this set of monitors
+above, below, mirror), make it the primary one (the bar) or turn it off/on. **Alignment** lines a monitor up with its
+neighbour when they differ in height: top edges, centers or bottom edges level, or move it in 1 cm steps until the
+pointer crosses the edge where the screens really meet. A change that could leave a screen dark is reverted after
+15 s unless you confirm it. The layout is remembered for this set of monitors
 (`~/.local/state/dotfiles/displays.json`) and comes back when you plug them in again and when you log in. A set
 of monitors without a saved layout is extended side by side, the laptop panel first. On the shell:
-`displays restore`, `displays save`, `displays scale` (the desktop scale and each monitor's).
+`displays restore`, `displays save`, `displays scale` (the desktop scale and how each monitor is scaled).
 
 ## Idle and lock
 
@@ -269,7 +279,7 @@ The installer installs all of it (see [Installation](#installation)), in modules
 | --- | --- | --- |
 | **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind`, links the files, generates the theme |
 | **System update** | | updates xbps and the whole system first |
-| **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi`, for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself; with `scale = auto` a software mouse pointer (`/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf`) |
+| **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi xf86-video-amdgpu` (`xf86-video-ati` instead on the kernel driver radeon), for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself (AMD's Xorg driver: TearFree, see [Monitors and scale](#monitors-and-scale)); removes the software pointer an earlier version installed |
 | **Audio** | `pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer` | routes ALSA programs through PipeWire |
 | **Network** | `NetworkManager libnm NetworkManager-openvpn NetworkManager-vpnc network-manager-applet` | replaces dhcpcd and wpa_supplicant, takes their WiFi networks along |
 | **Bluetooth** | `bluez libspa-bluetooth` | enables `bluetoothd` |
@@ -408,9 +418,10 @@ run `./install.sh links` again.
 - **WiFi or VPN: "not authorized":** adding a profile needs a polkit agent for the password dialog. i3 starts `polkit-gnome`; check that it is installed and running.
 - **WiFi: a network keeps failing with a saved profile:** the menu asks for the password again when NetworkManager rejects the saved one. For other errors, `nmcli connection delete id "<name>"` and connect again.
 - **The music capsule ignores mpv:** mpv needs the MPRIS plugin: `mkdir -p ~/.config/mpv/scripts && ln -s /usr/lib/mpv-mpris/mpris.so ~/.config/mpv/scripts/` (the installer's Music module does that), then restart mpv. `playerctl -l` lists the players it sees.
-- **Everything too small or too large:** `displays scale` shows each monitor's scale; change one in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale, or set a number for all (`scale = 1.5`) and run `dotfiles apply`. Firefox only: `firefox_scale`.
-- **The mouse pointer is too large on one monitor:** that monitor is scaled down and the hardware pointer is not. Run the installer's Graphics module (or `sudo install -Dm644 config/xorg/20-dotfiles-swcursor.conf /etc/X11/xorg.conf.d/`) and log in again.
-- **A monitor looks soft:** it is scaled down because another monitor is denser (see [Monitors and scale](#monitors-and-scale)). Give both the same scale, or set `scale` to a number.
+- **Everything too small or too large:** `displays scale` shows the primary monitor's density and how the others are scaled; change `auto_dpi`, choose a scale in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale, or set a number for all (`scale = 1.5`) and run `dotfiles apply`. Firefox only: `firefox_scale`.
+- **Windows have different sizes on two monitors:** `displays scale` ends with "no TearFree driver": the driver cannot scale without tearing (see [Monitors and scale](#monitors-and-scale)). On AMD install `xf86-video-amdgpu` and log in again; `xrandr --props | grep TearFree` shows whether it is in use.
+- **The mouse pointer flickers or the screen tears with several monitors:** remove `/etc/X11/xorg.conf.d/20-dotfiles-swcursor.conf` if it is there (an earlier version installed it; the Graphics module removes it) and log in again.
+- **A monitor looks soft:** it is scaled because its density differs from the primary monitor's (see [Monitors and scale](#monitors-and-scale)). Make it the primary one, give both the same scale, or set `scale` to a number.
 - **Polybar hides CPU, volume or music:** the bar is full (see [Polybar](#polybar)); `polybar-fit --explain` prints the measured widths.
 - **Bluetooth "Failed to power on":** the Intel AX200 (`btusb`) can get stuck after rfkill cycles. Reload the driver with `sudo modprobe -r btusb && sudo modprobe btusb`, or reboot.
 - **Idle lock after updating these dotfiles:** `xss-lock` only starts with the session. Log out and back in once (an i3 restart is not enough).

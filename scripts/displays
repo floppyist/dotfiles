@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """displays - monitors: arrangement, per-monitor scale, saved layouts, hotplug
 
-usage: displays                 menu: resolution, refresh rate, scale, position, rotation, primary, on/off
+usage: displays                 menu: resolution, refresh rate, scale, position, alignment, rotation,
+                                primary, on/off
        displays restore         put the saved layout for the connected monitors back (else: extend)
        displays save            remember the current layout for the connected monitors
        displays watch           follow monitor hotplugs (udev): restore, then `dotfiles apply --layout`
@@ -9,13 +10,19 @@ usage: displays                 menu: resolution, refresh rate, scale, position,
        displays preset MODE [OUTPUT]
                                 internal | mirror OUTPUT | extend OUTPUT | external OUTPUT (Super+p)
 
-Per-monitor scale (dotfiles.conf: scale = auto). X11 has one DPI for the whole screen, so the desktop
-is drawn for the densest monitor (Xft.dpi, pixel-sharp there), and every other monitor gets a
-larger area of the screen that the GPU scales down to its panel (xrandr --scale, like GNOME on
-X11). A window has the same physical size on every monitor; the scaled-down ones are a little
-softer. A monitor's scale is its pixel density (resolution and physical size from the EDID) divided
-by dotfiles.conf `auto_dpi`, or chosen in the menu. With a fixed `scale = 1.5` in dotfiles.conf
-every monitor uses that, without scaling.
+Scale (dotfiles.conf: scale = auto). The primary monitor sets it: its pixel density (resolution
+and physical size from the EDID) divided by dotfiles.conf `auto_dpi`, in steps of 0.25, is the
+desktop scale (Xft.dpi, pixel-sharp there), or the scale chosen for it in the menu. X11 has one
+DPI for the whole screen, so every other monitor gets an area of the screen that the GPU scales
+to its panel by the ratio of the densities (xrandr --scale): a window has the same physical size
+on every monitor. A monitor of the same density is never scaled.
+
+Scaling needs a driver that does it without tearing: TearFree (amdgpu, radeon). It is switched on
+for every monitor while one is scaled (Xorg then draws the pointer in software, which turns page
+flips off: without TearFree the other monitors would tear) and back to the driver's auto after.
+The modesetting driver (Intel, AMD without xf86-video-amdgpu, nouveau) and NVIDIA's copy a scaled
+picture out of step with the monitor (tearing, a flickering pointer): there every monitor shows
+the desktop 1:1. With a fixed `scale = 1.5` in dotfiles.conf every monitor uses that, unscaled.
 
 Layouts are remembered per set of connected monitors (output name + EDID) in
 $XDG_STATE_HOME/dotfiles/displays.json. Every change in the menu that could leave a screen dark
@@ -43,11 +50,13 @@ ROTATIONS = ["normal", "left", "right", "inverted"]
 SCALES = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0]
 INTERNAL_RE = re.compile(r"(eDP|LVDS|DSI)")
 
-# Automatic scale: one pixel density for every monitor (dotfiles.conf `auto_dpi`), so a window
-# has the same physical size on each of them. Monitors are scaled down by the exact ratio of
-# their densities; the desktop scale (the densest monitor / auto_dpi) goes in steps of 0.25.
-AUTO_DPI = 125
+# Automatic scale: the primary monitor's density / dotfiles.conf `auto_dpi` (steps of 0.25) is
+# the desktop scale; the other monitors are scaled by the exact ratio of the densities.
+AUTO_DPI = 175              # dotfiles.conf `auto_dpi` when it is missing (scripts/dotfiles: the same)
 FB_SNAP = 0.05              # densities closer than 5 %: no scaling (it would only blur)
+FB_MIN, FB_MAX = 0.5, 2.5   # beyond that a scaled picture is only blurred, no longer readable
+TV_MM = 600                 # taller panels are TVs and projectors, seen from afar: size unknown
+ALIGN_STEP_MM = 10          # "Move up" & co. in the alignment menu: 1 cm
 
 # Nerd Font md-* glyphs (verified against JetBrainsMono Nerd Font)
 I_LAPTOP, I_MONITOR, I_OFF = "\U000F0322", "\U000F0379", "\U000F0D90"
@@ -55,6 +64,10 @@ I_RES, I_RATE, I_POS = "\U000F0A24", "\U000F04C5", "\U000F004C"
 I_ROTATE, I_PRIMARY, I_BACK = "\U000F0475", "\U000F04CE", "\U000F004D"
 I_KEEP, I_REVERT, I_DETECT = "\U000F012C", "\U000F054C", "\U000F0450"
 I_MIRROR, I_SCALE = "\U000F0191", "\U000F18F4"
+I_ALIGN = "\U000F11C6"                                            # md-align_vertical_center
+I_TOP, I_VCENTER, I_BOTTOM = "\U000F11C7", "\U000F11C6", "\U000F11C5"   # md-align_vertical_*
+I_LEFT, I_HCENTER, I_RIGHT = "\U000F11C2", "\U000F11C3", "\U000F11C4"   # md-align_horizontal_*
+I_UP, I_DOWN, I_TO_LEFT, I_TO_RIGHT = "\U000F005D", "\U000F0045", "\U000F004D", "\U000F0054"  # md-arrow_*
 
 # "eDP connected primary 1920x1080+0+0 (0x57) normal (normal left inverted right x axis y axis) 309mm x 174mm"
 HEAD_RE = re.compile(r"^(\S+) (connected|disconnected)( primary)?(?: (\d+)x(\d+)\+(-?\d+)\+(-?\d+))?"
@@ -95,7 +108,8 @@ def outputs(probe=False):
             cur = {"name": name, "connected": m.group(2) == "connected", "primary": bool(m.group(3)),
                    "active": m.group(4) is not None, "rotate": m.group(8) or "normal",
                    "mm": (int(mm.group(1)), int(mm.group(2))) if mm else (0, 0),
-                   "modes": [], "edid": "", "mode": None, "rate": None, "fb": (1.0, 1.0)}
+                   "modes": [], "edid": "", "mode": None, "rate": None, "fb": (1.0, 1.0),
+                   "tearfree": None}
             if cur["active"]:
                 cur["geom"] = [int(m.group(i)) for i in (4, 5, 6, 7)]
             outs[name] = cur
@@ -112,6 +126,11 @@ def outputs(probe=False):
             edid = None
         if s == "EDID:":
             edid = []
+            continue
+        # "TearFree: auto" (amdgpu, radeon): the driver can scale without tearing
+        mt = re.match(r"^TearFree:\s*(off|on|auto)\b", s)
+        if mt:
+            cur["tearfree"] = mt.group(1)
             continue
         # "Transform:  1.500000 0.000000 0.000000" then "0.000000 1.500000 0.000000": the scale
         if s.startswith("Transform:"):
@@ -198,9 +217,14 @@ def auto_dpi():
 # x/y are screen coordinates; "fb" is the factor by which the monitor's area of the screen is
 # larger than its panel (derived by fit(), applied with xrandr --scale).
 
+def rotated(mode, rotate):
+    """(w, h) of a mode name as the monitor shows it."""
+    w, h = (int(v) for v in re.match(r"(\d+)x(\d+)", mode).groups())
+    return (h, w) if rotate in ("left", "right") else (w, h)
+
+
 def mode_size(e):
-    w, h = (int(v) for v in re.match(r"(\d+)x(\d+)", e["mode"]).groups())
-    return (h, w) if e["rotate"] in ("left", "right") else (w, h)
+    return rotated(e["mode"], e["rotate"])
 
 
 def size(e):
@@ -209,58 +233,107 @@ def size(e):
     return round(w * e.get("fb", 1.0)), round(h * e.get("fb", 1.0))
 
 
-def auto_scale(o, e):
-    """(scale, dpi) of this monitor from the mode's pixels and the panel's millimetres; not
-    rounded, so monitors side by side keep the exact ratio. (None, 0) if the size is unknown."""
+def dpi_of(o, e):
+    """Pixel density of the monitor at the layout's mode, from the size it reports; 0 if unknown.
+    Projectors and some TVs report nothing or a few cm, and a TV is seen from afar: unknown too."""
     mw, mh = o["mm"]
-    if max(mw, mh) < 150:           # projectors and some TVs report nonsense (0, or a few cm)
-        return None, 0
+    if max(mw, mh) < 150 or min(mw, mh) > TV_MM:
+        return 0
     w, h = (int(v) for v in re.match(r"(\d+)x(\d+)", e["mode"]).groups())
-    dpi = max(w, h) / max(mw, mh) * 25.4
-    return min(4.0, max(0.5, dpi / auto_dpi())), round(dpi)
+    return max(w, h) / max(mw, mh) * 25.4
 
 
-def monitor_scale(o, e):
-    """The monitor's own scale: chosen in the menu, else automatic; None = unknown size."""
-    if isinstance(e.get("scale"), (int, float)) and 0.5 <= e["scale"] <= 4:
-        return float(e["scale"])
-    return auto_scale(o, e)[0]
+def natural_scale(dpi):
+    """The scale of a monitor of this density as the primary one: dpi / auto_dpi in steps of
+    0.25, from 1 to 3 (1 if its size is unknown)."""
+    if not dpi:
+        return 1.0
+    return min(3.0, max(1.0, round(dpi / auto_dpi() * 4) / 4))
 
 
-def desktop_scale(top):
-    """The scale the desktop is drawn at: the densest monitor's, in steps of 0.25, 1 to 3."""
-    return min(3.0, max(1.0, round(top * 4) / 4))
+def chosen_scale(e):
+    """The scale chosen in the menu, None for automatic."""
+    s = e.get("scale")
+    if isinstance(s, (int, float)) and not isinstance(s, bool) and 0.5 <= s <= 4:
+        return float(s)
+    return None
 
 
 def active(lay):
     return [n for n, e in lay.items() if not e.get("off")]
 
 
-def fit(lay, outs):
-    """Desktop scale = the densest monitor's; every other monitor gets fb = desktop / own.
-    Returns the desktop scale."""
+def primary_of(lay):
+    """The primary monitor; without one (yet) the laptop panel, else the first by name."""
+    on = active(lay)
+    return (next((n for n in on if lay[n].get("primary")), None)
+            or next((n for n in sorted(on) if INTERNAL_RE.match(n)), None)
+            or (sorted(on)[0] if on else None))
+
+
+def tear_free(outs, names):
+    """True if the driver can scale these monitors without tearing: every one of them has the
+    RandR property TearFree (amdgpu, radeon)."""
+    return bool(names) and all(outs[n].get("tearfree") is not None for n in names)
+
+
+def plan(lay, outs):
+    """(desktop scale, {monitor: own scale}, monitors may be scaled). The own scale is how large
+    things are drawn on a monitor: the primary's is the desktop scale, the others' give a window
+    the same physical size as on the primary (or it was chosen in the menu)."""
     on = active(lay)
     fixed = fixed_scale()
     if not on:
-        return fixed or 1.0
-    want = {n: monitor_scale(outs[n], lay[n]) for n in on}
-    known = [w for w in want.values() if w]
-    top = max(known) if known else 1.0
-    desk = fixed or desktop_scale(top)
+        return fixed or 1.0, {}, False
+    p = primary_of(lay)
+    dp = dpi_of(outs[p], lay[p])
+    desk = fixed or chosen_scale(lay[p]) or natural_scale(dp)
+    own = {}
     for n in on:
-        # the densest monitor shows the desktop 1:1, the others by the ratio of the densities;
-        # a monitor of unknown size like the densest one
-        fb = 1.0 if fixed or not want[n] else top / want[n]
+        d = dpi_of(outs[n], lay[n])
+        if fixed or n == p:
+            own[n] = desk
+        else:
+            own[n] = chosen_scale(lay[n]) or (desk * d / dp if d and dp else desk)
+    return desk, own, fixed is None and len(on) > 1 and tear_free(outs, on)
+
+
+def fit(lay, outs):
+    """Every monitor's factor "fb": desktop scale / its own scale where the driver scales without
+    tearing, else 1 (each monitor shows the desktop 1:1). Returns the desktop scale."""
+    desk, own, free = plan(lay, outs)
+    on = active(lay)
+    for n in on:
+        fb = min(FB_MAX, max(FB_MIN, desk / own[n])) if free else 1.0
         lay[n]["fb"] = 1.0 if abs(fb - 1) < FB_SNAP else round(fb, 4)
-    # a mirror shows exactly the area of the monitor it copies
+    # a mirror shows exactly the area of the monitor it copies: at the target's resolution if it
+    # has it (nothing to scale), else scaled to it
     for n in on:
         t = lay[n].get("same_as")
-        if t in on and not lay[t].get("same_as"):
-            tw = size(lay[t])[0]
+        if t in on and t != n and not lay[t].get("same_as"):
+            tw, th = size(lay[t])
+            if mode_size(lay[n]) != (tw, th):
+                m = next((m for m, _ in mode_names(outs[n]) if rotated(m, lay[n]["rotate"]) == (tw, th)), None)
+                if m:
+                    lay[n]["mode"], lay[n]["rate"] = m, None
             lay[n]["fb"] = round(tw / mode_size(lay[n])[0], 4)
         else:
             lay[n]["same_as"] = None
     return desk
+
+
+def scaled(lay):
+    """True if a monitor of the layout is scaled (a transform: software pointer, no page flips)."""
+    return any(abs(lay[n].get("fb", 1.0) - 1) > 0.001 for n in active(lay))
+
+
+def tearfree_want(lay, outs):
+    """TearFree per monitor: on for all of them while one is scaled. Xorg then draws the pointer
+    in software, which turns page flips off, and the compositor's vsync can only follow one
+    monitor: without TearFree the others would tear. Otherwise the driver's auto (page flips,
+    the shortest delay)."""
+    want = "on" if scaled(lay) else "auto"
+    return {n: want for n in active(lay) if outs.get(n, {}).get("tearfree") is not None}
 
 
 def geometry(lay):
@@ -338,6 +411,15 @@ def place(lay, old):
     return lay
 
 
+def fix_primary(lay):
+    """Exactly one primary monitor (the scale and the bar follow it)."""
+    on = active(lay)
+    if on and sum(1 for n in on if lay[n].get("primary")) != 1:
+        keep = primary_of(lay)
+        for n in on:
+            lay[n]["primary"] = n == keep
+
+
 def normalize(lay):
     on = active(lay)
     if not on:
@@ -347,11 +429,7 @@ def normalize(lay):
     for n in on:
         lay[n]["x"] -= dx
         lay[n]["y"] -= dy
-    if sum(1 for n in on if lay[n].get("primary")) != 1:
-        keep = next((n for n in on if lay[n].get("primary")), None)
-        keep = keep or next((n for n in on if INTERNAL_RE.match(n)), on[0])
-        for n in on:
-            lay[n]["primary"] = n == keep
+    fix_primary(lay)
     for e in lay.values():
         if e.get("off"):
             e.clear()
@@ -364,6 +442,7 @@ def finalize(lay, outs, old):
     for n in active(lay):
         lay[n].setdefault("x", 0)
         lay[n].setdefault("y", 0)
+    fix_primary(lay)
     desk = fit(lay, outs)
     place(lay, old)
     normalize(lay)
@@ -399,6 +478,7 @@ def current_layout(outs, saved=None):
 
 def xrandr_args(lay, outs):
     args = []
+    tf = tearfree_want(lay, outs)
     for n, o in outs.items():
         e = lay.get(n)
         if e is None or e.get("off"):
@@ -420,6 +500,9 @@ def xrandr_args(lay, outs):
             args += ["--scale", "%.4fx%.4f" % (fb, fb), "--filter", "bilinear"]
         else:
             args += ["--scale", "1x1", "--filter", "nearest"]
+        if n in tf:
+            # always given: the driver ignores a value it has already
+            args += ["--set", "TearFree", tf[n]]
         if e.get("primary"):
             args += ["--primary"]
     return args
@@ -484,6 +567,7 @@ def extend(outs, cur):
                  "same_as": None}
         e["same_as"] = None
         lay[n] = e
+    fix_primary(lay)
     fit(lay, outs)
     x = 0
     for n in lay:
@@ -508,7 +592,8 @@ def restore(probe=False):
     else:
         lay, what = extend(outs, cur), "extended"
     stale = any(o["active"] and not o["connected"] for o in outs.values())
-    if same(lay, cur) and not stale:
+    tearfree = all(outs[n].get("tearfree") == w for n, w in tearfree_want(lay, outs).items())
+    if same(lay, cur) and not stale and tearfree:
         return None
     apply_layout(lay, outs)
     return what
@@ -593,24 +678,40 @@ def scale_report():
     on = active(lay)
     if not on:
         return 1.0, "no active monitor"
+    fix_primary(lay)
     desk = fit(lay, outs)
+    p = primary_of(lay)
     parts = []
-    for n in sorted(on, key=lambda n: -(monitor_scale(outs[n], lay[n]) or 0)):
-        s = monitor_scale(outs[n], lay[n])
-        dpi = auto_scale(outs[n], lay[n])[1]
-        how = "chosen" if lay[n].get("scale") is not None else ("%d dpi" % dpi if dpi else "size unknown")
-        fb = lay[n].get("fb", 1.0)
-        parts.append("%s %s (%s%s)" % (n, fmt(s), how, ", scaled down %s x" % fmt(fb) if fb > 1 else ""))
+    for n in [p] + sorted(m for m in on if m != p):
+        dpi = dpi_of(outs[n], lay[n])
+        bits = ["%d dpi" % round(dpi) if dpi else "size unknown"]
+        if n == p:
+            bits.append("primary")
+        if chosen_scale(lay[n]) is not None:
+            bits.append("scale %s chosen" % fmt(chosen_scale(lay[n])))
+        bits.append(scaling_text(lay[n], "x"))
+        parts.append("%s (%s)" % (n, ", ".join(b for b in bits if b)))
+    if len(on) > 1 and not plan(lay, outs)[2] and fixed_scale() is None:
+        parts.append("no TearFree driver, every monitor 1 to 1")
     return desk, ", ".join(parts)
+
+
+def scaling_text(e, times="\u00d7"):
+    """"scaled down 1.5\u00d7" for a monitor with a transform (not for a mirror), else ""."""
+    fb = e.get("fb", 1.0)
+    if e.get("same_as") or abs(fb - 1) <= 0.001:
+        return ""
+    return "scaled down %s%s" % (fmt(fb), times) if fb > 1 else "scaled up %s%s" % (fmt(1 / fb), times)
 
 
 # ── menu ───────────────────────────────────────────────────────────────────────
 
-def menu(rows, prompt="display", mesg="", timeout=None):
-    """Index of the chosen row, or None."""
+def menu(rows, prompt="display", mesg="", timeout=None, selected=0):
+    """Index of the chosen row, or None. `selected`: the row the menu starts on."""
     cmd = (["timeout", str(timeout)] if timeout else []) + [ROFI_MENU, prompt, mesg]
+    env = dict(os.environ, ROFI_MENU_SELECTED=str(selected)) if selected else None
     try:
-        r = subprocess.run(cmd, input="\n".join(rows) + "\n", capture_output=True, text=True)
+        r = subprocess.run(cmd, input="\n".join(rows) + "\n", capture_output=True, text=True, env=env)
     except OSError:
         return None
     s = r.stdout.strip()
@@ -646,9 +747,9 @@ def describe(n, lay, outs):
     parts = [e["mode"].replace("x", "\u00d7")]
     if e.get("rate"):
         parts.append("%s Hz" % fmt(float(e["rate"])))
-    parts.append("scale %s" % fmt(monitor_scale(outs[n], e)))
-    if e.get("fb", 1.0) > 1 and not e.get("same_as"):
-        parts.append("scaled down %s\u00d7" % fmt(e["fb"]))
+    sc = scaling_text(e)
+    if e.get("primary") or sc or chosen_scale(e) is not None:
+        parts.append(sc or "scale %s" % fmt(plan(lay, outs)[0] if e.get("primary") else chosen_scale(e)))
     if e["rotate"] != "normal":
         parts.append("rotated %s" % e["rotate"])
     rel = where(n, lay)
@@ -657,6 +758,128 @@ def describe(n, lay, outs):
     if e.get("primary"):
         parts.append("primary")
     return "  \u00b7  ".join(parts)
+
+
+def scale_mesg(lay, outs):
+    """What the scale is and where it comes from (the main menu's message)."""
+    fixed = fixed_scale()
+    if fixed:
+        return "desktop scale %s (dotfiles.conf), the same on every monitor" % fmt(fixed)
+    lay = {n: dict(e) for n, e in lay.items()}
+    fix_primary(lay)
+    desk, _, free = plan(lay, outs)
+    p = primary_of(lay)
+    if p is None:
+        return "no monitor on"
+    text = "desktop scale %s from the primary monitor %s" % (fmt(desk), p)
+    if len(active(lay)) < 2:
+        return text
+    if free:
+        return text + "; the others are scaled to the same size"
+    return (text + "; the others show it 1:1 (the same size on every monitor needs a driver with "
+            "TearFree: AMD xf86-video-amdgpu)")
+
+
+def scale_text(name, lay, outs, auto_only=False):
+    """The scale row: chosen, or what automatic means for this monitor."""
+    e = lay[name]
+    if chosen_scale(e) is not None and not auto_only:
+        return "%s (chosen)" % fmt(chosen_scale(e))
+    lay = {n: dict(f) for n, f in lay.items()}
+    fix_primary(lay)
+    desk, own, free = plan(lay, outs)
+    dpi = dpi_of(outs[name], e)
+    dpi_s = "%d dpi" % round(dpi) if dpi else "size unknown"
+    p = primary_of(lay)
+    if name == p or fixed_scale():
+        return "%s, %s" % (fmt(desk), dpi_s) if auto_only else "auto (%s, %s)" % (fmt(desk), dpi_s)
+    how = "same size as on %s" % p if free else "1:1, no TearFree"
+    return how if auto_only else "auto (%s)" % how
+
+
+# ── alignment ──────────────────────────────────────────────────────────────────
+
+def neighbour(name, lay):
+    """(monitor, side) that `name` sits next to (the primary first), or (None, None)."""
+    g = geometry(lay)
+    if name not in g or lay[name].get("same_as"):
+        return None, None
+    for m in sorted((m for m in g if m != name and not lay[m].get("same_as")),
+                    key=lambda m: (not lay[m].get("primary"), m)):
+        rel = relation(g[name], g[m])
+        if rel and rel[0] != "same":
+            return m, rel[0]
+    return None, None
+
+
+def step_px(name, lay, outs):
+    """1 cm on this monitor in screen px (1/20 of it if its size is unknown)."""
+    w, h = size(lay[name])
+    mw, mh = outs[name]["mm"]
+    if max(mw, mh) >= 150:
+        return max(1, round(max(w, h) / max(mw, mh) * ALIGN_STEP_MM))
+    return max(1, min(w, h) // 20)
+
+
+def align_targets(name, lay, outs):
+    """For the alignment menu: (axis "x"|"y", [(icon, label, value)], low, high, neighbour)."""
+    m, side = neighbour(name, lay)
+    g = geometry(lay)
+    bx, by, bw, bh = g[name]
+    ax, ay, aw, ah = g[m]
+    step = step_px(name, lay, outs)
+    if side in ("left", "right"):
+        rows = [(I_TOP, "Top edges level", ay), (I_VCENTER, "Centers level", ay + (ah - bh) // 2),
+                (I_BOTTOM, "Bottom edges level", ay + ah - bh),
+                (I_UP, "Move up 1 cm", by - step), (I_DOWN, "Move down 1 cm", by + step)]
+        return "y", rows, ay - bh + step, ay + ah - step, m
+    rows = [(I_LEFT, "Left edges level", ax), (I_HCENTER, "Centers level", ax + (aw - bw) // 2),
+            (I_RIGHT, "Right edges level", ax + aw - bw),
+            (I_TO_LEFT, "Move left 1 cm", bx - step), (I_TO_RIGHT, "Move right 1 cm", bx + step)]
+    return "x", rows, ax - bw + step, ax + aw - step, m
+
+
+def align_text(name, lay, outs):
+    """Where a monitor sits along its neighbour's edge: "top edges level with eDP", "1.5 cm lower"."""
+    axis, rows, _, _, m = align_targets(name, lay, outs)
+    pos = lay[name][axis]
+    for _, label, v in rows[:3]:
+        if pos == v:
+            return "%s with %s" % (label.lower(), m)
+    g = geometry(lay)
+    off = (pos - g[m][1 if axis == "y" else 0]) / step_px(name, lay, outs)
+    cm = ("%.1f" % abs(off)).rstrip("0").rstrip(".")
+    if axis == "y":
+        return "%s cm %s than the top of %s" % (cm, "lower" if off > 0 else "higher", m)
+    return "%s cm %s of the left edge of %s" % (cm, "right" if off > 0 else "left", m)
+
+
+def align_menu(name, outs, lay):
+    """Line a monitor up with its neighbour (different heights): edges, centers or 1 cm steps.
+    Every choice is applied at once; the layout is saved when the menu closes."""
+    sel, moved = 0, False
+    while neighbour(name, lay)[0]:
+        axis, rows, low, high, m = align_targets(name, lay, outs)
+        i = menu(["%s  %s" % (ic, label) for ic, label, _ in rows], "alignment",
+                 esc("%s  \u00b7  %s" % (name, align_text(name, lay, outs))), selected=sel)
+        if i is None:
+            break
+        sel = i
+        new = {n: dict(f) for n, f in lay.items()}
+        new[name][axis] = min(high, max(low, rows[i][2]))
+        finalize(new, outs, geometry(new))
+        if same(new, lay):
+            continue
+        try:
+            apply_layout(new, outs)
+        except RuntimeError as e:
+            notify("Display", str(e), "critical")
+            break
+        lay, moved = new, True
+    if moved:
+        save(lay, outs)
+        refresh()
+    return lay
 
 
 def icon(n, e):
@@ -699,16 +922,17 @@ def output_menu(name, outs, lay):
         others = [n for n in active(lay) if n != name]
         rows, acts = [], []
         if on:
-            auto = auto_scale(o, e)[0]
-            sc = "%s (chosen)" % fmt(e["scale"]) if e.get("scale") is not None else "auto (%s)" % fmt(auto)
             rows += ["%s  Resolution    %s" % (I_RES, e["mode"].replace("x", "\u00d7")),
                      "%s  Refresh rate  %s" % (I_RATE, ("%s Hz" % fmt(float(e["rate"]))) if e.get("rate") else "auto"),
-                     "%s  Scale         %s" % (I_SCALE, sc),
+                     "%s  Scale         %s" % (I_SCALE, scale_text(name, lay, outs)),
                      "%s  Rotation      %s" % (I_ROTATE, e["rotate"])]
             acts += ["mode", "rate", "scale", "rotate"]
             if others:
                 rows.append("%s  Position      %s" % (I_POS, where(name, lay) or "%d, %d" % (e["x"], e["y"])))
                 acts.append("pos")
+                if neighbour(name, lay)[0]:
+                    rows.append("%s  Alignment     %s" % (I_ALIGN, align_text(name, lay, outs)))
+                    acts.append("align")
             if not e.get("primary"):
                 rows.append("%s  Make primary  (bar)" % I_PRIMARY)
                 acts.append("primary")
@@ -724,6 +948,10 @@ def output_menu(name, outs, lay):
         if i is None or acts[i] == "back":
             return lay
         act = acts[i]
+        if act == "align":
+            lay = align_menu(name, outs, lay)
+            outs = outputs()
+            continue
         old = geometry(lay)
         new = {n: dict(f) for n, f in lay.items()}
         confirm = True
@@ -744,10 +972,12 @@ def output_menu(name, outs, lay):
                 continue
             new[name]["rate"] = rs[j]
         elif act == "scale":
-            auto = auto_scale(o, e)
-            rows2 = ["auto  (%s, %s)" % (fmt(auto[0]), "%d dpi" % auto[1] if auto[1] else "size unknown")]
+            auto = dict(e, scale=None)
+            rows2 = ["auto  (%s)" % scale_text(name, {**lay, name: auto}, outs, auto_only=True)]
             rows2 += [fmt(s) for s in SCALES]
-            j = menu(rows2, "scale", esc("%s  \u00b7  how large things look on this monitor" % name))
+            what = ("the desktop scale (primary monitor)" if e.get("primary") else
+                    "how large things look on this monitor")
+            j = menu(rows2, "scale", esc("%s  \u00b7  %s" % (name, what)))
             if j is None:
                 continue
             new[name]["scale"] = None if j == 0 else SCALES[j - 1]
@@ -805,11 +1035,7 @@ def main_menu():
         names = sorted(lay, key=lambda n: (not INTERNAL_RE.match(n), n))
         rows = ["%s  %s   %s" % (icon(n, lay[n]), n, describe(n, lay, outs)) for n in names]
         rows.append("%s  Detect monitors" % I_DETECT)
-        desk = fit({n: dict(e) for n, e in lay.items()}, outs)
-        fixed = fixed_scale()
-        mesg = ("desktop scale %s (dotfiles.conf), the same on every monitor" % fmt(fixed) if fixed else
-                "desktop drawn at scale %s, monitors with a smaller scale are scaled down to it" % fmt(desk))
-        i = menu(rows, "displays", esc(mesg))
+        i = menu(rows, "displays", esc(scale_mesg(lay, outs)))
         if i is None:
             return 0
         if i == len(names):
@@ -823,8 +1049,13 @@ def main_menu():
 # ── hotplug ────────────────────────────────────────────────────────────────────
 
 def runtime_dir():
+    """$XDG_RUNTIME_DIR if it is ours and private, else ~/.cache/displays (never /tmp)."""
     d = os.environ.get("XDG_RUNTIME_DIR", "")
-    if d and os.path.isdir(d) and os.stat(d).st_uid == os.getuid():
+    try:
+        st = os.stat(d) if d else None
+    except OSError:
+        st = None
+    if st is not None and os.path.isdir(d) and st.st_uid == os.getuid() and not st.st_mode & 0o077:
         return d
     d = os.path.expanduser("~/.cache/displays")
     os.makedirs(d, mode=0o700, exist_ok=True)

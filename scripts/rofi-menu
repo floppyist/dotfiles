@@ -9,6 +9,7 @@
 # (with -format i, rofi would otherwise print an index outside the list).
 # Rows are not parsed as markup, so untrusted text (SSIDs, device names) is shown as-is.
 # MESSAGE is pango markup (rofi's -mesg): callers escape untrusted text in it (& < >).
+# ROFI_MENU_SELECTED=N starts on row N (menus that open again after each choice).
 set -u
 
 THEME="${ROFI_THEME:-$HOME/.config/rofi/config.rasi}"
@@ -20,6 +21,8 @@ mapfile -t LINES
 
 args=(-dmenu -i -no-custom -format i -p "$prompt" -theme "$THEME")
 [[ -n "$mesg" ]] && args+=(-mesg "$mesg")
+sel=${ROFI_MENU_SELECTED:-}
+[[ "$sel" =~ ^[0-9]{1,4}$ ]] && (( 10#$sel < ${#LINES[@]} )) && args+=(-selected-row "$((10#$sel))")
 
 idx=$(printf '%s\n' "${LINES[@]}" | rofi "${args[@]}") || exit 1
 [[ "$idx" =~ ^[0-9]+$ ]] && (( idx < ${#LINES[@]} )) || exit 1

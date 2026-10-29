@@ -151,7 +151,7 @@ detect() {
     IFS=: read -r _ _ _ _ _ _ LOGIN_SHELL < <(getent passwd "$USER_NAME" 2>/dev/null)
 
     # Graphics: PCI display controllers (class 0x03xxxx). lspci (pciutils) only for the names.
-    GPU_INTEL=0 GPU_AMD=0 GPU_NVIDIA=0 GPU_VM=0 GPU_NAMES=()
+    GPU_INTEL=0 GPU_AMD=0 GPU_AMDGPU=0 GPU_RADEON=0 GPU_NVIDIA=0 GPU_VM=0 GPU_NAMES=()
     for d in /sys/bus/pci/devices/*; do
         read -r class < "$d/class" 2>/dev/null || continue
         [[ $class == 0x03* ]] || continue
@@ -159,7 +159,9 @@ detect() {
         drv=""; [[ -e $d/driver ]] && { l=$(readlink "$d/driver"); drv=${l##*/}; }
         case $vendor in
             0x8086) GPU_INTEL=1;  name=Intel ;;
-            0x1002) GPU_AMD=1;    name=AMD ;;
+            0x1002) GPU_AMD=1;    name=AMD
+                    # old cards (GCN 1 and before) run on the kernel driver radeon
+                    if [[ $drv == radeon ]]; then GPU_RADEON=1; else GPU_AMDGPU=1; fi ;;
             0x10de) GPU_NVIDIA=1; name=NVIDIA ;;
             0x1af4|0x15ad|0x1b36|0x80ee|0x1234) GPU_VM=1; name="virtual GPU" ;;
             *) name="GPU $vendor" ;;

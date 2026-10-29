@@ -865,7 +865,12 @@ log_drain() {
 log_line() {
     local l
     case $1 in
-        "@@progress "*) l=${1#@@progress }; CUR_DONE=${l% *} CUR_TOTAL=${l#* } ;;
+        "@@progress "*)
+            # numbers only: the values go into arithmetic, and any program of a step could
+            # print such a line
+            l=${1#@@progress }
+            [[ $l =~ ^([0-9]{1,9})\ ([0-9]{1,9})$ ]] &&
+                CUR_DONE=$(( 10#${BASH_REMATCH[1]} )) CUR_TOTAL=$(( 10#${BASH_REMATCH[2]} )) ;;
         "@@detail "*)   ST_INFO[CUR]=${1#@@detail } ;;
         "@@note "*)     NOTES+=("${1#@@note }") ;;
         "@@warn "*)     WARNINGS+=("${1#@@warn }") ;;

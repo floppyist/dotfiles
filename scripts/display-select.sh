@@ -16,11 +16,20 @@ notify() { notify-send -a display "$@" >/dev/null 2>&1; }
 
 command -v rofi >/dev/null || { notify -u critical "Display" "rofi not found"; exit 1; }
 
-# Internal panel: first eDP/LVDS output (override with INTERNAL=...)
-INTERNAL="${INTERNAL:-$(xrandr | awk '/^(eDP|LVDS)/ {print $1; exit}')}"
-[[ -n "$INTERNAL" ]] || { notify -u critical "Display" "No internal panel found (set INTERNAL=...)"; exit 1; }
+# Connected outputs (one probe); the internal panel is the first eDP/LVDS/DSI one (override with
+# INTERNAL=...). Without one (a desktop PC) there is no "PC screen": the arrange menu instead.
+mapfile -t CONNECTED < <(xrandr | awk '$2 == "connected" {print $1}')
+if [[ -z "${INTERNAL:-}" ]]; then
+    for o in "${CONNECTED[@]}"; do
+        [[ "$o" =~ ^(eDP|LVDS|DSI) ]] && { INTERNAL=$o; break; }
+    done
+fi
+[[ -n "${INTERNAL:-}" ]] || exec "$DISPLAYS"
 
-mapfile -t EXTERNALS < <(xrandr | awk -v internal="$INTERNAL" '$2 == "connected" && $1 != internal {print $1}')
+EXTERNALS=()
+for o in "${CONNECTED[@]}"; do
+    [[ "$o" != "$INTERNAL" ]] && EXTERNALS+=("$o")
+done
 
 # Nothing to choose between: the arrange menu still sets resolution and rotation
 (( ${#EXTERNALS[@]} == 0 )) && exec "$DISPLAYS"

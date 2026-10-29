@@ -123,11 +123,10 @@ links_run() {
     local rel src dst name dir
     LINKS_TODO=0 LINKS_BACKUPS=()
 
-    # ~/.config/<name>/<file>. config/udev and config/xorg belong to /etc (the laptop and the
-    # graphics module install them).
+    # ~/.config/<name>/<file>. config/udev belongs to /etc (the laptop module installs it).
     while IFS= read -r -d '' rel; do
         [[ -f "$DOTFILES/$rel" ]] || continue   # deleted, but not committed yet
-        [[ "$rel" == config/udev/* || "$rel" == config/xorg/* ]] && continue
+        [[ "$rel" == config/udev/* ]] && continue
         link "$DOTFILES/$rel" "$CONFIG/${rel#config/}" || return 1
     done < <(config_files | sort -z)
 
