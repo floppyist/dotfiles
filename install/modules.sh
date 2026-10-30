@@ -10,13 +10,13 @@ M_TITLE[core]="Desktop"
 M_REQ[core]=1
 M_DESC[core]="The desktop itself: i3, Polybar, Rofi, Dunst, picom, Alacritty, the lock screen and the \
 screensaver, the shell (bash, fzf, tmux), the GTK theme, the mouse cursor and the JetBrainsMono Nerd \
-Font. Links every file of this repository into place and generates the theme from dotfiles.conf."
+Font. Turns mouse acceleration off (flat profile). Links every file of this repository into place and generates the theme from dotfiles.conf."
 M_PKGS[core]="xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap
  i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot
  xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome
  python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme
  fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash"
-M_STEPS[core]="font services shell links theme"
+M_STEPS[core]="font services pointer shell links theme"
 
 M_TITLE[system]="System update"
 M_DESC[system]="Updates xbps and every installed package before anything new is installed. Void is a \

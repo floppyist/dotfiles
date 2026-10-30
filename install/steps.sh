@@ -4,11 +4,12 @@
 #                          returns 1 if there is nothing to do; MODULE limits it to one module
 #   run_<step>            does it; runs in the background, output in the log (lib.sh protocol)
 
-STEP_ORDER=(update packages font services swcursor backlight alsa shell links firefox mail mpris theme nvim autostart network)
+STEP_ORDER=(update packages font services swcursor pointer backlight alsa shell links firefox mail mpris theme nvim autostart network)
 
 declare -A STEP_TITLE=(
     [update]="System update"  [packages]="Packages"        [font]="Font"
-    [services]="Services"     [swcursor]="Mouse pointer"   [backlight]="Backlight"
+    [services]="Services"     [swcursor]="Mouse pointer"   [pointer]="Mouse acceleration"
+    [backlight]="Backlight"
     [alsa]="ALSA to PipeWire" [shell]="Login shell"        [links]="Links"
     [firefox]="Firefox"       [mail]="neomutt"             [mpris]="mpv MPRIS"
     [theme]="Theme"           [nvim]="Neovim plugins"      [autostart]="Start X on login"
@@ -16,10 +17,10 @@ declare -A STEP_TITLE=(
 )
 # share of the whole installation, for the progress bar
 declare -A STEP_WEIGHT=(
-    [update]=12 [packages]=40 [font]=4 [services]=1 [swcursor]=1 [backlight]=1 [alsa]=1
+    [update]=12 [packages]=40 [font]=4 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1
     [shell]=1 [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [autostart]=1 [network]=3
 )
-declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 )
+declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 )
 
 plan_step() {
     PLAN=()
@@ -179,6 +180,27 @@ run_swcursor() {
     as_root rm -f -- "$SWCURSOR_CONF" || return 1
     say "removed $SWCURSOR_CONF"
     note "Mouse pointer: log in again, the graphics card draws it again (no more flickering)."
+}
+
+# ── Mouse acceleration (core) ─────────────────────────────────────────────────────
+
+# xinput set-prop does not survive a restart of X: an Xorg InputClass sets the libinput options
+# for every mouse (also those plugged in later). Touchpads are left alone.
+POINTER_SRC=$DOTFILES/config/xorg/40-dotfiles-pointer.conf
+POINTER_CONF=$SYSROOT/etc/X11/xorg.conf.d/40-dotfiles-pointer.conf
+
+plan_pointer() {
+    PLAN=()
+    [[ -z ${1-} || $1 == core ]] || return 1
+    cmp -s "$POINTER_SRC" "$POINTER_CONF" && return 1
+    PLAN=("Xorg config ${POINTER_CONF#"$SYSROOT"}: mice without acceleration (flat profile, speed 0)")
+}
+
+run_pointer() {
+    if cmp -s "$POINTER_SRC" "$POINTER_CONF"; then say "mouse acceleration is configured"; return 0; fi
+    as_root install -D -m644 "$POINTER_SRC" "$POINTER_CONF" || return 1
+    say "installed $POINTER_CONF"
+    note "Mouse: log in again (Xorg reads the config at its start). Until then: xinput set-prop <id> \"libinput Accel Profile Enabled\" 0 1 0"
 }
 
 # ── Backlight (laptop) ────────────────────────────────────────────────────────────

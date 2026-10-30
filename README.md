@@ -277,7 +277,7 @@ The installer installs all of it (see [Installation](#installation)), in modules
 
 | Module | Packages | It also |
 | --- | --- | --- |
-| **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind`, links the files, generates the theme |
+| **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind`, turns mouse acceleration off (Xorg config, touchpads excluded), links the files, generates the theme |
 | **System update** | | updates xbps and the whole system first |
 | **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi xf86-video-amdgpu` (`xf86-video-ati` instead on the kernel driver radeon), for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself (AMD's Xorg driver: TearFree, see [Monitors and scale](#monitors-and-scale)); removes the software pointer an earlier version installed |
 | **Audio** | `pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer` | routes ALSA programs through PipeWire |
@@ -300,6 +300,13 @@ leaves out packages and services and only sets up your home directory. Optional:
 `applications/local/`.
 
 ## Installation
+
+> [!WARNING]
+> `install.sh` has so far only been tested on **Void Linux** (glibc, runit, elogind, X11). It installs packages
+> with `xbps`, changes system files as root (`/etc`, services, the network stack) and can replace dhcpcd and
+> wpa_supplicant with NetworkManager. On other distributions only the steps in your home directory (linking the
+> files, generating the theme) work; package names and service handling are Void's. Read the plan the installer
+> shows before you confirm it, and use it at your own risk.
 
 ### 1. Get the repository
 
