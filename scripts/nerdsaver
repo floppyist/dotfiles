@@ -41,6 +41,8 @@ Environment:
   NERDSAVER_ECO=1                       halves the frame rate (battery mode)
   NERDSAVER_GLYPHS=safe|katakana|ascii  matrix glyph set (default: safe)
   NERDSAVER_COLORS=24bit|256|16         color depth of the pixel savers (default: auto-detect)
+  NERDSAVER_SCENE=NAME                  start 'music' with this scene (tunnel ridges scope sun bars terrain ribbons
+                                        kaleido fireworks), it still rotates afterwards
   NERDSAVER_AUDIO=CMD                   audio capture command for 'music' (raw s16le, 44.1 kHz, stereo)
   NERDSAVER_TRANSPARENT=1               pixel savers show the (transparent) terminal background in black areas"""
 
@@ -102,6 +104,19 @@ def c256(n, fb=WHITE):
         p = len(PAIRS) + 16
         curses.init_pair(p, n, BG)
         PAIRS[n] = p
+    return curses.color_pair(p)
+
+
+def c256bg(n, fb=WHITE):
+    # black text on a colored block
+    if curses.COLORS < 256:
+        return col(fb) | REV
+    k = ("bg", n)
+    p = PAIRS.get(k)
+    if p is None:
+        p = len(PAIRS) + 16
+        curses.init_pair(p, 16, n)
+        PAIRS[k] = p
     return curses.color_pair(p)
 
 
@@ -1781,8 +1796,10 @@ class Sorter:
     def __init__(s, scr):
         s.scr = scr
         h, w = scr.getmaxyx()
-        s.n = max(8, min(96, w // 2))
-        s.bw = max(1, w // s.n)
+        # bar slots tile the full width: edges[i]..edges[i+1] (widths differ by at most one column)
+        bw = max(2, -(-w // 96))
+        s.n = max(8, w // bw)
+        s.edges = [i * w // s.n for i in range(s.n + 1)]
         s.heat = mkpal(HEAT, GREEN)
         s.rain = mkpal(RAIN, GREEN)
         s.a_hi = c256(231, WHITE) | BOLD
@@ -2019,28 +2036,26 @@ class Sorter:
         scr = s.scr
         scr.erase()
         h, w = scr.getmaxyx()
-        n, bw = s.n, s.bw
-        off = max(0, (w - n * bw) // 2)
-        width = max(1, bw - 1) if bw > 1 else 1
+        n, ed = s.n, s.edges
+        wd = [max(1, ed[i + 1] - ed[i] - (i < n - 1)) for i in range(n)]
         if s.view == "bars":
-            gap = " " * (bw - width)
             us = [int(v / n * h * 8) for v in s.a]
             for r in range(h):
-                line = "".join(((("█" if u >= (r + 1) * 8 else SPARK[u - r * 8 - 1] if u > r * 8 else " ") * width) + gap)
-                               for u in us)
+                line = "".join(("█" if u >= (r + 1) * 8 else SPARK[u - r * 8 - 1] if u > r * 8 else " ")
+                               * wd[i] + " " * (ed[i + 1] - ed[i] - wd[i]) for i, u in enumerate(us))
                 y = h - 1 - r
                 c = pick(s.heat, r / h)
                 if s.phase == "sweep":
-                    k = min(s.pt, n) * bw
-                    put(scr, y, off, line[:k], s.a_done)
-                    put(scr, y, off + k, line[k:], c)
+                    k = ed[min(s.pt, n)]
+                    put(scr, y, 0, line[:k], s.a_done)
+                    put(scr, y, k, line[k:], c)
                 else:
-                    put(scr, y, off, line, c)
+                    put(scr, y, 0, line, c)
             for i in s.hl:
                 if 0 <= i < n:
                     full = us[i] // 8 + (1 if us[i] % 8 else 0)
                     for r in range(min(full, h)):
-                        put(scr, h - 1 - r, off + i * bw, "█" * width, s.a_hi)
+                        put(scr, h - 1 - r, ed[i], "█" * wd[i], s.a_hi)
         else:
             for i, v in enumerate(s.a):
                 y = h - 1 - int((v - 1) / max(1, n - 1) * (h - 1))
@@ -2050,7 +2065,7 @@ class Sorter:
                     a = s.a_hi
                 else:
                     a = pick(s.rain, v / (n + 1)) | BOLD
-                put(scr, y, off + i * bw, "●" * width, a)
+                put(scr, y, ed[i], "●" * wd[i], a)
 
 
 FACES = [
@@ -2500,8 +2515,9 @@ class Maze:
         scr = s.scr
         scr.erase()
         h, w = scr.getmaxyx()
-        s.cw, s.chh = max(3, (w // 2 - 1) // 2), max(3, (h - 1) // 2)
-        s.pw, s.ph = 2 * s.cw + 1, 2 * s.chh + 1
+        # cells sit at even grid positions, walls only between them: no wasted outer ring
+        s.cw, s.chh = max(3, (w // 2 + 1) // 2), max(3, (h + 1) // 2)
+        s.pw, s.ph = 2 * s.cw - 1, 2 * s.chh - 1
         s.ox, s.oy = max(0, (w - s.pw * 2) // 2), max(0, (h - s.ph) // 2)
         s.open = [[False] * s.pw for _ in range(s.ph)]
         s.total = s.cw * s.chh
@@ -2522,7 +2538,7 @@ class Maze:
     def carve(s, x0, y0, x1, y1):
         a = pick(s.pal_a, (s.shift + s.carved / s.total) % 1.0) | BOLD
         s.carved += 1
-        for px, py in (((x0 + x1) + 1, (y0 + y1) + 1), (2 * x1 + 1, 2 * y1 + 1)):
+        for px, py in ((x0 + x1, y0 + y1), (2 * x1, 2 * y1)):
             s.open[py][px] = True
             s.paint(px, py, a)
 
@@ -2530,8 +2546,8 @@ class Maze:
         cw, chh = s.cw, s.chh
         seen = [[False] * cw for _ in range(chh)]
         seen[0][0] = True
-        s.open[1][1] = True
-        s.paint(1, 1, pick(s.pal_a, s.shift) | BOLD)
+        s.open[0][0] = True
+        s.paint(0, 0, pick(s.pal_a, s.shift) | BOLD)
         stack = [(0, 0)]
         while stack:
             x, y = stack[-1]
@@ -2551,8 +2567,8 @@ class Maze:
         seen = [[False] * cw for _ in range(chh)]
         sx, sy = random.randrange(cw), random.randrange(chh)
         seen[sy][sx] = True
-        s.open[2 * sy + 1][2 * sx + 1] = True
-        s.paint(2 * sx + 1, 2 * sy + 1, pick(s.pal_a, s.shift) | BOLD)
+        s.open[2 * sy][2 * sx] = True
+        s.paint(2 * sx, 2 * sy, pick(s.pal_a, s.shift) | BOLD)
         fr = [(sx, sy, sx + dx, sy + dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
               if 0 <= sx + dx < cw and 0 <= sy + dy < chh]
         while fr:
@@ -2570,8 +2586,8 @@ class Maze:
             yield
 
     def begin_solve(s):
-        s.start_p = (1, 1)
-        s.goal = (s.pw - 2, s.ph - 2)
+        s.start_p = (0, 0)
+        s.goal = (s.pw - 1, s.ph - 1)
         s.parent = {s.start_p: None}
         s.front = [s.start_p]
         s.dist = 0
@@ -2988,102 +3004,385 @@ class Warp:
         cv.flush(scr)
 
 
+LCARS_SYS = ("DEFLECTOR", "WARP CORE", "SHIELDS", "PHASERS", "LIFE SUPP", "IMPULSE", "SENSORS", "TRANSPORT",
+             "TORPEDOES", "COMMS", "INERTIAL", "REPLICATOR")
+LCARS_DECKS = ("BRIDGE", "SCIENCE LAB", "ENGINEERING", "SICKBAY", "TEN FORWARD", "CARGO BAY 2", "SHUTTLEBAY",
+               "ASTROMETRICS", "HOLODECK 1", "TRANSPORTER 3", "ARBORETUM", "DEFLECTOR CTRL")
+LCARS_STATUS = ("NOMINAL", "NOMINAL", "NOMINAL", "ONLINE", "STANDBY", "CALIBRATING", "SCANNING", "SYNCED")
+
+
 class Lcars:
-    fps = 8
+    # LCARS console: framed by elbows and labelled blocks, filled with a random set of live panels
+    fps = 10
     LC = (208, 214, 216, 175, 141, 111, 75, 180)
+    KINDS = ("bars", "numbers", "wave", "chart", "lights", "log", "ship", "hist")
 
     def __init__(s, scr):
         s.scr = scr
         s.pal = [c256(n, YELLOW) | BOLD for n in s.LC]
+        s.blk = [c256bg(n, YELLOW) | BOLD for n in s.LC]
         s.pale = c256(231, WHITE) | BOLD
-        s.tail = (c256(250, WHITE), c256(244, WHITE) | DIM)
+        s.dim = c256(240, WHITE) | DIM
         s.line = c256(238, WHITE) | DIM
-        s.acc = 0.0
+        s.t = 0.0
+        s.sd = random.uniform(47000, 48000)
         s.layout()
 
-    def bar(s, rows, x0, x1):
-        segs = []
-        x = x0
-        while x < x1:
-            ln = min(random.choice((3, 5, 8, 12, 20, 30)), x1 - x)
-            segs.append((x, ln, random.choice(s.pal)))
-            x += ln + random.choice((1, 1, 2))
-        for y in rows:
-            for sx, ln, a in segs:
-                put(s.scr, y, sx, "█" * ln, a)
+    # ------------------------------------------------------------ frame
+    def ci(s, avoid=()):
+        return random.choice([i for i in range(len(s.LC)) if i not in avoid] or [0])
 
-    def seg_row(s, y, thin):
-        put(s.scr, y, s.x0, " " * (s.x1 - s.x0), 0)
-        ch = "▄" if thin else "█"
-        x = s.x0 + random.randint(0, 3)
-        while x < s.x1:
-            ln = min(random.choice((2, 3, 4, 6, 9, 14, 20)), s.x1 - x)
-            put(s.scr, y, x, ch * ln, random.choice(s.pal))
-            x += ln + random.choice((1, 1, 2, 3))
+    def tx(s, y, x, text, i):
+        put(s.scr, y, x, text, s.blk[i])
 
     def layout(s):
         scr = s.scr
         scr.erase()
         h, w = scr.getmaxyx()
         s.h, s.w = h, w
-        s.side = max(8, w // 7)
-        s.x0, s.x1 = s.side + 2, max(s.side + 6, w - 2)
-        top, bot = random.choice(s.pal), random.choice(s.pal)
-        ex = s.x0 + max(6, w // 10)
-        for r in range(3):
-            put(scr, r, 0, "█" * s.side, top)
-            put(scr, h - 1 - r, 0, "█" * s.side, bot)
-        for r in (0, 1):
-            put(scr, r, s.side, "█" * (ex - s.side), top)
-            put(scr, h - 1 - r, s.side, "█" * (ex - s.side), bot)
-        put(scr, 0, 0, "▗", top)
-        put(scr, h - 1, 0, "▝", bot)
-        put(scr, 2, s.side, "▛", top)
-        put(scr, h - 3, s.side, "▙", bot)
+        s.side = max(10, min(20, w // 8))
+        s.ct = s.ci()
+        s.cb = s.ci((s.ct,))
+        s.sblocks = []
         y = 4
-        while y < h - 4:
-            bh = min(random.randint(2, 5), h - 4 - y)
-            a = random.choice(s.pal)
-            for r in range(bh):
-                put(scr, y + r, 0, "█" * s.side, a)
+        last = -1
+        while y < h - 5:
+            bh = min(random.randint(2, 4), h - 5 - y)
+            if bh < 1:
+                break
+            last = i = s.ci((last,))
+            s.sblocks.append([y, bh, i, "%02d-%04d" % (random.randint(1, 99), random.randint(0, 9999))])
             y += bh + 1
-        s.bar((0, 1), ex + 2, s.x1)
-        s.bar((h - 2, h - 1), ex + 2, s.x1)
-        ys = list(range(3, h - 3, 2))
-        random.shuffle(ys)
-        s.scan = [[y, float(s.x0), 1.0] for y in ys[:2]]
-        s.rows = sorted(ys[2:])
-        s.thin = {y: random.random() < 0.4 for y in s.rows}
-        for y in s.rows:
-            s.seg_row(y, s.thin[y])
-        s.next_layout = time.monotonic() + 25
+        # top / bottom bar segments (x, width, color, text)
+        s.tsegs = s.segs(s.w - s.side - 3 - (22 if w > s.side + 60 else 0), ("LCARS  USS ENTERPRISE NCC-1701-D", None, "SECTION 7", None), s.ct)
+        s.bsegs = s.segs(s.w - s.side - 3, ("PRIMARY SYSTEMS", None, "SUBSPACE", None), s.cb)
+        # panels
+        s.x0, s.x1 = s.side + 2, w - 1
+        s.y0, s.y1 = 3, h - 3
+        pw, ph = s.x1 - s.x0, s.y1 - s.y0
+        ncol = 1 if pw < 60 else 2 if pw < 120 else 3
+        nrow = 2 if ph >= 20 else 1
+        kinds = random.sample(s.KINDS, len(s.KINDS))
+        s.panels = []
+        gap = 2
+        cwid = (pw - gap * (ncol - 1)) // ncol
+        rh = (ph - (nrow - 1)) // nrow
+        k = 0
+        for r in range(nrow):
+            for c in range(ncol):
+                x = s.x0 + c * (cwid + gap)
+                ww = cwid if c < ncol - 1 else s.x1 - x
+                y = s.y0 + r * (rh + 1)
+                hh = rh if r < nrow - 1 else s.y1 - y
+                kind = kinds[k % len(kinds)]
+                k += 1
+                if hh < 5 and kind in ("ship", "chart", "wave"):
+                    kind = "log"
+                p = {"kind": kind, "x": x, "y": y, "w": ww, "h": hh, "c": s.ci(), "st": {}}
+                s.panels.append(p)
+                getattr(s, "init_" + kind)(p)
+        s.next_layout = time.monotonic() + 45
 
+    def segs(s, width, texts, ci):
+        out = []
+        x = 0
+        texts = [t for t in texts]
+        first = texts[0]
+        out.append((x, len(first) + 4, ci, first))
+        x += len(first) + 5
+        while x < width - 6:
+            ln = min(random.choice((4, 8, 12, 20, 34)), width - x)
+            if ln < 3:
+                break
+            c = s.ci((ci,))
+            out.append((x, ln, c, random.choice(("", "", "%04d" % random.randint(0, 9999), "%02d.%d" % (random.randint(10, 99), random.randint(0, 9))))))
+            x += ln + 1
+        return out
+
+    def draw_frame(s):
+        scr = s.scr
+        h, w, side = s.h, s.w, s.side
+        t = s.ct
+        cb = s.cb
+        bt, bb = s.pal[t], s.pal[cb]
+        # sidebar blocks
+        for y, bh, i, label in s.sblocks:
+            for r in range(bh):
+                put(scr, y + r, 0, "█" * side, s.pal[i])
+            s.tx(y + bh - 1, 0, label.rjust(side - 1) + " ", i)
+        # top elbow: rounded outer corner, concave inner corner
+        curve = (3, 1, 0)
+        for r in range(3):
+            put(scr, r, curve[r], "█" * (side - curve[r]), bt)
+        put(scr, 0, 2, "▗", bt)
+        put(scr, 1, 0, "▗", bt)
+        put(scr, 3, 0, "█" * side, bt)
+        for r in range(3):
+            put(scr, h - 1 - r, curve[r], "█" * (side - curve[r]), bb)
+        put(scr, h - 3, 0, "█" * side, bb)
+        put(scr, 3, side, "▀", bt)
+        put(scr, h - 4, side, "▄", bb)
+        # top bar (2 rows) with labelled segments
+        for (x, ln, i, text) in s.tsegs:
+            xx = side + 1 + x
+            put(scr, 0, xx, "█" * ln, s.pal[i])
+            put(scr, 1, xx, "█" * ln, s.pal[i])
+            if text:
+                s.tx(1, xx + 2 if x == 0 else xx + 1, text[:ln - 2], i)
+        sd = "STARDATE %.1f" % s.sd
+        if w > side + 60:
+            put(scr, 0, w - 22, "█" * 21, bt)
+            s.tx(1, w - 22, (" " + sd).ljust(21), s.ct)
+        for (x, ln, i, text) in s.bsegs:
+            xx = side + 1 + x
+            put(scr, h - 1, xx, "█" * ln, s.pal[i])
+            put(scr, h - 2, xx, "█" * ln, s.pal[i])
+            if text:
+                s.tx(h - 2, xx + 2 if x == 0 else xx + 1, text[:ln - 2], i)
+
+    # ------------------------------------------------------------ panel chrome
+    def chrome(s, p, title):
+        x, y, w, h, c = p["x"], p["y"], p["w"], p["h"], p["c"]
+        label = " " + title + " "
+        s.tx(y, x, label[:w], c)
+        if len(label) < w:
+            put(s.scr, y, x + len(label) + 1, "▄" * (w - len(label) - 1), s.line)
+        for r in range(1, h):
+            put(s.scr, y + r, x, "▌", s.pal[c])
+        return x + 2, y + 1, w - 2, h - 1
+
+    def flush_cv(s, cv, y, x):
+        for (cx, cy), (m, a) in cv.cells.items():
+            put(s.scr, y + cy, x + cx, chr(0x2800 + m), a)
+
+    # ---- bars
+    def init_bars(s, p):
+        n = min(len(LCARS_SYS), max(1, p["h"] - 1))
+        p["st"]["names"] = random.sample(LCARS_SYS, n)
+        p["st"]["v"] = [random.uniform(0.3, 1.0) for _ in range(n)]
+        p["st"]["tv"] = list(p["st"]["v"])
+
+    def draw_bars(s, p):
+        x, y, w, h = s.chrome(p, "SYSTEMS STATUS")
+        st = p["st"]
+        nm = max(len(n) for n in st["names"])
+        bw = w - nm - 7
+        for i, name in enumerate(st["names"][:h]):
+            if random.random() < 0.03:
+                st["tv"][i] = random.uniform(0.25, 1.0)
+            st["v"][i] += (st["tv"][i] - st["v"][i]) * 0.1
+            v = st["v"][i]
+            put(s.scr, y + i, x, name.ljust(nm), s.pale if v < 0.4 else s.dim)
+            if bw > 2:
+                k = int(bw * v)
+                put(s.scr, y + i, x + nm + 1, "█" * k, s.pal[(p["c"] + i) % len(s.pal)])
+                put(s.scr, y + i, x + nm + 1 + k, "░" * (bw - k), s.line)
+            put(s.scr, y + i, x + w - 4, "%3d%%" % int(v * 100), s.pale)
+
+    # ---- numbers
+    def init_numbers(s, p):
+        cols = max(1, (p["w"] - 2) // 8)
+        p["st"]["g"] = [[random.randint(0, 99999) for _ in range(max(1, p["h"] - 1))] for _ in range(cols)]
+        p["st"]["ci"] = [s.ci() for _ in range(cols)]
+
+    def draw_numbers(s, p):
+        x, y, w, h = s.chrome(p, "DATA STREAM")
+        g = p["st"]["g"]
+        for _ in range(3):
+            c = random.choice(g)
+            c[random.randrange(len(c))] = random.randint(0, 99999)
+        for ci, col_ in enumerate(g):
+            for r, v in enumerate(col_[:h]):
+                put(s.scr, y + r, x + ci * 8, "%05d" % v, s.pale if (r + int(s.t * 3)) % 11 == 0 else s.pal[p["st"]["ci"][ci]])
+
+    # ---- braille panels
+    def cv(s, p, title):
+        x, y, w, h = s.chrome(p, title)
+        return x, y, w, h, Canvas(w, h)
+
+    def init_wave(s, p):
+        p["st"]["f"] = [(random.uniform(0.6, 2.2), random.uniform(3, 9), random.uniform(0, 6)) for _ in range(3)]
+
+    def draw_wave(s, p):
+        x, y, w, h, cv = s.cv(p, "SUBSPACE FIELD")
+        if w < 4 or h < 2:
+            return
+        for gx in range(0, cv.W, 8):
+            for gy in range(0, cv.H, 8):
+                cv.dot(gx, gy, s.line)
+        for k, (fr, sp, ph) in enumerate(p["st"]["f"]):
+            a = s.pal[(p["c"] + k * 2) % len(s.pal)]
+            prev = None
+            for X in range(0, cv.W, 2):
+                u = X / 40.0
+                Y = cv.H / 2 + math.sin(u * fr + s.t * sp * 0.4 + ph) * cv.H * 0.28 * (0.6 + 0.4 * math.sin(u * 0.4 + s.t * 0.8 + k))
+                Y += math.sin(u * fr * 3.1 + s.t * 2 + k) * cv.H * 0.06
+                if prev:
+                    cv.line(prev[0], prev[1], X, Y, a)
+                prev = (X, Y)
+        s.flush_cv(cv, y, x)
+
+    def init_chart(s, p):
+        n = 40
+        p["st"]["stars"] = [(random.random(), random.random(), random.random()) for _ in range(n)]
+        p["st"]["pts"] = [(random.uniform(0.1, 0.9), random.uniform(0.15, 0.85)) for _ in range(4)]
+        p["st"]["pos"] = 0.0
+
+    def draw_chart(s, p):
+        x, y, w, h, cv = s.cv(p, "STELLAR CARTOGRAPHY")
+        if w < 8 or h < 3:
+            return
+        W, H = cv.W, cv.H
+        for gx in range(0, W, 16):
+            cv.line(gx, 0, gx, H - 1, s.line)
+        for gy in range(0, H, 16):
+            cv.line(0, gy, W - 1, gy, s.line)
+        for fx, fy, fb in p["st"]["stars"]:
+            a = s.pale if fb > 0.8 else s.pal[int(fb * 5) % len(s.pal)]
+            X, Y = int(fx * (W - 3)), int(fy * (H - 3))
+            cv.dot(X, Y, a)
+            if fb > 0.8:
+                cv.dot(X + 1, Y, a)
+                cv.dot(X, Y + 1, a)
+        pts = [(fx * W, fy * H) for fx, fy in p["st"]["pts"]]
+        for i in range(len(pts) - 1):
+            ax, ay = pts[i]
+            bx, by = pts[i + 1]
+            n = int(max(abs(bx - ax), abs(by - ay)) // 3)
+            for k in range(n):
+                f = k / max(1, n)
+                if k % 2 == 0:
+                    cv.dot(int(ax + (bx - ax) * f), int(ay + (by - ay) * f), s.pal[p["c"]])
+        for i, (px, py) in enumerate(pts):
+            r = 5
+            for k in range(14):
+                th = k * 6.2832 / 14
+                cv.dot(int(px + r * math.cos(th)), int(py + r * math.sin(th)), s.pal[(p["c"] + 3) % len(s.pal)])
+        p["st"]["pos"] = (p["st"]["pos"] + 0.012) % (len(pts) - 1)
+        seg = int(p["st"]["pos"])
+        f = p["st"]["pos"] - seg
+        sx = pts[seg][0] + (pts[seg + 1][0] - pts[seg][0]) * f
+        sy = pts[seg][1] + (pts[seg + 1][1] - pts[seg][1]) * f
+        for dx, dy in ((-3, 0), (3, 0), (0, -3), (0, 3), (0, 0), (-2, -2), (2, 2), (-2, 2), (2, -2)):
+            cv.dot(int(sx) + dx, int(sy) + dy, s.pale)
+        s.flush_cv(cv, y, x)
+        put(s.scr, y + h - 1, x + 1, ("X %+06.1f  Y %+06.1f" % ((sx / W - 0.5) * 80, (sy / H - 0.5) * 80))[:w - 2], s.pale)
+
+    def init_lights(s, p):
+        cols = max(1, (p["w"] - 2) // 3)
+        rows = max(1, p["h"] - 1)
+        p["st"]["g"] = [[random.random() for _ in range(cols)] for _ in range(rows)]
+        p["st"]["c"] = [[s.ci() for _ in range(cols)] for _ in range(rows)]
+
+    def draw_lights(s, p):
+        x, y, w, h = s.chrome(p, "ISOLINEAR CHIPS")
+        g, cc = p["st"]["g"], p["st"]["c"]
+        for _ in range(4):
+            r = random.randrange(len(g))
+            c = random.randrange(len(g[r]))
+            g[r][c] = random.random()
+        for r, row in enumerate(g[:h]):
+            for c, v in enumerate(row):
+                a = s.pal[cc[r][c]] if v > 0.55 else s.line
+                put(s.scr, y + r, x + c * 3, "██" if v > 0.3 else "▄▄", a)
+
+    def init_log(s, p):
+        p["st"]["lines"] = deque(maxlen=max(1, p["h"] - 1))
+        p["st"]["acc"] = 0.0
+
+    def draw_log(s, p):
+        x, y, w, h = s.chrome(p, "SHIP LOG")
+        st = p["st"]
+        st["acc"] += 1.0 / s.fps * 2.0
+        while st["acc"] >= 1:
+            st["acc"] -= 1
+            t = time.localtime()
+            st["lines"].append(("%02d:%02d:%02d" % (t.tm_hour, t.tm_min, t.tm_sec) + "  " + random.choice(LCARS_DECKS).ljust(15),
+                                random.choice(LCARS_STATUS), random.choice((True, True, False))))
+        for r, (a, b, hot) in enumerate(st["lines"]):
+            put(s.scr, y + r, x, a[:w], s.pal[p["c"]])
+            put(s.scr, y + r, x + len(a), b[:max(0, w - len(a))], s.pale if hot else s.dim)
+
+    def init_ship(s, p):
+        p["st"]["sec"] = 0
+        p["st"]["t"] = 0.0
+
+    def draw_ship(s, p):
+        x, y, w, h, cv = s.cv(p, "SHIP SCHEMATIC")
+        if w < 24 or h < 5:
+            return
+        k = min(cv.W / 10.5, (cv.H - 10) / 4.6)
+        ox, oy = cv.W / 2 - 5 * k, cv.H / 2 - 2
+        st = p["st"]
+        st["t"] += 1.0 / s.fps
+        if st["t"] > 2.0:
+            st["t"] = 0.0
+            st["sec"] = (st["sec"] + 1) % 4
+        sec = st["sec"]
+
+        def P(a, b):
+            return ox + a * k, oy + b * k
+
+        def ell(cx, cy, rx, ry, a, n=44):
+            pts = [P(cx + rx * math.cos(i * 6.2832 / n), cy + ry * math.sin(i * 6.2832 / n)) for i in range(n + 1)]
+            for i in range(n):
+                cv.line(*pts[i], *pts[i + 1], a)
+
+        base = s.pal[p["c"]]
+        hi = s.pale
+        ell(2.2, 0, 2.0, 2.0, hi if sec == 0 else base)
+        ell(2.2, 0, 1.3, 1.3, hi if sec == 0 else s.line)
+        ell(2.2, 0, 0.35, 0.35, hi if sec == 0 else base, 14)
+        a = hi if sec == 1 else base
+        ell(6.2, 0, 2.6, 0.55, a)
+        cv.line(*P(3.7, 0.35), *P(4.3, 0.5), a)
+        cv.line(*P(3.7, -0.35), *P(4.3, -0.5), a)
+        for sgn in (-1, 1):
+            a = hi if sec == 2 else base
+            cv.line(*P(7.0, sgn * 0.5), *P(7.6, sgn * 1.65), a)
+            cv.line(*P(5.0, sgn * 1.4), *P(9.6, sgn * 1.4), a)
+            cv.line(*P(5.0, sgn * 2.0), *P(9.6, sgn * 2.0), a)
+            cv.line(*P(5.0, sgn * 1.4), *P(5.0, sgn * 2.0), a)
+            cv.line(*P(9.6, sgn * 1.4), *P(9.6, sgn * 2.0), a)
+        if sec == 3:
+            for i in range(3):
+                r = 2.8 + i * 0.4 + 0.2 * math.sin(s.t * 4 + i)
+                ell(5.0, 0, r * 1.5, r * 0.8, s.pal[(p["c"] + 4) % len(s.pal)], 40)
+        s.flush_cv(cv, y, x)
+        names = ("SAUCER SECTION", "ENGINEERING HULL", "WARP NACELLES", "SHIELD GRID")
+        put(s.scr, y + h - 1, x + 1, ("> " + names[sec])[:w - 2], s.pale)
+
+    def init_hist(s, p):
+        p["st"]["v"] = [random.random() for _ in range(max(1, p["w"] - 2))]
+
+    def draw_hist(s, p):
+        x, y, w, h = s.chrome(p, "ENERGY DISTRIBUTION")
+        v = p["st"]["v"]
+        for i in range(len(v)):
+            v[i] = min(1.0, max(0.05, v[i] + random.uniform(-0.12, 0.12)))
+        if len(v) > 2:
+            for i in range(1, len(v) - 1):
+                v[i] = (v[i - 1] + 2 * v[i] + v[i + 1]) / 4 * 0.5 + v[i] * 0.5
+        for r in range(h):
+            row = []
+            for val in v[:w]:
+                u = int(val * h * 8)
+                row.append("█" if u >= (h - r) * 8 else SPARK[u - (h - r - 1) * 8 - 1] if u > (h - r - 1) * 8 else " ")
+            put(s.scr, y + r, x, "".join(row), s.pal[(p["c"] + r * len(s.pal) // max(1, h)) % len(s.pal)])
+
+    # ------------------------------------------------------------ main
     def step(s, dt):
+        s.t += dt
+        s.sd += dt * 0.02
         if time.monotonic() > s.next_layout:
             s.layout()
-        s.acc += dt * 6
-        n = int(s.acc)
-        s.acc -= n
-        if s.rows:
-            for _ in range(min(n, 8)):
-                y = random.choice(s.rows)
-                s.seg_row(y, s.thin[y])
-        for sc in s.scan:
-            y, pos, d = sc
-            pos += d * dt * 40
-            if pos >= s.x1 - 6 or pos <= s.x0:
-                sc[2] = -d
-                pos = min(max(pos, s.x0), s.x1 - 6)
-            sc[1] = pos
-            put(s.scr, y, s.x0, "▄" * (s.x1 - s.x0), s.line)
-            p = int(pos)
-            if d > 0:
-                put(s.scr, y, p - 6, "▄▄▄", s.tail[1])
-                put(s.scr, y, p - 3, "▄▄▄", s.tail[0])
-            else:
-                put(s.scr, y, p + 9, "▄▄▄", s.tail[1])
-                put(s.scr, y, p + 6, "▄▄▄", s.tail[0])
-            put(s.scr, y, p, "▄" * 6, s.pale)
+        for b in s.sblocks:
+            if random.random() < 0.02:
+                b[3] = "%02d-%04d" % (random.randint(1, 99), random.randint(0, 9999))
+        s.scr.erase()
+        s.draw_frame()
+        for p in s.panels:
+            getattr(s, "draw_" + p["kind"])(p)
 
 
 class Sensors:
@@ -3287,9 +3586,16 @@ class Transporter:
         cv.flush(s.scr)
 
 
+BORG_LINES = ("WE ARE THE BORG.",
+              "LOWER YOUR SHIELDS AND SURRENDER YOUR SHIPS.",
+              "WE WILL ADD YOUR BIOLOGICAL AND TECHNOLOGICAL DISTINCTIVENESS TO OUR OWN.",
+              "YOUR CULTURE WILL ADAPT TO SERVICE US.",
+              "RESISTANCE IS FUTILE.")
+
+
 class Borg:
-    fps = 10
-    G = 8
+    # the cube as the Enterprise sees it: greebled hull, targeting scan, hailing message, assimilation readout
+    fps = 12
 
     def __init__(s, scr):
         s.scr = scr
@@ -3297,7 +3603,41 @@ class Borg:
         s.grid = mkpal((22, 28, 34), GREEN)
         s.edge = mkpal((28, 34, 40, 46, 82, 118), GREEN)
         s.rim = mkpal((82, 118, 154, 190), GREEN)
-        s.levels = [[random.random() ** 2 for _ in range(s.G * s.G)] for _ in FACES]
+        s.hud = c256(40, GREEN)
+        s.hud_dim = c256(28, GREEN) | DIM
+        s.hot = c256(231, WHITE) | BOLD
+        s.red = c256(196, RED) | BOLD
+        s.faces = [s.greeble() for _ in FACES]
+        s.stars = [(random.random(), random.random(), random.random()) for _ in range(110)]
+        s.msg = 0
+        s.mt = 0.0
+        s.species = random.randint(1000, 9999)
+        s.pct = random.uniform(0, 30)
+        s.hexs = deque(maxlen=6)
+        s.hacc = 0.0
+
+    def greeble(s):
+        leaves = []
+
+        def split(u0, v0, u1, v1, d):
+            du, dv = u1 - u0, v1 - v0
+            if d == 0 or (du < 0.3 and dv < 0.3) or (d < 3 and random.random() < 0.18):
+                m = 0.025
+                kind = random.choices((0, 1, 2, 3), (4, 3, 2, 2))[0]
+                leaves.append([u0 + m, v0 + m, u1 - m, v1 - m, kind, random.random() ** 2])
+                return
+            f = random.uniform(0.35, 0.65)
+            if du >= dv:
+                x = u0 + du * f
+                split(u0, v0, x, v1, d - 1)
+                split(x, v0, u1, v1, d - 1)
+            else:
+                y = v0 + dv * f
+                split(u0, v0, u1, y, d - 1)
+                split(u0, y, u1, v1, d - 1)
+
+        split(-1.0, -1.0, 1.0, 1.0, 5)
+        return leaves
 
     def step(s, dt):
         s.t += dt
@@ -3305,13 +3645,16 @@ class Borg:
         scr = s.scr
         h, w = scr.getmaxyx()
         cv = Canvas(w, h)
-        S = 0.2 * min(cv.W, cv.H)
+        S = 0.21 * min(cv.W, cv.H)
         cx0, cy0 = cv.W / 2.0, cv.H / 2.0
-        R = rotation(0.21 * t, 0.31 * t, 0.08 * t)
-        D = 5.0
-        G = s.G
-        for _ in range(6):
-            s.levels[random.randrange(len(FACES))][random.randrange(G * G)] = random.random() ** 2
+        R = rotation(0.42 + 0.06 * math.sin(t * 0.2), 0.28 * t, 0.1)
+        D = 5.5
+        for i, st in enumerate(s.stars):
+            a = s.grid[2] if st[2] < 0.8 else s.edge[1]
+            cv.dot(int(st[0] * (cv.W - 1)), int(st[1] * (cv.H - 1)), a)
+        for fc in s.faces:
+            for _ in range(2):
+                fc[random.randrange(len(fc))][5] = random.random() ** 2
 
         def proj(n, e1, e2, u, v):
             p = (n[0] + u * e1[0] + v * e2[0], n[1] + u * e1[1] + v * e2[1], n[2] + u * e1[2] + v * e2[2])
@@ -3319,37 +3662,101 @@ class Borg:
             f = D / (D - q[2])
             return cx0 + q[0] * S * f, cy0 - q[1] * S * f
 
+        xs, ys = [], []
         for fi, (n, e1, e2, _) in enumerate(FACES):
             nr = xform(R, n)
             if nr[0] * (0 - nr[0]) + nr[1] * (0 - nr[1]) + nr[2] * (D - nr[2]) <= 0:
                 continue
             b = max(0.0, min(1.0, nr[2]))
             ga = pick(s.grid, 0.3 + 0.7 * b)
-            for i in range(G + 1):
-                c = -1 + 2.0 * i / G
-                cv.line(*proj(n, e1, e2, c, -1), *proj(n, e1, e2, c, 1), ga)
-                cv.line(*proj(n, e1, e2, -1, c), *proj(n, e1, e2, 1, c), ga)
-            for idx, lv in enumerate(s.levels[fi]):
-                if lv < 0.55:
-                    continue
-                i, j = divmod(idx, G)
-                u0, v0 = -1 + 2.0 * i / G, -1 + 2.0 * j / G
-                u1, v1 = u0 + 2.0 / G, v0 + 2.0 / G
-                a = pick(s.edge, lv) | BOLD
+            for u0, v0, u1, v1, kind, lv in s.faces[fi]:
+                a = pick(s.edge, lv * (0.5 + 0.5 * b)) | (BOLD if lv > 0.6 else 0)
                 c1, c2, c3, c4 = (proj(n, e1, e2, u0, v0), proj(n, e1, e2, u1, v0),
                                   proj(n, e1, e2, u1, v1), proj(n, e1, e2, u0, v1))
                 cv.line(*c1, *c2, a)
                 cv.line(*c2, *c3, a)
                 cv.line(*c3, *c4, a)
                 cv.line(*c4, *c1, a)
-                if lv > 0.85:
-                    cv.line(*c1, *c3, a)
+                if kind == 1:
+                    k = max(2, int((v1 - v0) / 0.07))
+                    for j in range(1, k):
+                        f = j / k
+                        cv.line(*proj(n, e1, e2, u0, v0 + (v1 - v0) * f), *proj(n, e1, e2, u1, v0 + (v1 - v0) * f), ga)
+                elif kind == 2:
+                    cv.line(*c1, *c3, ga)
+                    cv.line(*c2, *c4, ga)
+                elif kind == 3:
+                    mu, mv = (u1 - u0) * 0.22, (v1 - v0) * 0.22
+                    q = [proj(n, e1, e2, u0 + mu, v0 + mv), proj(n, e1, e2, u1 - mu, v0 + mv),
+                         proj(n, e1, e2, u1 - mu, v1 - mv), proj(n, e1, e2, u0 + mu, v1 - mv)]
+                    for i in range(4):
+                        cv.line(*q[i], *q[(i + 1) % 4], ga)
+                if lv > 0.9:
+                    cv.line(*c1, *c3, s.hot)
             ra = pick(s.rim, 0.4 + 0.6 * b) | BOLD
             cs = [proj(n, e1, e2, -1, -1), proj(n, e1, e2, 1, -1), proj(n, e1, e2, 1, 1), proj(n, e1, e2, -1, 1)]
             for i in range(4):
                 cv.line(*cs[i], *cs[(i + 1) % 4], ra)
+            for c in cs:
+                xs.append(c[0])
+                ys.append(c[1])
+        # targeting scan across the cube, reticle on its center
+        if xs:
+            x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+            sy = y0 + (y1 - y0) * ((t * 0.25) % 1.0)
+            cv.line(x0 - 6, sy, x1 + 6, sy, s.hot)
+            cv.line(x0 - 6, sy - 2, x1 + 6, sy - 2, s.hud_dim)
+            rx, ry = (x0 + x1) / 2, (y0 + y1) / 2
+            rr = 0.62 * max(x1 - x0, y1 - y0)
+            for k in range(4):
+                a0 = t * 0.9 + k * math.pi / 2
+                for j in range(14):
+                    th = a0 + j * 0.045
+                    cv.dot(int(rx + rr * math.cos(th)), int(ry + rr * math.sin(th)), s.hud)
+                cv.line(rx + (rr + 3) * math.cos(k * math.pi / 2), ry + (rr + 3) * math.sin(k * math.pi / 2),
+                        rx + (rr + 12) * math.cos(k * math.pi / 2), ry + (rr + 12) * math.sin(k * math.pi / 2), s.hud)
         scr.erase()
         cv.flush(scr)
+        s.draw_hud(dt, w, h)
+
+    def draw_hud(s, dt, w, h):
+        scr = s.scr
+        # frame corners
+        for (y, x, g) in ((0, 0, "┏"), (0, w - 1, "┓"), (h - 1, 0, "┗"), (h - 2, w - 2, "┛")):
+            put(scr, y, x, g, s.hud)
+        s.pct += dt * 0.35
+        if s.pct >= 100:
+            s.pct = 0.0
+            s.species = random.randint(1000, 9999)
+        s.hacc += dt * 6
+        while s.hacc >= 1:
+            s.hacc -= 1
+            s.hexs.append(" ".join("%02X" % random.randint(0, 255) for _ in range(8)))
+        put(scr, 1, 3, "BORG COLLECTIVE // UNIMATRIX 01", s.hud | BOLD)
+        put(scr, 2, 3, "TARGET         SPECIES %04d" % s.species, s.hud)
+        put(scr, 3, 3, "THREAT         MINIMAL", s.hud)
+        put(scr, 4, 3, "ASSIMILATION   %5.1f%%" % s.pct, s.hot)
+        n = int(24 * s.pct / 100)
+        put(scr, 5, 3, "█" * n, s.hud | BOLD)
+        put(scr, 5, 3 + n, "░" * (24 - n), s.hud_dim)
+        if w > 70:
+            for i, hx in enumerate(s.hexs):
+                put(scr, 1 + i, w - len(hx) - 3, hx, s.hud if i == len(s.hexs) - 1 else s.hud_dim)
+            put(scr, 7, w - 24, "ADAPTING  " + "▮" * (1 + int(s.t * 2) % 8), s.hud_dim)
+        # hailing message, typed out
+        text = BORG_LINES[s.msg]
+        s.mt += dt
+        k = int(s.mt * 22)
+        last = s.msg == len(BORG_LINES) - 1
+        if k > len(text) + 40:
+            s.msg = (s.msg + 1) % len(BORG_LINES)
+            s.mt = 0.0
+            k = 0
+        shown = text[:k][:w - 8]
+        x = max(0, (w - min(len(text), w - 8)) // 2)
+        put(scr, h - 3, x, shown, (s.red if last else s.hud) | BOLD)
+        if k <= len(text) and int(s.t * 4) % 2 == 0:
+            put(scr, h - 3, x + len(shown), "█", s.hud)
 
 
 class Fire:
@@ -5892,10 +6299,11 @@ class AudioTap:
 
 class Music:
     # reacts to the music that is playing right now: FFT bands with auto gain, beat detection, stereo field.
-    # Scenes: hyperspace tunnel, ridgeline history (unknown pleasures), phosphor goniometer, spectrum sun.
+    # Scenes: hyperspace tunnel, ridgeline history (unknown pleasures), phosphor goniometer, spectrum sun,
+    # led analyzer, outrun landscape, neon ribbons, kaleidoscope, beat-driven fireworks.
     fps = 20
     NB = 48
-    SCENES = ("tunnel", "ridges", "scope", "sun")
+    SCENES = ("tunnel", "ridges", "scope", "sun", "bars", "terrain", "ribbons", "kaleido", "fireworks")
 
     def __init__(s, scr):
         s.px = Pix(scr)
@@ -5919,7 +6327,9 @@ class Music:
         s.quiet = 0.0
         s.loud = 0.0
         s.travel = 0.0
-        s.scene = random.choice(s.SCENES)
+        s.scene = os.environ.get("NERDSAVER_SCENE")
+        if s.scene not in s.SCENES:
+            s.scene = random.choice(s.SCENES)
         s.next = random.uniform(25, 40)
         s.fade = None
         s.mono = np.zeros(2048, np.float32)
@@ -5942,6 +6352,11 @@ class Music:
         s.stars = np.stack([np.random.uniform(-1, 1, n), np.random.uniform(-1, 1, n), np.random.uniform(0.05, 1, n)], 1)
         s.title = None
         s.titlet = -99.0
+        s.nbeat = s.fwbeats = 0
+        s.fwlast = 0.0
+        s.fwp = np.zeros((H, W, 3), np.float32)
+        s.rockets = []
+        s.sparks = np.zeros((0, 7), np.float32)
 
     def close(s):
         s.tap.close()
@@ -6020,6 +6435,7 @@ class Music:
         return live
 
     def onbeat(s):
+        s.nbeat += 1
         H, W = s.H, s.W
         n = 40
         a = np.random.uniform(0, 2 * np.pi, n)
@@ -6148,6 +6564,176 @@ class Music:
                       (P[:, 4:5] * 0.8) * s.hue(s.t * 0.05 + 0.15))
         return img
 
+    def bars(s, dt):
+        # classic analyzer: segmented LED columns with falling peak caps and a mirrored reflection
+        H, W = s.H, s.W
+        nb = max(12, min(96, W // 3))
+        if getattr(s, "pk", None) is None or len(s.pk) != nb:
+            s.pk = np.zeros(nb, np.float32)
+            s.pv = np.zeros(nb, np.float32)
+        v = np.interp(np.linspace(0, s.NB - 1, nb), np.arange(s.NB), s.spec).astype(np.float32)
+        hit = v > s.pk
+        s.pv = np.where(hit, 0.0, s.pv + dt * 1.6)
+        s.pk = np.where(hit, v, np.maximum(v, s.pk - s.pv * dt * 0.5)).astype(np.float32)
+        base = H * 0.74
+        mh = H * 0.66
+        bi = np.minimum((s.xx * nb / W).astype(np.int64), nb - 1)
+        fx = (s.xx * nb / W) % 1.0
+        inbar = (fx > 0.1) & (fx < 0.9)
+        hgt = (v * mh)[bi]
+        rel = base - s.yy
+        seg = (s.yy % 3) != 0
+        up = (rel >= 0) & (rel < hgt) & inbar & seg
+        g = np.clip(rel / mh, 0, 1)
+        hue = bi / nb * 0.75 + s.t * 0.015 + s.bright * 0.2
+        col = s.hue(hue) * (0.45 + 0.75 * g)[..., None]
+        img = np.where(up[..., None], col, 0.0).astype(np.float32)
+        cap = (np.abs(rel - (s.pk * mh)[bi] - 2) < 1.0) & inbar
+        img[cap] = np.array([1.0, 0.95, 0.85], np.float32) * 0.9
+        r2 = -rel
+        ref = (r2 > 1) & (r2 < hgt * 0.55) & inbar & seg
+        fade = np.clip(1 - r2 / np.maximum(hgt * 0.55, 1), 0, 1) ** 1.5 * 0.28
+        img += np.where(ref[..., None], s.hue(hue) * fade[..., None], 0.0)
+        img[int(base):int(base) + 1] += np.array([0.25, 0.25, 0.3], np.float32) * (0.5 + s.level)
+        return img
+
+    def terrain(s, dt):
+        # outrun: striped sun, mountains made of the spectrum, a grid floor rushing at the viewer
+        H, W = s.H, s.W
+        if not hasattr(s, "tstars") or s.tstars.shape != (H, W):
+            s.tstars = (np.random.rand(H, W) < 0.004).astype(np.float32)
+        hor = H * 0.52
+        yy, xx = s.yy, s.xx
+        s.travel += dt * (0.25 + 1.4 * s.level + 2.5 * s.beat)
+        ty = np.clip(yy / hor, 0, 1)
+        img = np.zeros((H, W, 3), np.float32)
+        sky = ty[..., None] ** 2.2
+        img += sky * np.array([0.55, 0.08, 0.38], np.float32) + (1 - sky) * np.array([0.02, 0.0, 0.07], np.float32)
+        img += (s.tstars * (1 - ty) ** 2)[..., None] * 0.7
+        R = min(H, W) * 0.3 * (1 + 0.07 * s.bass + 0.05 * s.beat)
+        cy = hor - R * 0.5
+        d = np.sqrt((xx - W / 2) ** 2 + ((yy - cy) * 1.0) ** 2)
+        rel = (yy - (cy - R)) / (2 * R)
+        stripe = ((rel > 0.4) & (np.sin((rel * 26 - s.t * 1.2) * 2) > 0.45 * (1 - rel) * 2 - 0.3)).astype(np.float32)
+        sun = smooth(R, R - 1.2, d) * (1 - stripe) * (yy < hor)
+        sc = np.array([1.0, 0.85, 0.2], np.float32) * (1 - rel)[..., None].clip(0, 1) + np.array([1.0, 0.1, 0.5], np.float32) * rel[..., None].clip(0, 1)
+        img += sun[..., None] * sc * (1.0 + 0.3 * s.beat)
+        img += (np.exp(-np.maximum(d - R, 0) / (R * 0.25)) * 0.35 * (yy < hor))[..., None] * np.array([1.0, 0.2, 0.6], np.float32)
+        # mountains
+        xs = np.arange(W, dtype=np.float32)
+        p = np.abs(xs - W / 2) / (W / 2)
+        bv = np.interp(p * (s.NB * 0.85), np.arange(s.NB), s.spec)
+        bv = np.convolve(np.pad(bv, 3, mode="edge"), np.ones(7) / 7, "valid")
+        ridge = hor - (H * 0.03 + bv * H * 0.3 * (0.35 + 0.65 * p ** 0.5) + H * 0.025 * np.sin(xs * 0.13 + 1.0) * p)
+        m = (yy >= ridge[None, :]) & (yy < hor)
+        shade = np.clip((yy - ridge[None, :]) / (H * 0.25), 0, 1)
+        img = np.where(m[..., None], np.array([0.04, 0.0, 0.1], np.float32) + shade[..., None] * np.array([0.12, 0.0, 0.2], np.float32), img)
+        edge = np.clip(1.3 - np.abs(yy - ridge[None, :]), 0, 1) * (yy < hor + 1)
+        img += edge[..., None] * np.array([0.1, 0.9, 1.0], np.float32) * (0.6 + 0.6 * s.beat)
+        # floor grid
+        dy = np.maximum(yy - hor, 0.6)
+        z = (H * 0.45) / dy
+        gz = z + s.travel * 3
+        wz = np.clip(z / dy * 0.9, 0.02, 0.5)
+        lz = np.clip(1 - (gz % 1.0) / wz, 0, 1)
+        wxw = (xx - W / 2) * z / (H * 0.45) * 1.4 + 0.5
+        wxp = np.clip(z / (H * 0.45) * 1.4 * 0.9, 0.02, 0.5)
+        lx = np.clip(1 - np.minimum(wxw % 1.0, 1 - (wxw % 1.0)) / wxp, 0, 1)
+        line = np.maximum(lz, lx) * np.clip(1.5 - np.maximum(wz, wxp) * 3, 0, 1)
+        fog = np.clip((yy - hor) / (H * 0.22), 0, 1) ** 1.6
+        gc = s.hue(0.82 - 0.1 * np.clip((yy - hor) / (H * 0.5), 0, 1) + s.bright * 0.1)
+        floor = (yy > hor)[..., None]
+        img = np.where(floor, np.array([0.04, 0.0, 0.09], np.float32) + (1 - fog)[..., None] * np.array([0.2, 0.03, 0.2], np.float32), img)
+        img += np.where(floor, (line * fog * (0.7 + 0.8 * s.beat + 0.5 * s.bass))[..., None] * gc, 0.0)
+        return img
+
+    def ribbons(s, dt):
+        # neon ribbons: each one is a sum of waves driven by a band group, leaving a soft trail
+        H, W = s.H, s.W
+        P = s.persist
+        P *= 0.62
+        xs = np.arange(W, dtype=np.float32)
+        groups = [s.spec[i:i + 8].mean() for i in range(0, 48, 8)]
+        for k in range(6):
+            a = groups[k]
+            ph = s.t * (0.6 + 0.35 * k) + k * 1.7
+            y = H / 2 + (np.sin(xs * 0.03 * (1 + k * 0.5) + ph) * 0.55 + np.sin(xs * 0.011 * (2 + k) - ph * 0.7) * 0.4) \
+                * H * (0.1 + 0.34 * a) * np.sin(np.pi * xs / W) ** 0.6
+            y = y + (k - 2.5) * H * 0.07
+            thick = 0.7 + 1.2 * a + 0.8 * s.beat
+            dyy = s.yy - y[None, :]
+            inten = np.exp(-(dyy / thick) ** 2) * (0.25 + 0.6 * a)
+            P += inten[..., None] * s.hue(k / 6.0 * 0.7 + s.t * 0.02 + s.bright * 0.3)
+        return P + soft(P, 3) * 0.5
+
+    def kaleido(s, dt):
+        # mirrored neon filigree, radially modulated by the spectrum
+        H, W = s.H, s.W
+        seg = math.pi / (4 + int(s.bass * 0 + 3))
+        a = np.abs(((s.ang + s.t * 0.08) % (2 * seg)) - seg)
+        u, v = s.rho * np.cos(a), s.rho * np.sin(a)
+        f = np.sin(u * 8 + s.t * 0.7 + 2.2 * np.sin(v * 6 - s.t * 0.5 + s.bass * 6)) \
+            + np.sin(v * 9 - s.t * 0.9 + 1.5 * np.sin(u * 5 + s.t * 0.3 + s.beat * 3))
+        lines = np.exp(-np.abs(f) * (3.5 - s.level * 1.5))
+        band = np.interp(np.clip(s.rho, 0, 1) * (s.NB - 1), np.arange(s.NB), s.spec)
+        inten = (lines * (0.35 + 1.1 * band) + (np.exp(-s.rho / 0.08) * (0.4 + 1.5 * s.beat))) * smooth(1.35, 0.9, s.rho)
+        col = s.hue(s.rho * 0.5 + f * 0.05 + s.t * 0.03 + s.bright * 0.4)
+        return col * inten[..., None]
+
+    def fireworks(s, dt):
+        H, W = s.H, s.W
+        P = s.fwp
+        P *= math.exp(-dt * 3.2)
+        g = H * 1.1
+        since = s.t - s.fwlast
+        n = s.nbeat - s.fwbeats
+        s.fwbeats = s.nbeat
+        if (n > 0 or (since > 1.4 and s.level > 0.15)) and len(s.rockets) < 8:
+            for _ in range(min(2, max(1, n))):
+                top = random.uniform(0.18, 0.55) * H
+                vy = -math.sqrt(2 * g * (H - top))
+                s.rockets.append([random.uniform(0.15, 0.85) * W, H - 1.0, random.uniform(-6, 6), vy,
+                                  random.random(), random.choice(("ball", "ball", "ring", "willow"))])
+            s.fwlast = s.t
+        # rockets
+        alive = []
+        for r in s.rockets:
+            r[0] += r[2] * dt
+            r[1] += r[3] * dt
+            r[3] += g * dt
+            x, y = int(r[0]), int(r[1])
+            if 0 <= x < W and 0 <= y < H:
+                P[y, x] += np.array([1.0, 0.8, 0.5], np.float32)
+            if r[3] >= -8 or y < 2:
+                k = int(60 + 120 * s.level)
+                if r[5] == "ring":
+                    th = np.arange(k) * 2 * np.pi / k
+                    sp = np.full(k, H * 0.45)
+                else:
+                    th = np.random.uniform(0, 2 * np.pi, k)
+                    sp = np.random.uniform(0.1, 1.0, k) ** 0.5 * H * 0.55
+                hue = (r[4] + np.random.uniform(-0.07, 0.07, k)) % 1.0
+                new = np.stack([np.full(k, r[0]), np.full(k, r[1]), np.cos(th) * sp * 1.3, np.sin(th) * sp,
+                                np.random.uniform(0.9, 1.7, k) * (1.8 if r[5] == "willow" else 1.0), hue,
+                                np.full(k, 1.0 if r[5] != "willow" else 0.45)], 1).astype(np.float32)
+                s.sparks = np.concatenate([s.sparks, new])[-2500:]
+            else:
+                alive.append(r)
+        s.rockets = alive
+        S = s.sparks
+        if len(S):
+            S[:, 0] += S[:, 2] * dt
+            S[:, 1] += S[:, 3] * dt
+            S[:, 3] += g * 0.35 * S[:, 6] * dt
+            S[:, 2:4] *= math.exp(-dt * 1.6)
+            S[:, 4] -= dt
+            S = S[(S[:, 4] > 0) & (S[:, 0] >= 0) & (S[:, 0] < W) & (S[:, 1] >= 0) & (S[:, 1] < H)]
+            s.sparks = S
+            if len(S):
+                c = s.hue(S[:, 5]) * np.clip(S[:, 4:5], 0, 1) * 0.9 + np.array([0.25, 0.2, 0.1], np.float32) * (S[:, 4:5] > 1.2)
+                np.add.at(P, (S[:, 1].astype(np.int64), S[:, 0].astype(np.int64)), c.astype(np.float32))
+        return P + soft(P, 3) * 1.1
+
     def step(s, dt):
         s.t += dt
         live = s.analyze(dt)
@@ -6156,7 +6742,7 @@ class Music:
             s.scene = random.choice([x for x in s.SCENES if x != s.scene])
             s.next = s.t + random.uniform(25, 40)
         img = getattr(s, s.scene)(dt)
-        if s.scene != "scope":
+        if s.scene not in ("scope", "fireworks", "ribbons"):
             img = img + soft(img, 4) * (0.5 + 0.6 * s.beat)
         if s.fade and s.fade[0] is not None:
             f = (s.t - s.fade[1]) / 0.8
@@ -6242,7 +6828,7 @@ SAVERS = {
     "aurora": (Aurora, "northern lights substorm over a mountain lake with mirrored sky"),
     "abyss": (Abyss, "dive to the bottom of the challenger deep: bioluminescence, giant squid, black smokers"),
     "flyover": (Flyover, "low-altitude flight over procedural worlds through a sunset (voxel space)"),
-    "music": (Music, "reacts live to the music that is playing: tunnel, ridgelines, goniometer, spectrum sun"),
+    "music": (Music, "reacts live to the music that is playing: tunnel, ridgelines, goniometer, sun, led bars, outrun, ribbons, kaleidoscope, fireworks"),
     "blank": (Blank, "black screen, zero cpu"),
 }
 PIXEL = {"blackhole", "planet", "aurora", "abyss", "flyover", "music"}

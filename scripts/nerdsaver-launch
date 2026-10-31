@@ -42,7 +42,8 @@ USAGE = """usage: nerdsaver-launch [--now] [--status] [SAVER ARGS...]
   --now      start immediately (ignores inhibitors, short input grace period)
   --status   print configuration, monitors, inhibitors and idle time
 
-SAVER ARGS are passed to nerdsaver, default: cycle 60
+SAVER ARGS are passed to nerdsaver, default: music while audio is playing, else cycle 60
+(a plain "cycle [SEC]" counts as default; "cycle SEC NAME..." is used as given)
 Configuration file: ~/.config/nerdsaver/config (key = value)"""
 
 DEFAULTS = {
@@ -302,6 +303,13 @@ def audio_playing():
     except (OSError, subprocess.SubprocessError):
         return False
     return any(line.split("\t")[-1].strip() == "RUNNING" for line in out.splitlines() if line.strip())
+
+
+def have_numpy():
+    try:
+        return subprocess.run(["python3", "-c", "import numpy"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def on_battery():
@@ -612,8 +620,16 @@ def main(argv):
         return 0
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, lambda *_: sys.exit(0))
-    if not args:
-        args = ["cycle", "60"]
+    # "cycle [SEC]" without names is the generic rotation (what i3 passes): treat it like no
+    # arguments, so the music visualizer still wins while audio plays. Named lists stay as given.
+    generic = not args or (args[0] == "cycle" and all(a.isdigit() for a in args[1:]))
+    if generic:
+        secs = args[1] if len(args) > 1 else "60"
+        # sound is playing: show the music visualizer (needs numpy), else rotate through everything
+        if audio_playing() and have_numpy():
+            args = ["music"]
+        else:
+            args = ["cycle", secs]
     now_mode = "--now" in flags
     return run_saver(cfg, x, args, 1.2 if now_mode else 0.3, not now_mode)
 

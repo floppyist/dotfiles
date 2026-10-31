@@ -269,6 +269,8 @@ of monitors without a saved layout is extended side by side, the laptop panel fi
 
 `xss-lock` owns the locking (see `config/i3/config`). While a window is fullscreen, or a program from `inhibit_procs`
 in `config/nerdsaver/config` runs (opencode, pi), neither the screensaver nor the lock starts.
+If sound is playing when the screensaver starts, it shows the `music` visualizer (needs `python3-numpy`; it captures the
+speaker output with `parec`/`pw-record`) instead of rotating through all savers.
 Notifications are paused while the screen is locked.
 
 ## Dependencies
