@@ -11,6 +11,8 @@
 #   -y, --yes                    do not ask before starting (all, modules)
 #   --skip LIST                  leave these modules out (all)
 #   --nvidia DRIVER              nouveau (default), nvidia, nvidia580 or nvidia470
+#   --kernel-version VERSION     the version of the `kernel` module, like 6.18.60 (default: the newest
+#                                of the running series); the module is never part of `all`
 #
 # Without a terminal and without arguments it runs `links`, like earlier versions.
 # Run it as your user: it sets up your home directory and asks for sudo itself. Every step is
@@ -81,6 +83,7 @@ log_header() {
         printf 'system      %s %s, user %s, shell %s\n' "$OS_NAME" "$ARCH" "$USER_NAME" "$LOGIN_SHELL"
         printf 'graphics    %s%s\n' "${GPU_LIST:-none}" "$( (( GPU_NVIDIA )) && echo " (driver $NVIDIA_DRIVER)")"
         printf 'modules     %s\n' "${sel[*]}"
+        (( ${SEL[kernel]:-0} )) && printf 'kernel      %s\n' "${KERNEL_VERSION:-newest of the running series}"
         printf 'steps       %s\n' "${SS[*]}"
         printf 'packages    %s\n' "${SM[*]}"
     } >> "$LOG"
@@ -237,6 +240,8 @@ main() {
             --skip=*)     skip=${1#*=} ;;
             --nvidia)     NVIDIA_DRIVER=${2-}; shift ;;
             --nvidia=*)   NVIDIA_DRIVER=${1#*=} ;;
+            --kernel-version)   KERNEL_VERSION=${2-}; shift ;;
+            --kernel-version=*) KERNEL_VERSION=${1#*=} ;;
             all|links|list|tui) [[ -z $cmd ]] || die "one command only"; cmd=$1 ;;
             modules|plan) [[ -z $cmd ]] || die "one command only"; cmd=$1
                           [[ ${2-} != -* && -n ${2-} ]] && { list=$2; shift; } ;;
@@ -246,6 +251,9 @@ main() {
     done
     if [[ -n ${NVIDIA_DRIVER-} && $NVIDIA_DRIVER != @(nouveau|nvidia|nvidia580|nvidia470) ]]; then
         die "unknown NVIDIA driver '$NVIDIA_DRIVER'"
+    fi
+    if [[ -n ${KERNEL_VERSION-} && ! $KERNEL_VERSION =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+        die "invalid kernel version '$KERNEL_VERSION' (like 6.18.60)"
     fi
     (( EUID == 0 )) && die "run it as your user, not as root: it sets up your home directory and uses sudo itself"
     if [[ -z $cmd ]]; then

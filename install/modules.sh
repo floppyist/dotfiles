@@ -2,7 +2,7 @@
 # install/modules.sh  ·  what the installer can set up, in parts ("modules"), and the plan for
 # a selection of them. Every module has packages and steps (install/steps.sh).
 
-MODULES=(core system graphics audio network bluetooth laptop neovim firefox mail music tools autostart)
+MODULES=(core system graphics audio network bluetooth laptop neovim firefox mail music tools kernel autostart)
 
 declare -A M_TITLE M_DESC M_PKGS M_STEPS M_REQ M_OFF M_MISSING M_WORK SEL
 
@@ -89,6 +89,15 @@ M_DESC[tools]="htop (in Rofi as a floating window) and xdg-utils (opens files an
 right program)."
 M_PKGS[tools]="htop xdg-utils"
 
+M_TITLE[kernel]="Custom kernel"
+M_DESC[kernel]="kernelforge: a Linux kernel for this machine only. Takes the configuration of the \
+running kernel, keeps the modules that are loaded now, builds it from the signed source of kernel.org \
+(you choose the version) and installs it next to the running one: modules, initramfs, boot entry. \
+Nothing that is installed gets replaced. Takes 10 to 40 minutes and needs about 8 GB; not part of the \
+complete installation. Plug in the devices you use first: a module that is not loaded is left out."
+M_PKGS[kernel]="base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut"
+M_STEPS[kernel]="kernel"
+
 M_TITLE[autostart]="Start X on login"
 M_DESC[autostart]="Logging in on tty1 starts the desktop (startx from ~/.bash_profile), logging out \
 of i3 ends the login again. Not for a display manager: it does not read ~/.xinitrc."
@@ -133,6 +142,8 @@ mods_default() {
     [[ -z $BT_ADAPTER ]] && { SEL[bluetooth]=0; M_OFF[bluetooth]="no adapter"; }
     [[ -z $BACKLIGHT ]]  && { SEL[laptop]=0;    M_OFF[laptop]="no backlight"; }
     [[ -n $DM ]]         && { SEL[autostart]=0; M_OFF[autostart]="uses $DM"; }
+    # a long build: only when asked for (also not in `all`)
+    SEL[kernel]=0; M_OFF[kernel]="optional"
     if [[ -z $NVIDIA_DRIVER ]]; then
         NVIDIA_DRIVER=nouveau
         local d

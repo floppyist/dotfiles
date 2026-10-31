@@ -4,7 +4,7 @@
 #                          returns 1 if there is nothing to do; MODULE limits it to one module
 #   run_<step>            does it; runs in the background, output in the log (lib.sh protocol)
 
-STEP_ORDER=(update packages font services swcursor pointer backlight alsa shell links firefox mail mpris theme nvim autostart network)
+STEP_ORDER=(update packages font services swcursor pointer backlight alsa shell links firefox mail mpris theme nvim kernel autostart network)
 
 declare -A STEP_TITLE=(
     [update]="System update"  [packages]="Packages"        [font]="Font"
@@ -13,14 +13,14 @@ declare -A STEP_TITLE=(
     [alsa]="ALSA to PipeWire" [shell]="Login shell"        [links]="Links"
     [firefox]="Firefox"       [mail]="neomutt"             [mpris]="mpv MPRIS"
     [theme]="Theme"           [nvim]="Neovim plugins"      [autostart]="Start X on login"
-    [network]="NetworkManager"
+    [network]="NetworkManager" [kernel]="Custom kernel"
 )
 # share of the whole installation, for the progress bar
 declare -A STEP_WEIGHT=(
     [update]=12 [packages]=40 [font]=4 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1
-    [shell]=1 [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [autostart]=1 [network]=3
+    [shell]=1 [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [kernel]=30 [autostart]=1 [network]=3
 )
-declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 )
+declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 [kernel]=1 )
 
 plan_step() {
     PLAN=()
@@ -608,4 +608,26 @@ run_network() {
         *) note "NetworkManager is not connected yet: pick a network in the WiFi menu (click the WiFi capsule)." ;;
     esac
     return 0
+}
+
+# ── Custom kernel ─────────────────────────────────────────────────────────────────
+
+KERNELFORGE=$DOTFILES/kernelforge/bin/kernelforge
+
+plan_kernel() {
+    local r=$(uname -r)
+    r=${r%%[!0-9.]*}; r=${r%.}
+    PLAN=("${KERNEL_VERSION:+Linux $KERNEL_VERSION}${KERNEL_VERSION:-The newest Linux ${r%.*}.x, like the running kernel} from kernel.org, signature checked")
+    PLAN+=("only the modules loaded now (localmodconfig), built as $USER_NAME (10 to 40 minutes, 8 GB)")
+    PLAN+=("installed next to the running kernel as ...-kf: modules, initramfs, boot entry (root)")
+    [[ -x $KERNELFORGE ]] || PLAN=("!kernelforge is missing in this repository")
+    return 0
+}
+
+# kernelforge runs as the user and uses sudo (the installer keeps it alive) for /boot and /lib/modules
+run_kernel() {
+    local args=(--yes)
+    [[ -x $KERNELFORGE ]] || { say "$KERNELFORGE is missing"; return 1; }
+    [[ -n ${KERNEL_VERSION-} ]] && args+=(--version "$KERNEL_VERSION")
+    KF_PROTOCOL=1 KF_NONINTERACTIVE=1 "$KERNELFORGE" "${args[@]}"
 }

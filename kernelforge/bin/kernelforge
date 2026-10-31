@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# kernelforge  ·  a kernel for this machine only: the configuration of the running kernel reduced
+# to the modules that are loaded now, built from the signed source of kernel.org and installed
+# next to the running kernel (modules, initramfs, boot entry). Run it as your user: it asks
+# for sudo only where it writes to /boot and /lib/modules.
+#
+#   kernelforge [OPTIONS]            build and install
+#   kernelforge versions             the versions kernel.org maintains ("VERSION KIND" per line)
+#
+#   -n, --dry-run        show what would happen; changes nothing, downloads nothing
+#   -y, --yes            do not ask
+#       --version V      the kernel version (6.18.60); default: newest of the running series
+#       --no-localmod    keep every module of the running configuration (a big kernel)
+#       --no-native      no -march=native (X86_NATIVE_CPU, kernel 6.16 and newer)
+#       --keep SYMBOL    keep this option as a module, like USB_STORAGE (repeatable)
+#       --jobs N         parallel compile jobs (default: by memory and threads)
+#       --build-dir DIR  source and build (default: ~/.cache/kernelforge)
+#       --no-install     only build
+#   -h, --help
+#
+# Environment: KF_PROTOCOL=1 (messages for the dotfiles installer), KF_NONINTERACTIVE=1 (never ask,
+# sudo -n). Logs: ~/.local/state/kernelforge/.
+set -uo pipefail
+
+KF_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+
+for f in common detect source config build boot; do
+    # shellcheck source=/dev/null
+    . "$KF_ROOT/lib/$f.sh" || { echo "kernelforge: cannot read lib/$f.sh" >&2; exit 1; }
+done
+
+usage() { sed -n '2,/^[^#]/{/^#/{s/^# \{0,1\}//;p}}' "${BASH_SOURCE[0]}"; }
+
+parse_args() {
+    KF_VERSION="" KF_YES=0 KF_LOCALMOD=1 KF_NATIVE=1 KF_KEEP=() KF_JOBS="" KF_INSTALL=1 KF_CMD=build
+    CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/kernelforge
+    while (( $# )); do
+        case $1 in
+            -h|--help)     usage; exit 0 ;;
+            -n|--dry-run)  DRY_RUN=1 ;;
+            -y|--yes)      KF_YES=1 ;;
+            --version)     KF_VERSION=${2-}; shift ;;
+            --version=*)   KF_VERSION=${1#*=} ;;
+            --no-localmod) KF_LOCALMOD=0 ;;
+            --no-native)   KF_NATIVE=0 ;;
+            --keep)        [[ ${2-} =~ ^[A-Z0-9_]+$ ]] || die "--keep: an option name like USB_STORAGE"
+                           KF_KEEP+=("$2"); shift ;;
+            --jobs)        [[ ${2-} =~ ^[0-9]+$ ]] && (( $2 > 0 )) || die "--jobs: a number"
+                           KF_JOBS=$2; shift ;;
+            --build-dir)   [[ -n ${2-} ]] || die "--build-dir: a directory"; CACHE=$2; shift ;;
+            --no-install)  KF_INSTALL=0 ;;
+            versions)      KF_CMD=versions ;;
+            *)             die "unknown argument '$1' (see --help)" ;;
+        esac
+        shift
+    done
+    [[ -z $KF_VERSION ]] || valid_version "$KF_VERSION" || die "invalid version '$KF_VERSION' (like 6.18.60)"
+    [[ $CACHE == /* ]] || die "--build-dir must be an absolute path"
+    export DRY_RUN KF_YES
+}
+
+confirm() {
+    local a
+    (( KF_YES || KF_NONINTERACTIVE )) && return 0
+    [[ -t 0 && -t 1 ]] || die "not a terminal: add --yes to start without asking"
+    read -r -p "$1 [y/N] " a
+    [[ $a == [yYjJ]* ]]
+}
+
+show_plan() {
+    step "Plan"
+    info "kernel       Linux $KF_VERSION (running: $CUR_VER), release ...${KF_SUFFIX}"
+    info "source       $KERNEL_ORG/v${KF_VERSION%%.*}.x/, signature checked"
+    info "build        $CACHE as $(id -un) ($(( $(free_bytes "$CACHE") / 1073741824 )) GB free)"
+    info "reduced      $( (( KF_LOCALMOD )) && echo "to the $(( $(lsmod | wc -l) - 1 )) modules loaded now (plug in what you use first)" || echo "no: every module of the running configuration")"
+    info "CPU tuning   $( (( KF_NATIVE )) && echo "-march=native if the version has it" || echo off)"
+    if (( KF_INSTALL )); then
+        info "installed    $BOOT_DIR/vmlinuz-...${KF_SUFFIX}, $MOD_ROOT/...${KF_SUFFIX}, initramfs, boot entry (root, sudo)"
+    else
+        info "installed    nothing (--no-install)"
+    fi
+    info "never        the running kernel and the other installed ones are not touched"
+    [[ $SECURE_BOOT == yes ]] && warn "Secure Boot is on: this kernel is not signed and will not start"
+    (( DKMS_MODULES )) && warn "DKMS modules exist (NVIDIA, ...): they are not built for the new kernel"
+    return 0
+}
+
+main() {
+    parse_args "$@"
+    [[ $KF_CMD == versions ]] && { kernel_releases || die "kernel.org did not answer"; printf '%s\n' "${RELEASES[@]}"; return; }
+    (( EUID == 0 )) && warn "running as root: the build runs as root too (better: your user, sudo is used where needed)"
+    trap on_exit EXIT
+    trap 'exit 130' INT TERM HUP
+    init_logging
+    detect_system
+    show_system
+    resolve_version
+    show_plan
+
+    if ! check_build_tools; then
+        warn "missing: ${MISSING[*]}"
+        (( DRY_RUN )) || die "install them first (Void: base-devel flex bison bc openssl-devel elfutils-devel pahole perl cpio gnupg xz curl)"
+    fi
+    if (( DRY_RUN )); then
+        say ""; say "Dry run: nothing was downloaded, built or installed."
+        return 0
+    fi
+    confirm "Start? (the build takes a while)" || { say "Nothing changed."; return 0; }
+
+    mkdir -p "$CACHE" 2>/dev/null || die "cannot create $CACHE"
+    # one run at a time
+    exec 9> "$CACHE/lock"
+    flock -n 9 || die "another kernelforge is running"
+    if (( KF_INSTALL )) && (( EUID != 0 )); then
+        command -v sudo >/dev/null || die "sudo is not installed"
+        if (( KF_NONINTERACTIVE )); then sudo -n true 2>/dev/null || die "sudo needs a password: run sudo -v first"
+        else sudo -v || die "sudo failed"; fi
+    fi
+
+    fetch_source
+    config_generate
+    build_kernel
+    if (( KF_INSTALL )); then
+        install_kernel
+    else
+        note "Built, not installed: $K_OUT (release $K_REL)"
+    fi
+    say ""
+    say "Done. Log: $LOGFILE"
+}
+
+main "$@"

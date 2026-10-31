@@ -99,8 +99,12 @@ tui_theme() {
             sgr 48 "$hex"; B[$t]=$_SGR
         done
     fi
+    # The page itself has no background color of its own: the terminal paints it, so its
+    # transparency (compositor opacity, wallpaper) shows through. Only capsules and the
+    # selected row (surface, accent) are filled.
+    B[bg]=$'\e[49m'
     BOLD=$'\e[1m' NOBOLD=$'\e[22m'
-    N=$'\e[0m'${B[bg]}${F[fg]}      # base style: text on the background
+    N=$'\e[0m'${B[bg]}${F[fg]}      # base style: text on the terminal background
     tui_glyphs
 }
 
@@ -704,6 +708,67 @@ screen_nvidia() {
     mods_scan
 }
 
+# Custom kernel: which version. KV_LIST[0] is "" (the newest of the running series).
+kernel_versions() {
+    local line v k r=$(uname -r)
+    r=${r%%[!0-9.]*}; r=${r%.}
+    KV_SERIES=${r%.*}
+    KV_LIST=("") KV_KIND=(auto)
+    [[ -x $KERNELFORGE ]] || return 0
+    while read -r v k; do
+        [[ $v =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ && $k =~ ^[a-z]+$ ]] || continue
+        KV_LIST+=("$v") KV_KIND+=("$k")
+    done < <(timeout 70 "$KERNELFORGE" versions 2>/dev/null </dev/null)
+}
+
+row_kernel() {
+    local w=$3 l
+    if (( $1 == 0 )); then l="newest $KV_SERIES.x"; else l="${KV_LIST[$1]}  ${KV_KIND[$1]}"; fi
+    [[ ${KV_LIST[$1]} == "${KERNEL_VERSION-}" ]] && l+="  ${G_ON}"
+    fit "$l" $(( w - 2 ))
+    if (( $2 )); then _ROW="${B[surface]}${F[accent]}$G_BAR ${F[fg]}$BOLD$_F$N"
+    else _ROW="  ${F[fg]}$_F$N"; fi
+}
+
+det_kernel() {
+    local v=${KV_LIST[$1]}
+    d_reset
+    case ${KV_KIND[$1]} in
+        auto)     d_text "${F[fg]}" "The newest release of the series that runs now ($KV_SERIES): the same kernel \
+with the latest bug and security fixes. The safe choice." ;;
+        longterm) d_text "${F[fg]}" "A long-term series: fixes for years, no new features." ;;
+        stable)   d_text "${F[fg]}" "The newest series with new features and hardware support." ;;
+        mainline) d_text "${F[fg]}" "The newest release of Linus Torvalds before it moves to stable." ;;
+    esac
+    if [[ -n $v && $v != "$KV_SERIES" && $v != "$KV_SERIES".* ]]; then
+        d_blank
+        d_text "${F[warn]}" "Not the running series ($KV_SERIES): the configuration of the running kernel is adapted, \
+options that are new get their defaults."
+    fi
+    d_blank
+    d_kv Source "kernel.org, signature checked"
+}
+
+key_kernel() {
+    case $1 in
+        enter|right|l) KERNEL_VERSION=${KV_LIST[LS_SEL]}; LS_OUT=next; return 2 ;;
+        esc|left|h|q)  LS_OUT=back; return 2 ;;
+        ctrl-c)        LS_OUT=quit; return 2 ;;
+    esac
+    return 1
+}
+
+screen_kernel() {
+    local i
+    tui_splash "Asking kernel.org" 2
+    kernel_versions
+    LS_N=${#KV_LIST[@]} LS_SEL=0 LS_ROWFN=row_kernel LS_DETFN=det_kernel LS_EXTRAFN=""
+    for i in "${!KV_LIST[@]}"; do [[ ${KV_LIST[i]} == "${KERNEL_VERSION-}" ]] && LS_SEL=$i; done
+    LS_KEYFN=key_kernel LS_TL="Kernel version" LS_TR="" LS_CRUMB=2
+    LS_HINTS=("$G_UPDN" move enter choose esc back)
+    list_screen
+}
+
 # ── Plan ──────────────────────────────────────────────────────────────────────────
 
 plan_compute() {
@@ -1125,12 +1190,21 @@ flow_install() {
     PLAN_TITLE="What happens" PLAN_ACTION=Install
     while :; do
         if [[ $FLOW == modules ]]; then
+            KV_ASKED=""
             screen_modules
             case $LS_OUT in back) return 0 ;; quit) exit 0 ;; esac
         elif (( GPU_NVIDIA && SEL[graphics] && ${#NVIDIA_DRIVERS[@]} > 1 )) && [[ -z ${NV_ASKED-} ]]; then
             screen_nvidia
             case $LS_OUT in back) return 0 ;; quit) exit 0 ;; esac
             NV_ASKED=1
+        fi
+        if (( SEL[kernel] )) && [[ -z ${KV_ASKED-} ]]; then
+            screen_kernel
+            case $LS_OUT in
+                back) [[ $FLOW == modules ]] && continue; return 0 ;;
+                quit) exit 0 ;;
+            esac
+            KV_ASKED=1
         fi
         screen_plan
         rc=$?

@@ -291,6 +291,7 @@ The installer installs all of it (see [Installation](#installation)), in modules
 | **Mail** | `neomutt` | sources the theme in your muttrc |
 | **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | links the MPRIS plugin into `~/.config/mpv/scripts` (Void installs it where mpv does not look; without it the music capsule does not see mpv) |
 | **Tools** | `htop xdg-utils` | |
+| **Custom kernel** (off by default) | `base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut` | builds and installs a kernel for this machine, see [Custom kernel](#custom-kernel) |
 | **Start X on login** | | `startx` after logging in on tty1 |
 
 Minimum versions: i3 4.22, polybar 3.6, picom 12 (uses the `rules` syntax), rofi 1.7, dunst 1.9, scrot 1.7,
@@ -378,11 +379,34 @@ Without the menus:
 | --- | --- |
 | `./install.sh all` | the complete installation (`--skip network,neovim` leaves modules out, `--nvidia nvidia` picks the driver) |
 | `./install.sh modules audio,bluetooth` | these modules (and the desktop) |
+| `./install.sh modules kernel --kernel-version 6.18.60` | the custom kernel (not part of `all`); without the version: the newest of the running series |
 | `./install.sh plan [modules]` | shows what would happen, changes nothing |
 | `./install.sh list` | the modules and their state on this machine |
 | `./install.sh links` | links and theme only (also what runs without a terminal) |
 
 `all` and `modules` ask before they start; `-y` starts right away.
+
+### Custom kernel
+
+The module **Custom kernel** (not selected by default, never part of `all`) runs `kernelforge/bin/kernelforge`: a
+kernel for this machine only. It takes the configuration of the running kernel (`/proc/config.gz`), keeps the
+modules that are loaded now (`localmodconfig`, so plug in the devices you use first; USB storage, common file
+systems, Bluetooth, WireGuard and a few more are kept anyway, `--keep SYMBOL` adds more) and tunes it to the CPU
+(`-march=native`, kernel 6.16 and newer). The installer asks which version: kernel.org's current ones or the newest
+of the running series.
+
+- The source comes from `cdn.kernel.org` over https; the signature of the tarball must be valid and from one of the
+  pinned keys (Torvalds, Kroah-Hartman, Levin), else nothing is built.
+- Download, configuration and build run as your user in `~/.cache/kernelforge` (about 8 GB, 10 to 40 minutes).
+  Root (sudo) is used only to copy the result to `/lib/modules` and `/boot`, to build the initramfs
+  (dracut, mkinitcpio, initramfs-tools) and to add the boot entry (GRUB; systemd-boot, an entry on the ESP).
+- The new kernel is called `<version>-kf`, never a name that exists: nothing installed is overwritten, and if a step
+  fails the files of this run are removed again. Choose it in the boot menu; the old kernel stays the way back.
+  GRUB may make it the default (it sorts by version).
+- Not for Secure Boot (the kernel is not signed) and without DKMS modules (NVIDIA: no build directory).
+- Standalone: `kernelforge/bin/kernelforge --dry-run`, `--version`, `--no-install`, `--help`. Logs in
+  `~/.local/state/kernelforge/`. Remove a kernel by hand: `/boot/*-<release>`, `/lib/modules/<release>`, the entry
+  (`update-grub`).
 
 > [!IMPORTANT]
 > Everything is linked, not copied: editing the repository or switching git branches changes the running desktop
