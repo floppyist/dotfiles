@@ -16,6 +16,7 @@ import curses
 import io
 import json
 import locale
+import math
 import os
 import re
 import shlex
@@ -75,6 +76,7 @@ HELP = [
     (":speed 1.25", "Geschwindigkeit"),
     (":add PFAD...", "Dateien / Ordner anhaengen"),
     (":cover", "Albumcover ein / aus (chafa, sonst Pillow)"),
+    (":dancer", "tanzende Kuerbis-Gans statt Cover (MPVIM_DANCER)"),
     (":noh  :clear  :help  :q", "Suchmarkierung aus / Log leeren / Hilfe / Ende"),
 ]
 
@@ -194,12 +196,15 @@ def draw_box(s, y, x, h, w, segs, battr):
     put(s, y + h - 1, x, "\u2514" + "\u2500" * (w - 2) + "\u2518", battr)
 
 
+def theme_path():
+    return os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "dotfiles", "theme.sh")
+
+
 def theme_accent():
     """ANSI number of the accent from dotfiles.conf (bright variant, 9..14); 9 = red."""
-    path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
-                        "dotfiles", "theme.sh")
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(theme_path(), encoding="utf-8") as f:
             for line in f:
                 m = re.match(r"DF_ACCENT_ANSI_BRIGHT=([0-9]+)$", line.strip())
                 if m and 9 <= int(m.group(1)) <= 14:
@@ -421,6 +426,417 @@ class Covers:
                     self.results.pop(next(iter(self.results)))
 
 
+# ---------------------------------------------------------------- Dancer
+# :dancer shows a dancing pixel-art sprite instead of the cover: by default the pumpkin goose
+# of the fury engine, MPVIM_DANCER=<png> picks another sheet. A sheet is an Aseprite export
+# (PNG + JSON next to it with "frames" x/y/w/h, in order); without the JSON the PNG is one
+# frame. Resampling filters smear pixel art (the 3 px faces turn to mud), so the sprite is
+# shrunk by a vote per target pixel (the color covering most of it wins; outlines and rare
+# detail colors such as the mouth get a bonus), and the eyes are taken out first and drawn
+# again at the new size: crisp, with their highlight, and they can blink.
+# The dance follows the track position (bpm tag, else 120 bpm) in a 16 beat routine: walk
+# to and fro, wiggle, twirl, a big jump with a heart burst. Paused or stopped = asleep.
+# Drawn like the cover (raw cells in an area curses keeps blank), but only rows that
+# changed are rewritten, inside a synchronized update: no flicker at 15 frames per second.
+DANCER_SHEET = "~/workspace/fury/assets/textures/fury_engine_mascot-animated.png"
+DANCER_SCALES = (3, 2, 1, 0.75, 2 / 3, 0.6, 0.5, 0.4)
+DANCER_BPM = 120
+DANCER_JUMP = 2.0       # the big jump on beat 16, in hops
+DANCER_LIFE = 3         # beats a heart or note floats
+DANCER_FPS = 15
+DANCER_COLORS = {"bg": "#191c1c", "overlay": "#313838", "accent_text": "#fb4934",
+                 "purple_hi": "#d3869b", "yellow_hi": "#fabd2f", "aqua_hi": "#8ec07c",
+                 "blue_hi": "#83a598", "bright": "#fbf1c7"}
+N4 = ((1, 0), (-1, 0), (0, 1), (0, -1))
+# particle bitmaps: small ones next to a shrunk sprite, large ones from scale 1
+BITMAPS = {
+    "heart": (("##.##", "#####", ".###.", "..#.."),
+              (".##.##.", "#######", "#######", ".#####.", "..###..", "...#...")),
+    "note": (("..##", "..#.", "..#.", "###.", "##.."),
+             ("...###", "...#.#", "...#..", "...#..", "####..", "####..", ".##...")),
+    "notes": ((".####", ".#..#", ".#..#", "##.##", "##.##"),
+              (".######", ".######", ".#...#.", ".#...#.", "##..##.", "###.###", "##..##.")),
+    "spark": ((".#.", "###", ".#."), ("..#..", "..#..", "#####", "..#..", "..#..")),
+    "z": (("###", ".#.", "###"), ("####", "..#.", ".#..", "####")),
+    "Z": (("####", "..#.", ".#..", "####"), ("#####", "...#.", "..#..", ".#...", "#####")),
+}
+
+
+class DancerError(Exception):
+    pass
+
+
+def lum(c):
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+def blend(c, d, t):
+    return tuple(round(a + (b - a) * t) for a, b in zip(c, d))
+
+
+def prand(*vals):
+    """Stable pseudo random number in [0, 1) for the given integers (FNV-1a)."""
+    h = 2166136261
+    for v in vals:
+        h = ((h ^ (v & 0xFFFFFFFF)) * 16777619) & 0xFFFFFFFF
+    h ^= h >> 15
+    h = (h * 2246822519) & 0xFFFFFFFF
+    return (h ^ (h >> 13)) / 2 ** 32
+
+
+def theme_colors():
+    """The dancer's colors from theme.sh (DF_* hex values), defaults without it."""
+    hexes = dict(DANCER_COLORS)
+    try:
+        with open(theme_path(), encoding="utf-8") as f:
+            for line in f:
+                m = re.fullmatch(r"DF_([A-Z_]+)='?(#[0-9a-fA-F]{6})'?", line.strip())
+                if m and m.group(1).lower() in hexes:
+                    hexes[m.group(1).lower()] = m.group(2)
+    except OSError:
+        pass
+    return {k: tuple(int(v[i:i + 2], 16) for i in (1, 3, 5)) for k, v in hexes.items()}
+
+
+def dancer_path():
+    return os.path.expanduser(os.environ.get("MPVIM_DANCER") or DANCER_SHEET)
+
+
+def load_sheet(path):
+    """Frames of a sprite sheet as rows of RGB tuples (None = transparent)."""
+    try:
+        from PIL import Image
+    except ImportError:
+        raise DancerError("dancer: needs python3-Pillow")
+    try:
+        im = Image.open(path)
+        if im.width * im.height > 2048 * 2048:
+            raise DancerError("dancer: sprite sheet too large")
+        im = im.convert("RGBA")
+    except DancerError:
+        raise
+    except Exception:
+        raise DancerError(f"dancer: cannot load {path} (set MPVIM_DANCER)")
+    W, H = im.size
+    rects = []
+    try:
+        with open(os.path.splitext(path)[0] + ".json", encoding="utf-8") as f:
+            frames = json.load(f).get("frames")
+        # Aseprite writes "frames" as a list (array export) or an object (hash export)
+        for item in (frames.values() if isinstance(frames, dict) else frames):
+            r = item["frame"]
+            rects.append(tuple(int(r[k]) for k in ("x", "y", "w", "h")))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        rects = []
+    rects = [r for r in rects if r[2] > 0 and r[3] > 0 and r[0] >= 0 and r[1] >= 0
+             and r[0] + r[2] <= W and r[1] + r[3] <= H]
+    rects = [r for r in rects if r[2:] == rects[0][2:]][:32] if rects else [(0, 0, W, H)]
+    if rects[0][2] > 256 or rects[0][3] > 256:
+        raise DancerError("dancer: frames larger than 256 px")
+    px = im.load()
+    return [[[px[x + i, y + j][:3] if px[x + i, y + j][3] >= 128 else None for i in range(w)]
+             for j in range(h)] for x, y, w, h in rects]
+
+
+def find_eyes(g):
+    """Eyes: a light pixel (the highlight) with dark pixels on 3 or 4 sides, plus the dark
+    pixels around it, all away from the outline (that rules out tips of wings and the like)."""
+    H, W = len(g), len(g[0])
+
+    def at(x, y):
+        return g[y][x] if 0 <= x < W and 0 <= y < H else None
+
+    def dark(p):
+        c = at(*p)
+        return c is not None and lum(c) < 48
+
+    def edge(p):
+        return any(at(p[0] + dx, p[1] + dy) is None for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+
+    eyes = []
+    for y in range(H):
+        for x in range(W):
+            c = g[y][x]
+            if c is None or lum(c) < 160 or edge((x, y)) or \
+                    sum(dark((x + dx, y + dy)) for dx, dy in N4) < 3:
+                continue
+            comp, todo = set(), [(x + dx, y + dy) for dx, dy in N4]
+            while todo:
+                p = todo.pop()
+                if p in comp or not dark(p) or abs(p[0] - x) > 1 or abs(p[1] - y) > 2:
+                    continue
+                comp.add(p)
+                todo += [(p[0] + dx, p[1] + dy) for dx, dy in N4]
+            if any(edge(p) for p in comp) or any(comp & e["px"] for e in eyes):
+                continue
+            pts = comp | {(x, y)}
+            ring = {}
+            for px_, py in pts:
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        q = (px_ + dx, py + dy)
+                        if q not in pts and at(*q) is not None and not dark(q):
+                            ring[at(*q)] = ring.get(at(*q), 0) + 1
+            if not ring:
+                continue
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            eyes.append({"px": pts, "hl": (x, y), "box": (min(xs), min(ys), max(xs), max(ys)),
+                         "colors": {p: at(*p) for p in pts}, "dark": at(*next(iter(comp))),
+                         "fill": max(ring, key=ring.get)})
+    return eyes
+
+
+def eye_shape(w, h, state):
+    """Pixels of a closed eye in a w x h box: "closed" = a smile line, "happy" = ^."""
+    if w < 3 or h < 2:
+        return [(i, h - 1) for i in range(w)]
+    lo, hi = (h - 1, h - 2) if state == "happy" else (h - 2, h - 1)
+    return [(0, lo), (w - 1, lo)] + [(i, hi) for i in range(1, w - 1)]
+
+
+def shrink(g, s, detail):
+    """Pixel art scaled by s < 1: per target pixel the color covering most of it wins."""
+    H, W = len(g), len(g[0])
+    out = []
+    for ty in range(max(1, round(H * s))):
+        y0, y1 = ty / s, min(H, (ty + 1) / s)
+        row = []
+        for tx in range(max(1, round(W * s))):
+            x0, x1 = tx / s, min(W, (tx + 1) / s)
+            votes, tot = {}, 0.0
+            for sy in range(int(y0), math.ceil(y1)):
+                hy = min(y1, sy + 1) - max(y0, sy)
+                for sx in range(int(x0), math.ceil(x1)):
+                    a = hy * (min(x1, sx + 1) - max(x0, sx))
+                    if a > 0:
+                        votes[g[sy][sx]] = votes.get(g[sy][sx], 0) + a
+                        tot += a
+            best = None
+            if votes.pop(None, 0) <= tot / 2 and votes:
+                rare = [c for c in votes if c in detail and votes[c] >= tot / 4]
+                best = max(rare or votes, key=lambda c: votes[c] * (1.25 if lum(c) < 48 else 1))
+            row.append(best)
+        out.append(row)
+    return out
+
+
+class Dancer:
+    def __init__(self, frames):
+        self.frames = []        # (grid without eyes, eyes, detail colors)
+        for g in frames:
+            eyes = find_eyes(g)
+            g = [row[:] for row in g]
+            for e in eyes:
+                for x, y in e["px"]:
+                    g[y][x] = e["fill"]
+            count = {}
+            for row in g:
+                for c in row:
+                    count[c] = count.get(c, 0) + 1
+            detail = {c for c, n in count.items() if c is not None and n <= 6 and lum(c) >= 48}
+            self.frames.append((g, eyes, detail))
+        self.H, self.W = len(frames[0]), len(frames[0][0])
+        n = len(frames)
+        self.seq = list(range(n)) + list(range(n - 2, 0, -1))  # ping-pong, like fury plays it
+        self.cache = {}
+        self.fits = {}
+
+    def dims(self, s):
+        return max(1, round(self.W * s)), max(1, round(self.H * s))
+
+    def hop(self, gh):
+        return max(1, round(gh / 12))
+
+    def fit(self, cols, max_rows):
+        """(scale, rows) of the largest sprite that fits cols x max_rows cells, or None."""
+        key = (cols, max_rows)
+        if key not in self.fits:
+            self.fits[key] = None
+            for s in DANCER_SCALES:
+                gw, gh = self.dims(s)
+                need = gh + math.ceil(self.hop(gh) * DANCER_JUMP) + 1  # + jump + shadow
+                rows = (need + 1) // 2
+                if gw + 2 <= cols and rows <= max_rows:
+                    self.fits[key] = (s, min(max_rows, rows + 1))  # + a row for hearts
+                    break
+        return self.fits[key]
+
+    def sprites(self, s):
+        """{(frame, eye state): grid} at scale s, plus the size, foot row and head."""
+        if s in self.cache:
+            return self.cache[s]
+        out = {}
+        for fi, (g, eyes, detail) in enumerate(self.frames):
+            if s >= 1:
+                base = [[c for c in row for _ in range(s)] for row in g for _ in range(s)]
+            else:
+                base = shrink(g, s, detail)
+            for state in ("open", "closed", "happy"):
+                grid = [row[:] for row in base]
+                for e in eyes:
+                    self.stamp(grid, e, s, state)
+                out[fi, state] = grid
+        gw, gh = self.dims(s)
+        grids = [out[fi, "open"] for fi in range(len(self.frames))]
+        foot = max(y for g in grids for y in range(gh) if any(g[y]))
+        top = min(y for y in range(gh) if any(grids[0][y]))
+        band = [x for y in range(top, top + max(1, gh // 8)) for x in range(gw) if grids[0][y][x]]
+        head = (round(sum(band) / len(band)), top)
+        self.cache[s] = (out, (gw, gh), foot, head)
+        return self.cache[s]
+
+    def stamp(self, grid, e, s, state):
+        def put_px(x, y, c):
+            if 0 <= y < len(grid) and 0 <= x < len(grid[0]):
+                grid[y][x] = c
+
+        x0, y0, x1, y1 = e["box"]
+        w, h = x1 - x0 + 1, y1 - y0 + 1
+        if s >= 1:
+            if state == "open":
+                pts = [((x - x0, y - y0), c) for (x, y), c in e["colors"].items()]
+            else:
+                pts = [(p, e["dark"]) for p in eye_shape(w, h, state)]
+            for (x, y), c in pts:
+                for i in range(s):
+                    for j in range(s):
+                        put_px((x0 + x) * s + i, (y0 + y) * s + j, c)
+            return
+        tw, th = max(2, round(w * s)), max(2, round(h * s))
+        tx = round((x0 + x1 + 1) / 2 * s - tw / 2)
+        ty = round((y0 + y1 + 1) / 2 * s - th / 2)
+        if state == "open":
+            for i in range(tw):
+                for j in range(th):
+                    put_px(tx + i, ty + j, e["dark"])
+            hx, hy = e["hl"]
+            put_px(tx + min(tw - 1, int((hx - x0) / w * tw)), ty + min(th - 1, int((hy - y0) / h * th)),
+                   e["colors"][e["hl"]])
+        else:
+            for x, y in eye_shape(tw, th, state):
+                put_px(tx + x, ty + y, e["dark"])
+
+    def pose(self, beat, amp):
+        """Offset from the center and facing (True = left, as drawn) at a beat."""
+        p = beat % 16
+        if p < 8:                                   # walk to and fro
+            ph = 2 * math.pi * p / 8
+            return amp * math.sin(ph), (math.cos(ph) < 0) if amp else int(p) // 2 % 2 == 0
+        if p < 12:                                  # wiggle: turn on every beat
+            return 0, int(p) % 2 == 0
+        if p < 15:                                  # twirl: turn in the air
+            return 0, int(p * 2) % 2 == 0
+        return 0, True                              # the big jump
+
+    def render(self, cols, rows, s, beat, awake, now, C):
+        """Rows of (upper, lower) pixel colors for a cols x rows cell area."""
+        out, (gw, gh), foot, (hx, htop) = self.sprites(s)
+        cw, ch = cols, rows * 2
+        cv = [[None] * cw for _ in range(ch)]
+
+        def put_px(x, y, c):
+            if 0 <= x < cw and 0 <= y < ch:
+                cv[y][x] = c
+
+        def bitmap(name, x, y, c):
+            for j, line in enumerate(BITMAPS[name][s >= 1]):
+                for i, b in enumerate(line):
+                    if b == "#":
+                        put_px(x + i, y + j, c)
+
+        hop = self.hop(gh)
+        amp = max(0, (cw - gw) // 2 - 1)
+        beat = max(0.0, beat)
+        p = beat % 16
+        dx, left = self.pose(beat, amp)
+        if awake:
+            lift = abs(math.sin(math.pi * beat)) * hop * (DANCER_JUMP if p >= 15 else 1)
+            eyes = "happy" if p >= 15 else ("closed" if now % 3.7 < 0.16 else "open")
+            grid = out[self.seq[int(beat * 3) % len(self.seq)], eyes]
+        else:
+            lift, grid = 0, out[0, "closed"]
+        gx = (cw - gw) // 2 + round(dx)
+        g0 = ch - 2 - foot              # top row of the sprite while standing
+        gy = g0 - round(lift)
+        # shadow on the ground, smaller while in the air
+        sw_ = max(2, round(gw * 0.5) - 2 * round(lift))
+        for x in range(gx + (gw - sw_) // 2, gx + (gw - sw_) // 2 + sw_):
+            put_px(x, ch - 1, C["overlay"])
+        head_x = gx + (hx if left else gw - 1 - hx)
+        # particles first: the dancer passes in front of them
+        if awake:
+            # one heart or note per beat, four hearts on the big jump; positions come from
+            # the beat number, so they stay put across pauses and seeks
+            rise = max(2.0, gh / 9)
+            for k in range(max(0, math.floor(beat) - DANCER_LIFE + 1), math.floor(beat) + 1):
+                age = beat - k
+                kgx = (cw - gw) // 2 + round(self.pose(k, amp)[0])
+                burst = k % 16 == 15
+                for i in range(4 if burst else 1):
+                    r = prand(k, i)
+                    if burst:
+                        kind, col = "heart", (C["accent_text"], C["purple_hi"])[(i + i // 2) % 2]
+                        side, tier = (-1 if i % 2 == 0 else 1), i // 2
+                        x = kgx + gw // 2 + side * round(gw * 0.45 + tier * 3) - 2
+                        y = g0 + htop + 6 - tier * 6 - round(age * rise * 1.3)
+                    else:
+                        kind = "heart" if k % 2 == 0 else ("notes" if r < 0.4 else "note")
+                        col = ((C["accent_text"], C["purple_hi"]) if kind == "heart" else
+                               (C["yellow_hi"], C["aqua_hi"], C["blue_hi"]))[int(r * 97) % (2 if kind == "heart" else 3)]
+                        side = -1 if prand(k, 7) < 0.5 else 1
+                        x = kgx + gw // 2 + side * round(gw * 0.42 + r * 3) - 2
+                        y = g0 + round(gh * 0.3) + round(r * 4) - round(age * rise)
+                        x += round(math.sin(age * 2.6 + k) * 1.2)
+                    if age < 0.14:
+                        kind, col = "spark", C["bright"]   # pops in with a sparkle
+                    fade = max(0.0, (age - DANCER_LIFE * 0.55) / (DANCER_LIFE * 0.45))
+                    bitmap(kind, x, y, blend(col, C["bg"], min(1.0, fade)))
+        else:
+            # asleep: z, then Z, drifting up away from the beak
+            period = 1.2
+            back = 1 if left else -1
+            for k in range(math.floor(now / period) - 2, math.floor(now / period) + 1):
+                age = now - k * period
+                name = "z" if age < period else "Z"
+                x = head_x + back * (3 + round(age * 2.2)) - (0 if back > 0 else 4)
+                y = g0 + htop - 4 - round(age * 3)
+                fade = max(0.0, (age - 2.0) / 1.6)
+                bitmap(name, x, y, blend(C["blue_hi"], C["bg"], min(1.0, fade)))
+        for y, row in enumerate(grid):
+            for x, c in enumerate(row if left else reversed(row)):
+                if c is not None:
+                    put_px(gx + x, gy + y, c)
+        return [tuple(zip(cv[y], cv[y + 1])) for y in range(0, ch, 2)]
+
+
+def sgr_color(c, base, tc):
+    if c is None:
+        return str(base + 9)
+    if tc:
+        return f"{base + 8};2;{c[0]};{c[1]};{c[2]}"
+    return f"{base + 8};5;{xterm256(c)}"
+
+
+def cell_row(row, tc):
+    """A row of (upper, lower) colors as half blocks; None = the terminal background."""
+    parts, cur = ["\x1b[0m"], (None, None)
+    for t, b in row:
+        if t == b:
+            want, ch = (cur[0], t), " "
+        elif t is None:
+            want, ch = (b, None), "\u2584"
+        elif b is None:
+            want, ch = (t, None), "\u2580"
+        else:
+            want, ch = (t, b), "\u2580"
+        if want != cur:
+            codes = [sgr_color(want[i], base, tc) for i, base in ((0, 30), (1, 40)) if want[i] != cur[i]]
+            parts.append(f"\x1b[{';'.join(codes)}m")
+            cur = want
+        parts.append(ch)
+    return "".join(parts) + "\x1b[0m"
+
+
 # ---------------------------------------------------------------- mpv IPC
 class MPV:
     def __init__(self, path):
@@ -429,6 +845,7 @@ class MPV:
         self.props = {}
         self.events = []
         self.alive = True
+        self.tpos_at = 0.0      # monotonic time of the last time-pos update (dancer clock)
 
     def connect(self, proc, timeout=10):
         deadline = time.time() + timeout
@@ -480,6 +897,8 @@ class MPV:
         ev = m.get("event")
         if ev == "property-change":
             self.props[m.get("name")] = m.get("data")
+            if m.get("name") == "time-pos":
+                self.tpos_at = time.monotonic()
         elif ev == "file-loaded":
             self.events.append(("loaded", None))
         elif ev == "end-file" and m.get("reason") == "error":
@@ -521,6 +940,10 @@ class App:
         self.cover_painted = None   # (rect, rows) last painted
         self.cover_time = 0.0
         self.cover_rect = None
+        self.dancer = None          # Dancer, loaded on the first :dancer
+        self.dancer_on = False
+        self.dancer_cells = None    # rows last painted (only changed rows are rewritten)
+        self.dancer_colors = None
         self.say("Type :help or press F1 for key bindings.")
         self.say("Enter plays, Space pauses, h/l seeks, / searches, i filters, q quits.")
 
@@ -654,6 +1077,54 @@ class App:
         else:
             self.mpv.send("seek", secs, "absolute")
 
+    def toggle_dancer(self):
+        if self.dancer_on:
+            self.dancer_on = False
+            self.say("dancer off")
+            return
+        if self.dancer is None:
+            try:
+                self.dancer = Dancer(load_sheet(dancer_path()))
+            except DancerError as e:
+                self.say(str(e), True)
+                return
+            self.dancer_colors = theme_colors()
+        self.dancer_on = True
+        H, W = self.scr.getmaxyx()
+        if self.dancer.fit(W - int(W * 0.72) - 2, H - 3 - 13) is None:
+            self.say("dancer on (needs a larger terminal to show up)", True)
+        else:
+            self.say("dancer on")
+
+    def bpm(self):
+        """(beats per minute, from a tag?) of the playing track."""
+        md = self.meta()
+        for key in ("bpm", "tbpm", "tempo"):
+            m = re.match(r"\s*(\d{1,3}(?:[.,]\d+)?)", str(md.get(key, "")))
+            if m and float(m.group(1).replace(",", ".")) >= 10:
+                v = float(m.group(1).replace(",", "."))
+                while v < 70:
+                    v *= 2
+                while v > 180:
+                    v /= 2
+                return v, True
+        return float(DANCER_BPM), False
+
+    def media_time(self):
+        """Track position now: mpv reports it a few times a second, the rest is extrapolated."""
+        P = self.mpv.props.get
+        tp = P("time-pos")
+        if not isinstance(tp, (int, float)):
+            return 0.0
+        if P("pause") or P("idle-active"):
+            return tp
+        sp = P("speed") if isinstance(P("speed"), (int, float)) else 1.0
+        return tp + min(1.0, max(0.0, time.monotonic() - self.mpv.tpos_at)) * sp
+
+    def awake(self):
+        P = self.mpv.props.get
+        return bool(P("path")) and not P("pause") and not P("idle-active")
+
     def command(self, line):
         line = line.strip()
         if not line:
@@ -721,6 +1192,8 @@ class App:
         elif cmd == "cover":
             self.cover_on = not self.cover_on
             self.say("cover " + ("on" if self.cover_on else "off"))
+        elif cmd == "dancer":
+            self.toggle_dancer()
         elif cmd in ("help", "h"):
             self.help = True
         else:
@@ -877,6 +1350,7 @@ class App:
             self.running = False
         elif k == "\x0c":
             self.scr.clearok(True)
+            self.cover_painted = None  # repaint the raw cover / dancer cells too
 
     def edit(self, k):
         if k == "BS":
@@ -956,38 +1430,65 @@ class App:
         lw = int(W * 0.72)
         rw = W - lw
         mh = H - 3
-        # Right column: [cover] now playing, properties, log. The cover is square (a cell
-        # is about twice as high as wide) and only shown if the boxes below keep their room.
-        cover = self.cover_rows(rw, mh)
-        ch = 0
-        if cover:
-            cols = rw - 4
-            ch = min(cols // 2, mh - 24) + 2
-        rest = mh - ch
-        if ch:
-            h1 = min(11, rest // 2)
-            h2 = (rest - h1) // 2
+        # Right column: [cover | dancer] now playing, properties, log. The cover is square (a
+        # cell is about twice as high as wide) and only shown if the boxes below keep their
+        # room. The dancer may take the room of properties and log (now playing stays).
+        fit = cover = None
+        if self.dancer_on and self.dancer:
+            fit = self.dancer.fit(rw - 2, mh - 13)
         else:
-            h1 = h2 = rest // 3
-        h3 = rest - h1 - h2
+            cover = self.cover_rows(rw, mh)
+        ch = 0
+        if fit:
+            ch = fit[1] + 2
+            r = mh - ch - 11
+            if r < 3:
+                ch, r = ch + r, 0    # too little for another box: the dancer gets it
+            h1, h2 = 11, (r // 2 if r >= 10 else 0)
+        else:
+            if cover:
+                cols = rw - 4
+                ch = min(cols // 2, mh - 24) + 2
+            rest = mh - ch
+            if ch:
+                h1 = min(11, rest // 2)
+                h2 = (rest - h1) // 2
+            else:
+                h1 = h2 = rest // 3
+        h3 = mh - ch - h1 - h2
         if self.help:
             self.draw_help(0, 0, mh, lw)
         else:
             self.draw_playlist(0, 0, mh, lw)
         target = None
-        if ch:
+        if fit:
+            title = [("\U000F01E5 dancer", A["title"])]
+            bpm, tagged = self.bpm()
+            if not self.awake():
+                title.append(("  asleep", A["dim"]))
+            elif tagged:
+                title.append((f"  {bpm:.0f} bpm", A["dim"]))
+            draw_box(s, 0, lw, ch, rw, title, A["border"])
+            target = ("dancer", (1, lw + 1, ch - 2, rw - 2), fit[0])
+        elif ch:
             draw_box(s, 0, lw, ch, rw, [("\U000F0025 cover", A["title"])], A["border"])
             self.cover_rect = (1, lw + 2, ch - 2, rw - 4)
-            target = (self.cover_rect, cover)
+            target = ("cover", self.cover_rect, cover)
         self.draw_now(ch, lw, h1, rw)
-        self.draw_props(ch + h1, lw, h2, rw)
-        self.draw_log(ch + h1 + h2, lw, h3, rw)
+        if h2:
+            self.draw_props(ch + h1, lw, h2, rw)
+        if h3:
+            self.draw_log(ch + h1 + h2, lw, h3, rw)
         self.draw_input(mh, 0, 3, W)
-        if target != self.cover_painted and self.cover_painted is not None:
-            s.clearok(True)  # wipe the old cover pixels (curses believes those cells are blank)
+        if target != self.cover_painted:
+            if self.cover_painted is not None:
+                s.clearok(True)  # wipe the old pixels (curses believes those cells are blank)
+            self.dancer_cells = None
         s.refresh()
-        if target and (target != self.cover_painted or time.time() - self.cover_time > 5):
-            self.paint_cover(*target)
+        if fit:
+            self.paint_dancer(target[1], target[2])
+        elif target and (target != self.cover_painted or time.time() - self.cover_time > 5):
+            self.paint_cover(target[1], target[2])
         self.cover_painted = target
 
     def cover_rows(self, rw, mh):
@@ -1015,6 +1516,26 @@ class App:
         sys.stdout.write("".join(out))
         sys.stdout.flush()
         self.cover_time = time.time()
+
+    def paint_dancer(self, rect, scale):
+        y0, x0, h, w = rect
+        bpm = self.bpm()[0]
+        rows = self.dancer.render(w, h, scale, self.media_time() * bpm / 60, self.awake(),
+                                  time.monotonic(), self.dancer_colors)
+        if time.time() - self.cover_time > 5:
+            self.dancer_cells = None  # now and then everything, in case the terminal lost it
+        prev = self.dancer_cells
+        out = [f"\x1b[{y0 + i + 1};{x0 + 1}H" + cell_row(row, self.covers.tc)
+               for i, row in enumerate(rows) if prev is None or prev[i] != row]
+        self.dancer_cells = rows
+        if prev is None:
+            self.cover_time = time.time()
+        if not out:
+            return
+        cy, cx = self.scr.getyx()
+        # synchronized update (DEC mode 2026): the terminal shows the frame at once
+        sys.stdout.write("\x1b[?2026h" + "".join(out) + f"\x1b[{cy + 1};{cx + 1}H\x1b[?2026l")
+        sys.stdout.flush()
 
     def draw_playlist(self, y, x, h, w):
         s, A = self.scr, self.A
@@ -1187,6 +1708,7 @@ class App:
         while self.running and self.mpv.alive:
             self.tick()
             self.draw()
+            s.timeout(1000 // DANCER_FPS if self.dancer_on else 100)
             try:
                 k = s.get_wch()
             except curses.error:
