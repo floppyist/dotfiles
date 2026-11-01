@@ -250,8 +250,10 @@ cli_other_os() {
     else
         detect_disks; disks_with_room "$OS_TOTAL"
         (( ${#DISK_OK[@]} )) || die "no disk has $OS_TOTAL GB of unallocated space (free some in Windows or with gparted)"
-        (( ${#DISK_OK[@]} == 1 )) || die "several disks have room: choose one with --disk (${DISKS[*]})"
-        DUAL_DISK=${DISKS[${DISK_OK[0]}]}
+        local nonusb=()
+        for i in "${DISK_OK[@]}"; do [[ ${DISK_TRAN[i]} == usb ]] || nonusb+=("$i"); done
+        (( ${#nonusb[@]} == 1 )) || die "several disks have room: choose one with --disk (${DISKS[*]})"
+        DUAL_DISK=${DISKS[${nonusb[0]}]}
     fi
     mods_scan
 }

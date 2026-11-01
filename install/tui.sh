@@ -812,6 +812,11 @@ det_disk() {
     d_kv Free "about $_HS not in any partition" "${F[fg]}"
     d_kv Disk "${DISK_DESC[i]}"
     d_blank
+    if [[ ${DISK_TRAN[i]} == usb ]]; then
+        d_blank
+        d_text "${F[warn]}" "A USB disk: the firmware and GRUB often cannot boot from it (\"cannot find a GRUB drive\"). Only choose it if you know it works."
+    fi
+    d_blank
     d_text "${F[subtle]}" "The installer partition goes to the end of the largest free stretch, so the rest stays in one piece for the new system. The estimate is checked again with root before anything is written."
 }
 
@@ -907,11 +912,9 @@ flow_dualboot() {
             info_screen "No disk has $OS_TOTAL GB of unallocated space (the installer files and ${OS_NEED[$DUAL_TARGET]} GB for ${OS_TITLE[$DUAL_TARGET]}). The installer never shrinks or deletes anything: free the space first (shrink a volume in Windows Disk Management, or with gparted), then run the installer again." "No room on the disks"
             DUAL_TARGET=""; continue
         fi
-        if (( ${#DISK_OK[@]} == 1 )); then DUAL_DISK=${DISKS[${DISK_OK[0]}]}
-        else
-            screen_disk
-            [[ $LS_OUT == next ]] || { DUAL_TARGET=""; [[ $LS_OUT == quit ]] && return 0; continue; }
-        fi
+        # always asked: the first disk is not always the one the firmware boots
+        screen_disk
+        [[ $LS_OUT == next ]] || { DUAL_TARGET=""; [[ $LS_OUT == quit ]] && return 0; continue; }
         if (( ${OS_WIN[$DUAL_TARGET]:-0} )); then
             screen_winiso
             [[ $LS_OUT == next ]] || { DUAL_TARGET=""; [[ $LS_OUT == quit ]] && return 0; continue; }

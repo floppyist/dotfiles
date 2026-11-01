@@ -50,8 +50,8 @@ WIN_ISO=""           # path of the Windows ISO
 # Internal disks and the space no partition uses (an estimate without root: size minus the
 # partitions) -> DISKS, DISK_FREE (bytes), DISK_DESC
 detect_disks() {
-    local line name size type rm ro model psum t s
-    DISKS=() DISK_FREE=() DISK_DESC=()
+    local line name size type rm ro model tran psum t s
+    DISKS=() DISK_FREE=() DISK_DESC=() DISK_TRAN=()
     command -v lsblk >/dev/null || return 0
     while IFS= read -r line; do
         [[ $line =~ NAME=\"([^\"]*)\" ]] && name=${BASH_REMATCH[1]} || continue
@@ -60,6 +60,7 @@ detect_disks() {
         [[ $line =~ RM=\"([01])\" ]] && rm=${BASH_REMATCH[1]} || rm=0
         [[ $line =~ RO=\"([01])\" ]] && ro=${BASH_REMATCH[1]} || ro=0
         model=""; [[ $line =~ MODEL=\"([^\"]*)\" ]] && model=${BASH_REMATCH[1]}
+        tran=""; [[ $line =~ TRAN=\"([^\"]*)\" ]] && tran=${BASH_REMATCH[1]}
         [[ $type == disk && $rm == 0 && $ro == 0 && $name == /dev/* && $size -gt 0 ]] || continue
         psum=0
         while read -r s t; do
@@ -70,8 +71,9 @@ detect_disks() {
         (( s < 0 )) && s=0
         DISKS+=("$name") DISK_FREE+=("$s")
         human_size "$size"
-        DISK_DESC+=("${model//[[:cntrl:]]/ } ($_HS)")
-    done < <(lsblk -bdnPp -o NAME,SIZE,TYPE,RM,RO,MODEL 2>/dev/null)
+        DISK_TRAN+=("${tran//[^a-z0-9]/}")
+        DISK_DESC+=("${model//[[:cntrl:]]/ } ($_HS${tran:+, ${tran//[^a-z0-9]/}})")
+    done < <(lsblk -bdnPp -o NAME,SIZE,TYPE,RM,RO,MODEL,TRAN 2>/dev/null)
 }
 
 # Disks with at least $1 GiB free -> DISK_OK (indices into DISKS)
@@ -109,6 +111,12 @@ find_part() {
 # (ext4 or vfat) with label $4 -> PART. The partition table is saved first.
 make_partition() {
     local disk=$1 bytes=$2 fs=$3 label=$4 ptt type ss sectors start end before after n dump i
+    # GRUB must see the disk (BIOS/EFI drive): a disk it cannot address ("cannot find a GRUB drive")
+    # could not boot the installer entry; checked before anything is written
+    if command -v grub-probe >/dev/null && ! as_root grub-probe -t drive -d "$disk" >/dev/null 2>&1; then
+        warn "GRUB cannot address $disk (grub-probe: no drive; often a USB disk or one the firmware does not list): choose another disk"
+        return 1
+    fi
     ptt=$(lsblk -dno PTTYPE "$disk" 2>/dev/null)
     case $ptt in gpt|dos) ;; *) warn "$disk has no GPT or MBR partition table ($ptt)"; return 1 ;; esac
     largest_gap "$disk" || { warn "no unpartitioned space on $disk"; return 1; }
