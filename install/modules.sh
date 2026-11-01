@@ -130,12 +130,13 @@ declare -A FIX_TITLE FIX_DESC FIX_PARAM FIX_WHO FIX_SEL
 
 FIX_TITLE[amdgpu-dpm]="amdgpu.dpm=0"
 FIX_PARAM[amdgpu-dpm]="amdgpu.dpm=0"
-FIX_WHO[amdgpu-dpm]="iMac late 2015 (iMac16,x and iMac17,1)"
+FIX_WHO[amdgpu-dpm]="iMac 27-inch late 2015 (iMac17,1) with AMD graphics"
 FIX_DESC[amdgpu-dpm]="Switches the power management of the AMD GPU off. On the iMac late 2015 the \
 amdgpu driver otherwise waits for it for a long time: booting and rebooting takes forever. Costs a \
 little idle power and the GPU clocks stay fixed."
 fix_match_amdgpu-dpm() {
-    [[ $DMI_VENDOR == Apple* && $DMI_PRODUCT == iMac1[67],* ]] && (( GPU_AMDGPU ))
+    # the 21.5-inch models of late 2015 (iMac16,x) have Intel graphics only
+    [[ $DMI_VENDOR == Apple* && $DMI_PRODUCT == iMac17,1 ]] && (( GPU_AMDGPU ))
 }
 
 fixes_matching() {

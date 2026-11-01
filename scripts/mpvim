@@ -428,9 +428,9 @@ class Covers:
 
 # ---------------------------------------------------------------- Dancer
 # :dancer shows a dancing pixel-art sprite instead of the cover: by default the pumpkin goose
-# of the fury engine (assets/mpvim/dancer.png), MPVIM_DANCER=<png> picks another sheet. A sheet is an Aseprite export
-# (PNG + JSON next to it with "frames" x/y/w/h, in order); without the JSON the PNG is one
-# frame. Resampling filters smear pixel art (the 3 px faces turn to mud), so the sprite is
+# of the fury engine (assets/mpvim/dancer.png in this repository, found through the real path of
+# this script), MPVIM_DANCER=<png> picks another sheet. A sheet is an Aseprite export (PNG + JSON
+# next to it with "frames" x/y/w/h, in order); without the JSON the PNG is one frame. Resampling filters smear pixel art (the 3 px faces turn to mud), so the sprite is
 # shrunk by a vote per target pixel (the color covering most of it wins; outlines and rare
 # detail colors such as the mouth get a bonus), and the eyes are taken out first and drawn
 # again at the new size: crisp, with their highlight, and they can blink.
@@ -438,9 +438,8 @@ class Covers:
 # to and fro, wiggle, twirl, a big jump with a heart burst. Paused or stopped = asleep.
 # Drawn like the cover (raw cells in an area curses keeps blank), but only rows that
 # changed are rewritten, inside a synchronized update: no flicker at 15 frames per second.
-# the sheet lives in the repository (assets/mpvim/dancer.png + .json), found from the real path of this
-# script (it is linked into ~/.local/bin)
-DANCER_SHEET = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "assets", "mpvim", "dancer.png")
+DANCER_SHEET = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                             "..", "assets", "mpvim", "dancer.png"))
 DANCER_SCALES = (3, 2, 1, 0.75, 2 / 3, 0.6, 0.5, 0.4)
 DANCER_BPM = 120
 DANCER_JUMP = 2.0       # the big jump on beat 16, in hops

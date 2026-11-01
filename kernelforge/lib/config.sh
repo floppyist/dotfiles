@@ -53,6 +53,13 @@ config_generate() {
     kcfg --set-str SYSTEM_TRUSTED_KEYS "" --set-str SYSTEM_REVOCATION_KEYS "" \
          -d LOCALVERSION_AUTO
 
+    # Module signing needs a key that the build makes with openssl (certs/signing_key.pem). That is
+    # what fails on some systems (openssl configuration, the key type of the distribution's config),
+    # and it buys nothing here: the kernel is not signed for Secure Boot either. Off: no key.
+    # (IMA_APPRAISE_MODSIG would ask for the key as well)
+    kcfg -d MODULE_SIG -d MODULE_SIG_ALL -d MODULE_SIG_FORCE -d IMA_APPRAISE_MODSIG
+    info "module signing off (no certs/signing_key.pem is made)"
+
     if (( KF_NATIVE )); then
         if grep -q '^config X86_NATIVE_CPU' "$K_SRC/arch/x86/Kconfig.cpu" 2>/dev/null; then
             kcfg -e X86_NATIVE_CPU

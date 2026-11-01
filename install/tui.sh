@@ -618,7 +618,7 @@ det_module() {
             if [[ -n $DUAL_TARGET ]]; then
                 d_kv "Install" "${OS_TITLE[$DUAL_TARGET]} on ${DUAL_DISK:-?}" "${F[accent_text]}"
             else
-                d_kv "Install" "no second system (m: choose one)" "${F[muted]}"
+                d_kv "Install" "no second system (chosen after this screen)" "${F[muted]}"
             fi
             if (( ${#OTHER_OS[@]} )); then
                 for l in "${OTHER_OS[@]}"; do d_kv Found "$l" "${F[fg]}"; done
@@ -812,11 +812,6 @@ det_disk() {
     d_kv Free "about $_HS not in any partition" "${F[fg]}"
     d_kv Disk "${DISK_DESC[i]}"
     d_blank
-    if [[ ${DISK_TRAN[i]} == usb ]]; then
-        d_blank
-        d_text "${F[warn]}" "A USB disk: the firmware and GRUB often cannot boot from it (\"cannot find a GRUB drive\"). Only choose it if you know it works."
-    fi
-    d_blank
     d_text "${F[subtle]}" "The installer partition goes to the end of the largest free stretch, so the rest stays in one piece for the new system. The estimate is checked again with root before anything is written."
 }
 
@@ -904,6 +899,17 @@ flow_dualboot() {
         [[ -z $DUAL_TARGET ]] && { DUAL_DISK="" WIN_ISO=""; mods_scan; return 0; }
         if (( ${OS_WIN[$DUAL_TARGET]:-0} )) && (( ! EFI )); then
             info_screen "This machine starts in BIOS mode (no UEFI): the Windows setup is prepared for UEFI only." "Windows needs UEFI"
+            DUAL_TARGET=""; continue
+        fi
+        # an installer partition of an earlier run: the same system goes on there (the download
+        # resumes), another one needs it removed first
+        if state_part_seen; then
+            if [[ $ST_TARGET == "$DUAL_TARGET" ]]; then
+                DUAL_DISK=$ST_DISK
+                [[ $DUAL_TARGET == windows ]] && { screen_winiso; [[ $LS_OUT == next ]] || { DUAL_TARGET=""; [[ $LS_OUT == quit ]] && return 0; continue; }; }
+                mods_scan; LS_OUT=next; return 0
+            fi
+            info_screen "There is an installer partition for ${OS_TITLE[$ST_TARGET]:-$ST_TARGET} from an earlier run ($PART). Install that system first, or remove the partition with ./install.sh dualboot-clean, then choose another one." "Installer partition exists"
             DUAL_TARGET=""; continue
         fi
         othersys_gib "$DUAL_TARGET"
@@ -1202,7 +1208,10 @@ log_line() {
                 CUR_DONE=$(( 10#${BASH_REMATCH[1]} )) CUR_TOTAL=$(( 10#${BASH_REMATCH[2]} )) ;;
         "@@detail "*)   ST_INFO[CUR]=${1#@@detail } ;;
         "@@note "*)     NOTES+=("${1#@@note }") ;;
-        "@@warn "*)     WARNINGS+=("${1#@@warn }") ;;
+        "@@warn "*)     WARNINGS+=("${1#@@warn }")
+                        # in the log view too: a failed step says why right there
+                        l=${1#@@warn }
+                        LOGTAIL+=("! ${l//[[:cntrl:]]/}") ;;
         "@@reboot")     REBOOT=1 ;;
         *)
             l=${1##*$'\r'}
@@ -1294,6 +1303,7 @@ draw_progress() {
             line=${LOGTAIL[start + n]-}
             case $line in
                 "==> "*)                                       lc=$BOLD${F[fg]} ;;
+                "! "*)                                         lc=${F[warn]} ;;
                 *ERROR*|*Error*|*error:*|*failed*|*FAILED*)    lc=${F[err]} ;;
                 *WARNING*|*warning*)                           lc=${F[warn]} ;;
                 *)                                             lc=${F[muted]} ;;
@@ -1334,6 +1344,8 @@ run_steps_tui() {
         st=${RUN[i]}
         if (( ABORT )); then ST_STATE[i]=cancelled; (( i++ )); continue; fi
         CUR=$i CUR_DONE=0 CUR_TOTAL=0 RUN_T0=$SECONDS
+        # what a failed attempt reported is dropped when the step is retried
+        NW=${#WARNINGS[@]} NN=${#NOTES[@]}
         ST_STATE[i]=running ST_INFO[i]=""
         printf '\n==> %s\n' "${STEP_TITLE[$st]}" >> "$LOG"
         # Background steps ignore SIGINT (bash does that for &), and SIGHUP here: closing the
@@ -1358,7 +1370,7 @@ run_steps_tui() {
             draw_progress
             read_key 0.5 || continue
             case $KEY in
-                r)                ASK=""; continue 2 ;;
+                r)                ASK=""; WARNINGS=("${WARNINGS[@]:0:NW}") NOTES=("${NOTES[@]:0:NN}"); continue 2 ;;
                 s|enter)          ASK=""; (( i++ )); continue 2 ;;
                 a|q|esc|ctrl-c)   ASK=""; ABORT=1; (( i++ )); continue 2 ;;
             esac
@@ -1421,8 +1433,9 @@ screen_done() {
         DOC_TITLE_C=${F[err]}
     elif (( ABORT )); then title="Stopped"; DOC_TITLE_C=${F[warn]}
     else title="$G_OK Done"; DOC_TITLE_C=${F[ok]}; fi
-    # X can be started right here, from the tty the installer runs on
-    if [[ $FLOW != links ]] && (( ! IN_X && ! DONE_PROBLEMS && ! ABORT )) && command -v startx >/dev/null; then
+    # X can be started right here, from the console the installer runs on (not over ssh)
+    if [[ $FLOW != links ]] && (( ! IN_X && ! DONE_PROBLEMS && ! ABORT )) && command -v startx >/dev/null &&
+       [[ $(tty 2>/dev/null) == /dev/tty[0-9]* ]]; then
         btns+=("Start the desktop"); acts+=(startx)
     fi
     (( REBOOT )) && { btns+=("Reboot now"); acts+=(reboot); }

@@ -397,7 +397,9 @@ The module **Dual boot** is on by default when the firmware lists another system
 distribution) or there are NTFS partitions. With GRUB it installs `os-prober` and `ntfs-3g`, sets
 `GRUB_DISABLE_OS_PROBER=false` (GRUB switches it off by default; the old file is kept as
 `/etc/default/grub.dotfiles-bak`), makes the boot menu again and checks the `Found ...` lines of os-prober against the
-firmware list. When a system is missing it says why. At the end it prints what you have to do by hand:
+firmware list. When a system is missing it says why. Unplug USB sticks first: os-prober would find the system on
+an installer stick, and GRUB cannot boot it from there (`cannot find a GRUB drive`); the step stops then and asks
+you to unplug it and retry. At the end it prints what you have to do by hand:
 
 - Windows **Fast Startup** off (a partition Windows has not released cannot be read, os-prober skips it).
 - The **clock**: Windows takes the hardware clock for local time, Linux for UTC (`RealTimeIsUniversal` in Windows).
@@ -406,19 +408,26 @@ firmware list. When a system is missing it says why. At the end it prints what y
 **A second system, set up for you.** In the installer the module asks which system you want (Arch, Debian, Ubuntu LTS,
 Fedora, Alpine, Windows) and does the rest:
 
-1. Looks for **unallocated** space on the internal disks (nothing is shrunk, moved or deleted: free it first in Windows
-   Disk Management or gparted) and lets you pick the disk when several have room.
-2. Makes a partition from the end of the largest free stretch (the old table is saved to
-   `~/.local/state/dotfiles/partition-table-*.sfdisk`, put back with `sfdisk DISK < FILE`). The rest of the space stays
-   in one piece for the new system.
-3. Downloads the current ISO from the distribution's own https server, checks it against the published SHA-256
-   (resumes after an interruption) and writes it to that partition. **Windows**: Microsoft has no stable download
+1. Looks for **unallocated** space on the internal disks (USB disks are never offered; nothing is shrunk, moved or
+   deleted: free it first in Windows Disk Management or gparted) and lets you pick the disk. GRUB must be able to
+   address it (`grub-probe`), checked before anything is written.
+2. Makes a partition from the end of the largest free stretch (the old table is saved first, to
+   `~/.local/state/dotfiles/partition-table-*.sfdisk`; `sudo sfdisk --no-reread DISK < FILE` puts it back). It works
+   on the disk this system runs from: the new partition is added without re-reading the others. The rest of the
+   space stays in one piece for the new system. The partition is recorded by its PARTUUID and file system UUID in
+   `~/.local/state/dotfiles/dualboot.state`; a partition is never taken by its label.
+3. Downloads the current ISO (as you, not as root) from the distribution's own https server (Ubuntu: the newest
+   supported LTS), checks it against the published SHA-256 (resumes after an interruption) and keeps it on that
+   partition; Alpine is unpacked there like a boot stick. **Windows**: Microsoft has no stable download
    link, so you save the ISO in `~/Downloads` and the installer finds it; it copies the files to a FAT32 partition and
    splits `install.wim` for it (UEFI only).
-4. Adds a GRUB entry (`/etc/grub.d/45_dotfiles_iso`) that boots the installer from the disk, no USB stick.
+4. Adds a GRUB entry (`/etc/grub.d/45_dotfiles_iso`, finds the partition by its file system UUID) that boots the
+   installer from the disk, no USB stick.
 5. You restart, choose the entry, and the distribution's own installer installs into the free space. Afterwards
-   `./install.sh dualboot-clean` removes the entry and the installer partition, and `./install.sh modules dualboot`
-   puts the new system in the menu.
+   `./install.sh dualboot-clean` removes the entry and the installer partition (it asks first, and also offers
+   partitions an earlier version left without a record: only unformatted ones or ones with its label, made after the
+   first saved table), and `./install.sh modules dualboot` puts the new system in the menu. Running the installer
+   again with the same system reuses the partition; another system needs `dualboot-clean` first.
 
 Arch, Debian and Ubuntu boot through the `loopback.cfg` of their ISOs. The boot lines of Fedora and Alpine are written
 from their documentation and **not tested on hardware**; the Windows setup is not either.
@@ -434,7 +443,7 @@ parameters go into `GRUB_CMDLINE_LINUX_DEFAULT` (other boot loaders: you get the
 
 | Fix | For |
 | --- | --- |
-| `amdgpu-dpm` (`amdgpu.dpm=0`) | iMac late 2015: without it booting and rebooting takes forever |
+| `amdgpu-dpm` (`amdgpu.dpm=0`) | iMac 27-inch late 2015 (`iMac17,1`, AMD graphics): without it booting and rebooting takes forever |
 
 A new fix is a few lines in `install/modules.sh` (`FIXES`, `FIX_*`, `fix_match_<id>`).
 

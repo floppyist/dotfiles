@@ -16,11 +16,15 @@ What it does, in this order (`lib/`):
    `cdn.kernel.org` over https. The signature must be from one of the pinned keys (Torvalds, Kroah-Hartman, Levin),
    checked in a private GnuPG home.
 3. `config.sh`: the running configuration (`/proc/config.gz`), `olddefconfig`, `localmodconfig` against `lsmod`,
-   a list of modules that stay anyway, `X86_NATIVE_CPU`, the release name `-kf` (`-kf2`, ... if it exists). It stops
-   if the result lacks the root file system, `DM_CRYPT` for an encrypted root, or BTF.
+   a list of modules that stay anyway, `X86_NATIVE_CPU`, module signing off (the build would make a signing key with
+   openssl, which fails on some systems; the kernel is not signed for Secure Boot either), the release name `-kf`
+   (`-kf2`, ... if it exists). It stops if the result lacks the root file system, `DM_CRYPT` for an encrypted root,
+   or BTF.
 4. `build.sh`: `make` as your user (nice 10, jobs by memory), modules into a staging directory.
 5. `boot.sh`: the only part that uses root (sudo): modules to `/lib/modules/<release>`, `vmlinuz`, `System.map`,
    `config`, initramfs, boot entry. Nothing that exists is overwritten; on a failure what this run created is removed.
+   `--set-default` (the installer uses it) makes the new kernel the default entry: GRUB gets `GRUB_DEFAULT=saved`
+   (old file: `/etc/default/grub.kernelforge-bak`) and `grub-set-default`, systemd-boot `bootctl set-default`.
 
 Environment: `KF_PROTOCOL=1` prints the installer's `@@` messages, `KF_NONINTERACTIVE=1` never asks (sudo -n).
 Logs: `~/.local/state/kernelforge/`. Source and build: `~/.cache/kernelforge` (about 8 GB; delete it afterwards).

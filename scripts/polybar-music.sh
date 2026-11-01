@@ -69,69 +69,85 @@ show() {
     emit "%{F$DF_ACCENT}$icon %{F-}$title %{F$DF_MUTED}-$left%{F-}"
 }
 
-# Several players at once (an idle mpv next to Firefox playing YouTube): playerctl prints a line
-# for each of them, so showing every line made the capsule jump between them and go blank
-# (Firefox: on and off). State per player instead; shown is the player that plays (the latest
-# one), else the paused one. A gap of a moment (track change, ad) does not blank the capsule.
+# Several players at once (an idle mpv next to Firefox playing YouTube): playerctl reports each of
+# them (--all-players), and showing every line made the capsule jump between them and go blank.
+# State per player instead (by instance: two Firefox windows are two players); shown is the player
+# that started playing last, else the paused one. A gap of a moment (track change, ad) does not
+# blank the capsule.
+# Fields are separated by \x1f, not tabs: read collapses repeated tab separators (tab is IFS
+# whitespace), so a player without position or length (Firefox) shifted its title out of place.
+SEP=$'\x1f'
 declare -A p_status p_pos p_len p_title p_seq
-seq=0
+seq=0 best_player=""
 
-# the player to show -> best (empty: none)
+# the player to show -> best_player (empty: none)
 choose() {
-    local n best="" bs=-1 rank r
+    local n rank r bs=-1
+    best_player=""
     for n in "${!p_status[@]}"; do
         case ${p_status[$n]} in Playing) rank=2 ;; Paused) rank=1 ;; *) continue ;; esac
         [[ -n ${p_title[$n]} ]] || continue
-        r=$(( rank * 1000000 + ${p_seq[$n]} ))
-        (( r > bs )) && { bs=$r; best=$n; }
+        r=$(( rank * 1000000 + ${p_seq[$n]:-0} ))
+        (( r > bs )) && { bs=$r; best_player=$n; }
     done
-    best_player=$best
 }
 
-# forget players that are gone (playerctl does not say so by name)
+forget() { unset "p_status[$1]" "p_pos[$1]" "p_len[$1]" "p_title[$1]" "p_seq[$1]"; }
+
+# forget players that are gone (a closed player sends no line of its own)
 prune() {
     local n alive
     alive=" $(playerctl -l 2>/dev/null | tr '\n' ' ')"
     for n in "${!p_status[@]}"; do
-        [[ $alive == *" $n "* ]] && continue
-        unset "p_status[$n]" "p_pos[$n]" "p_len[$n]" "p_title[$n]" "p_seq[$n]"
+        [[ $alive == *" $n "* ]] || forget "$n"
     done
 }
 
 update() {
-    local name=$1 status=$2 old
-    [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || return 0
-    old=${p_status[$name]-}
-    if [[ -z $status ]]; then
-        # no status: this player has nothing (any more)
-        unset "p_status[$name]" "p_pos[$name]" "p_len[$name]" "p_title[$name]" "p_seq[$name]"
+    local name=$1 status=$2
+    if [[ ! $name =~ ^[A-Za-z0-9._-]+$ ]]; then
+        prune          # an empty line: a player went away
         return 0
     fi
-    [[ $status != "$old" || $status == Playing ]] && p_seq[$name]=$(( ++seq ))
+    if [[ -z $status ]]; then
+        forget "$name"
+        return 0
+    fi
+    # the order of starting decides between two playing players, not who reported last
+    [[ $status != "${p_status[$name]-}" ]] && p_seq[$name]=$(( ++seq ))
     p_status[$name]=$status p_pos[$name]=$3 p_len[$name]=$4 p_title[$name]=$5
-    [[ $status != "$old" ]] && prune
+}
+
+refresh() {
+    choose
+    if [[ -n $best_player ]]; then
+        blank_wait=0
+        show "${p_status[$best_player]}" "${p_pos[$best_player]}" "${p_len[$best_player]}" "${p_title[$best_player]}"
+    else
+        blank_wait=1       # blank only if nothing comes back within 2 s
+    fi
 }
 
 blank_wait=0
 while true; do
     # --follow keeps running while players come and go; restart it if it ever exits
-    exec {src}< <(exec playerctl --follow metadata \
-        --format $'{{playerName}}\t{{status}}\t{{position}}\t{{mpris:length}}\t{{title}}' 2>/dev/null)
+    exec {src}< <(exec playerctl --all-players --follow metadata \
+        --format "{{playerInstance}}$SEP{{status}}$SEP{{position}}$SEP{{mpris:length}}$SEP{{title}}" 2>/dev/null)
     pid=$!
     trap 'kill "$pid" 2>/dev/null' EXIT
     while true; do
-        if IFS=$'\t' read -r -t "$(( blank_wait ? 2 : 60 ))" name status pos len title <&"$src"; then
+        if IFS=$SEP read -r -t "$(( blank_wait ? 2 : 60 ))" name status pos len title <&"$src"; then
             update "$name" "$status" "$pos" "$len" "$title"
-            choose
-            if [[ -n $best_player ]]; then
-                blank_wait=0
-                show "${p_status[$best_player]}" "${p_pos[$best_player]}" "${p_len[$best_player]}" "${p_title[$best_player]}"
-            else
-                blank_wait=1       # blank only if nothing comes back within 2 s
-            fi
+            refresh
         elif (( $? > 128 )); then
             orphaned && exit 0
-            if (( blank_wait )); then blank_wait=0; emit ""; fi
+            if (( blank_wait )); then
+                blank_wait=0
+                emit ""
+            else
+                prune
+                refresh
+            fi
         else
             break
         fi

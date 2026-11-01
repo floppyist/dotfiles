@@ -8,6 +8,10 @@
 #      new system offers it.
 # The system itself is then installed by its own installer (reboot, choose the entry).
 # ./install.sh dualboot-clean removes the entry and the partition again.
+#
+# The partition is ours only by the record in $DUAL_STATE (its PARTUUID and file system UUID),
+# never by its label: a USB stick labelled the same must never be written to or deleted. GRUB
+# finds it by the file system UUID for the same reason.
 
 OSES=(arch debian ubuntu fedora alpine windows)
 declare -A OS_TITLE OS_DESC OS_NEED OS_MB OS_EXP OS_WIN
@@ -21,7 +25,7 @@ OS_DESC[debian]="The current stable netinst ISO of debian.org (about 0.8 GB). Th
 OS_NEED[debian]=20 OS_MB[debian]=800
 
 OS_TITLE[ubuntu]="Ubuntu (LTS)"
-OS_DESC[ubuntu]="The newest Ubuntu 24.04 LTS Desktop ISO of ubuntu.com (about 6 GB). Boots the live system; \"Install Ubuntu\" uses the free space."
+OS_DESC[ubuntu]="The Desktop ISO of the newest Ubuntu LTS from ubuntu.com (about 6 GB). Boots the live system; \"Install Ubuntu\" uses the free space."
 OS_NEED[ubuntu]=30 OS_MB[ubuntu]=6200
 
 OS_TITLE[fedora]="Fedora Workstation"
@@ -29,16 +33,17 @@ OS_DESC[fedora]="The current Fedora Workstation Live ISO of fedoraproject.org (a
 OS_NEED[fedora]=30 OS_MB[fedora]=2900 OS_EXP[fedora]=1
 
 OS_TITLE[alpine]="Alpine Linux"
-OS_DESC[alpine]="The current Alpine standard ISO of alpinelinux.org (about 0.4 GB), copied onto the partition; setup-alpine installs into the free space. Boot line written for it, not tested on hardware."
+OS_DESC[alpine]="The current Alpine standard ISO of alpinelinux.org (about 0.4 GB), unpacked onto the partition like a boot stick; setup-alpine installs into the free space. Boot line written for it, not tested on hardware."
 OS_NEED[alpine]=8 OS_MB[alpine]=400 OS_EXP[alpine]=1
 
 OS_TITLE[windows]="Windows 10 / 11"
 OS_DESC[windows]="Your Windows ISO (Microsoft offers no stable download link: get it from microsoft.com/software-download and put it in ~/Downloads). Copied onto a FAT32 partition, install.wim split for FAT32; Windows Setup then installs into the free space. UEFI only."
 OS_NEED[windows]=64 OS_MB[windows]=6500 OS_WIN[windows]=1
 
-ISO_LABEL=DOTFILES-ISO         # partition label of the installer partition (Linux)
+ISO_LABEL=DOTFILES-ISO         # file system label of the installer partition (Linux; only a hint)
 WIN_LABEL=WININSTALL           # the same for the Windows setup (FAT32: 11 characters at most)
 GRUB_ISO_ENTRY=$SYSROOT/etc/grub.d/45_dotfiles_iso
+DUAL_STATE=$STATE_DIR/dualboot.state
 CURL_SAFE=(curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20)
 
 DUAL_TARGET=""       # one of OSES; empty = only detect
@@ -48,7 +53,8 @@ WIN_ISO=""           # path of the Windows ISO
 # ── Disks ─────────────────────────────────────────────────────────────────────────
 
 # Internal disks and the space no partition uses (an estimate without root: size minus the
-# partitions) -> DISKS, DISK_FREE (bytes), DISK_DESC
+# partitions) -> DISKS, DISK_FREE (bytes), DISK_DESC, DISK_TRAN. USB disks are left out: the
+# firmware and GRUB often cannot boot from them, and an installer stick must never be chosen.
 detect_disks() {
     local line name size type rm ro model tran psum t s
     DISKS=() DISK_FREE=() DISK_DESC=() DISK_TRAN=()
@@ -60,8 +66,9 @@ detect_disks() {
         [[ $line =~ RM=\"([01])\" ]] && rm=${BASH_REMATCH[1]} || rm=0
         [[ $line =~ RO=\"([01])\" ]] && ro=${BASH_REMATCH[1]} || ro=0
         model=""; [[ $line =~ MODEL=\"([^\"]*)\" ]] && model=${BASH_REMATCH[1]}
-        tran=""; [[ $line =~ TRAN=\"([^\"]*)\" ]] && tran=${BASH_REMATCH[1]}
+        tran=""; [[ $line =~ TRAN=\"([^\"]*)\" ]] && tran=${BASH_REMATCH[1]//[^a-z0-9]/}
         [[ $type == disk && $rm == 0 && $ro == 0 && $name == /dev/* && $size -gt 0 ]] || continue
+        [[ $tran == usb ]] && continue
         psum=0
         while read -r s t; do
             [[ $t == part && $s =~ ^[0-9]+$ ]] && (( psum += s ))
@@ -69,10 +76,9 @@ detect_disks() {
         # 2 MiB at the start, the GPT copy at the end
         s=$(( size - psum - 3 * 1048576 ))
         (( s < 0 )) && s=0
-        DISKS+=("$name") DISK_FREE+=("$s")
+        DISKS+=("$name") DISK_FREE+=("$s") DISK_TRAN+=("$tran")
         human_size "$size"
-        DISK_TRAN+=("${tran//[^a-z0-9]/}")
-        DISK_DESC+=("${model//[[:cntrl:]]/ } ($_HS${tran:+, ${tran//[^a-z0-9]/}})")
+        DISK_DESC+=("${model//[[:cntrl:]]/ } ($_HS${tran:+, $tran})")
     done < <(lsblk -bdnPp -o NAME,SIZE,TYPE,RM,RO,MODEL,TRAN 2>/dev/null)
 }
 
@@ -83,8 +89,15 @@ disks_with_room() {
     for i in "${!DISKS[@]}"; do (( DISK_FREE[i] >= need )) && DISK_OK+=("$i"); done
 }
 
-# The largest unpartitioned stretch of disk $1 (root) -> GAP_START GAP_SECTORS SECTOR (512-byte
-# units of the disk's sector size)
+# Transport of disk $1 (usb, sata, nvme, ...)
+disk_tran() {
+    local t
+    t=$(lsblk -dno TRAN "$1" 2>/dev/null)
+    printf '%s' "${t//[^a-z0-9]/}"
+}
+
+# The largest unpartitioned stretch of disk $1 (root) -> GAP_START GAP_SECTORS SECTOR (in units
+# of the disk's logical sector size)
 largest_gap() {
     local disk=$1 a b c best=0
     GAP_START=0 GAP_SECTORS=0
@@ -97,28 +110,84 @@ largest_gap() {
     (( GAP_SECTORS > 0 ))
 }
 
-# The partition with label $1 -> PART (empty: none)
-find_part() {
-    local n l
+# ── The record of our partition ───────────────────────────────────────────────────
+
+# $DUAL_STATE -> ST_TARGET ST_DISK ST_PARTUUID ST_FSUUID (only well-formed values)
+state_read() {
+    local k v
+    ST_TARGET="" ST_DISK="" ST_PARTUUID="" ST_FSUUID=""
+    [[ -f $DUAL_STATE ]] || return 1
+    while IFS='=' read -r k v; do
+        case $k in
+            target)   [[ $v =~ ^[a-z]+$ ]] && ST_TARGET=$v ;;
+            disk)     [[ $v =~ ^/dev/[A-Za-z0-9/_-]+$ ]] && ST_DISK=$v ;;
+            partuuid) [[ $v =~ ^[A-Fa-f0-9-]+$ ]] && ST_PARTUUID=$v ;;
+            fsuuid)   [[ $v =~ ^[A-Fa-f0-9-]+$ ]] && ST_FSUUID=$v ;;
+        esac
+    done < "$DUAL_STATE"
+    [[ -n $ST_PARTUUID ]]
+}
+
+state_write() {
+    mkdir -p "$STATE_DIR" || return 1
+    printf 'target=%s\ndisk=%s\npartuuid=%s\nfsuuid=%s\n' "$ST_TARGET" "$ST_DISK" "$ST_PARTUUID" "$ST_FSUUID" \
+        > "$DUAL_STATE.new" && mv -f "$DUAL_STATE.new" "$DUAL_STATE"
+}
+
+# The partition of the record is there (without root, from udev's view) -> PART
+state_part_seen() {
+    local n u
     PART=""
-    while read -r n l; do
-        [[ $l == "$1" ]] && { PART=$n; return 0; }
-    done < <(lsblk -nrpo NAME,LABEL 2>/dev/null)
+    state_read || return 1
+    while read -r n u; do
+        [[ ${u,,} == "${ST_PARTUUID,,}" ]] && { PART=$n; return 0; }
+    done < <(lsblk -nrpo NAME,PARTUUID 2>/dev/null)
     return 1
 }
 
-# Makes a partition of $2 bytes at the END of the largest free stretch of disk $1, formatted as $3
-# (ext4 or vfat) with label $4 -> PART. The partition table is saved first.
+# The partition of the record -> PART (root: blkid reads the partition table itself)
+find_ours() {
+    PART=""
+    state_read || return 1
+    PART=$(as_root blkid -t "PARTUUID=$ST_PARTUUID" -o device 2>/dev/null | head -1)
+    [[ -b $PART ]] || { PART=""; return 1; }
+}
+
+# PART still has the file system this installer made (or none at all yet: the run stopped before
+# mkfs). Anything else means another installer used it: never formatted or deleted then.
+part_still_ours() {
+    local u
+    u=$(as_root blkid -s UUID -o value "$PART" 2>/dev/null)
+    if [[ -n $ST_FSUUID ]]; then
+        [[ $u == "$ST_FSUUID" ]]
+    else
+        [[ -z $u && -z $(as_root blkid -s TYPE -o value "$PART" 2>/dev/null) ]]
+    fi
+}
+
+# Number of partition $1 on its disk -> PART_NUM, its disk -> PART_DISK
+part_pos() {
+    local d
+    PART_NUM=$(cat "/sys/class/block/${1##*/}/partition" 2>/dev/null)
+    d=$(lsblk -dno PKNAME "$1" 2>/dev/null)
+    PART_DISK=/dev/${d//[^A-Za-z0-9_-]/}
+    [[ $PART_NUM =~ ^[0-9]+$ && -b $PART_DISK ]]
+}
+
+# Makes a partition of $2 bytes at the END of the largest free stretch of disk $1 -> PART, and
+# records it. The partition table is saved first; nothing that exists is touched.
 make_partition() {
-    local disk=$1 bytes=$2 fs=$3 label=$4 ptt type ss sectors start end before after n dump i
-    # GRUB must see the disk (BIOS/EFI drive): a disk it cannot address ("cannot find a GRUB drive")
-    # could not boot the installer entry; checked before anything is written
-    if command -v grub-probe >/dev/null && ! as_root grub-probe -t drive -d "$disk" >/dev/null 2>&1; then
-        warn "GRUB cannot address $disk (grub-probe: no drive; often a USB disk or one the firmware does not list): choose another disk"
-        return 1
+    local disk=$1 bytes=$2 type=$3 probe out rc ptt ss sectors start end n dump i f part_number
+    # GRUB must see the disk: one it cannot address ("cannot find a GRUB drive") could not boot
+    # the installer entry. Checked before anything is written.
+    if command -v grub-probe >/dev/null; then
+        probe=$(as_root grub-probe -t drive -d "$disk" 2>&1) || {
+            warn "GRUB cannot address $disk (often a USB disk or one the firmware does not list): choose another disk. grub-probe said: ${probe//[[:cntrl:]]/ }"
+            return 1; }
+        say "GRUB addresses $disk as ${probe//[[:cntrl:]]/ }"
     fi
     ptt=$(lsblk -dno PTTYPE "$disk" 2>/dev/null)
-    case $ptt in gpt|dos) ;; *) warn "$disk has no GPT or MBR partition table ($ptt)"; return 1 ;; esac
+    case $ptt in gpt|dos) ;; *) warn "$disk has no GPT or MBR partition table (${ptt:-none})"; return 1 ;; esac
     largest_gap "$disk" || { warn "no unpartitioned space on $disk"; return 1; }
     ss=$SECTOR
     sectors=$(( (bytes + 1048575) / 1048576 * 1048576 / ss ))
@@ -129,45 +198,79 @@ make_partition() {
         return 1
     fi
     if [[ $ptt == dos ]]; then
-        n=$(lsblk -nrpo TYPE,NAME "$disk" 2>/dev/null | grep -c '^part')
+        # MBR: four primary slots (an extended partition takes one)
+        n=0
+        for f in /sys/class/block/"${disk##*/}"/*/partition; do
+            [[ -r $f ]] && (( $(< "$f") <= 4 )) && (( n++ ))
+        done
         (( n >= 4 )) && { warn "$disk has 4 primary partitions: no room for another"; return 1; }
+        case $type in
+            linux) type=83 ;;
+            fat)   type=c ;;
+        esac
+    else
+        case $type in
+            linux) type=0FC63DAF-8483-4772-8E79-3D69D8477DE4 ;;
+            fat)   type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 ;;
+        esac
     fi
-    # the old table, to put back with: sfdisk DISK < FILE
+    # the old table, to put back with: sfdisk --no-reread DISK < FILE. Without it nothing is written.
+    mkdir -p "$STATE_DIR" || return 1
     dump=$STATE_DIR/partition-table-${disk##*/}-$STAMP.sfdisk
-    as_root sfdisk --dump "$disk" > "$dump" 2>/dev/null && say "partition table saved: $dump (restore: sudo sfdisk $disk < $dump)"
-    note "Partition table of $disk saved to ${dump/#$HOME/\~} (sudo sfdisk $disk < FILE puts it back)."
-    case $fs$ptt in
-        ext4*)    type=L ;;
-        vfatgpt)  type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 ;;
-        vfatdos)  type=c ;;
-    esac
-    before=$(lsblk -nrpo NAME "$disk" 2>/dev/null)
+    if ! as_root sfdisk --dump "$disk" > "$dump" 2>/dev/null || [[ ! -s $dump ]]; then
+        warn "could not save the partition table of $disk: nothing changed"
+        return 1
+    fi
+    say "partition table saved: $dump"
+    note "Partition table of $disk before the change: ${dump/#$HOME/\~} (sudo sfdisk --no-reread $disk < FILE puts it back)."
     detail "partitioning $disk"
-    printf 'start=%d, size=%d, type=%s\n' "$start" "$sectors" "$type" | as_root sfdisk --append -q "$disk" >/dev/null || {
-        warn "sfdisk failed on $disk"; return 1; }
-    as_root udevadm settle 2>/dev/null
+    # The disk is in use (this system lives on it): sfdisk would refuse to write it, and the kernel
+    # cannot re-read the whole table. A partition in free space touches nothing that exists, so the
+    # table is written without the re-read and the kernel is told about the new one (partx).
+    out=$(printf 'start=%d, size=%d, type=%s\n' "$start" "$sectors" "$type" |
+          as_root sfdisk --append --no-reread --no-tell-kernel -q "$disk" 2>&1)
+    rc=$?
+    printf '%s\n' "$out"
+    # what counts is the table on the disk (some versions report the busy disk as an error)
     PART=""
+    while read -r f out; do
+        [[ $f == /dev/* && $out =~ start=\ *$start, ]] && { PART=$f; break; }
+    done < <(as_root sfdisk --dump "$disk" 2>/dev/null)
+    [[ -n $PART ]] || { warn "sfdisk did not write the partition ($rc): ${out//[[:cntrl:]]/ }"; return 1; }
+    (( rc )) && say "sfdisk reported an error, but the partition is in the table: going on"
+    part_number=${PART##*[!0-9]}
+    as_root partx -a --nr "$part_number" "$disk" >/dev/null 2>&1
+    as_root udevadm settle 2>/dev/null
     for (( i = 0; i < 15; i++ )); do
-        after=$(lsblk -nrpo NAME "$disk" 2>/dev/null)
-        PART=$(comm -13 <(sort <<< "$before") <(sort <<< "$after") | head -1)
         [[ -b $PART ]] && break
-        PART=""; sleep 1
+        as_root partx -a --nr "$part_number" "$disk" >/dev/null 2>&1
+        sleep 1
     done
-    [[ -n $PART ]] || { warn "the new partition did not show up (sudo partprobe $disk)"; return 1; }
-    say "partition $PART: $(( sectors * ss / 1048576 )) MB"
+    [[ -b $PART ]] || { warn "the new partition $PART did not show up: restart and run the installer again"; return 1; }
+    ST_TARGET=$DUAL_TARGET ST_DISK=$disk ST_FSUUID=""
+    ST_PARTUUID=$(as_root blkid -s PARTUUID -o value "$PART" 2>/dev/null)
+    [[ $ST_PARTUUID =~ ^[A-Fa-f0-9-]+$ ]] || { warn "no PARTUUID for $PART"; return 1; }
+    state_write || return 1
+    say "partition $PART: $(( sectors * ss / 1048576 )) MB (PARTUUID $ST_PARTUUID)"
+}
+
+# Formats PART as $1 (ext4, vfat) and records the file system UUID -> ST_FSUUID
+format_part() {
+    local fs=$1
     detail "formatting $PART"
     case $fs in
-        ext4) as_root mkfs.ext4 -q -F -L "$label" "$PART" || return 1 ;;
-        vfat) as_root mkfs.vfat -F 32 -n "$label" "$PART" >/dev/null || return 1 ;;
+        ext4) as_root mkfs.ext4 -q -F -L "$ISO_LABEL" "$PART" || return 1 ;;
+        vfat) as_root mkfs.vfat -F 32 -n "$WIN_LABEL" "$PART" >/dev/null || return 1 ;;
     esac
     as_root udevadm settle 2>/dev/null
-    return 0
+    ST_FSUUID=$(as_root blkid -s UUID -o value "$PART" 2>/dev/null)
+    [[ $ST_FSUUID =~ ^[A-Fa-f0-9-]+$ ]] || { warn "no file system UUID for $PART"; return 1; }
+    state_write
 }
 
 # ── ISO sources ───────────────────────────────────────────────────────────────────
 
-# os_resolve ID -> ISO_URL ISO_SHA (the file name on the partition is ID.iso). The checksums
-# come from the same https server as the file.
+# os_resolve ID -> ISO_URL ISO_SHA. The checksums come from the same https server as the file.
 os_resolve() {
     local base sums line n h
     ISO_URL="" ISO_SHA=""
@@ -184,7 +287,11 @@ os_resolve() {
             ISO_SHA=${line%% *}; n=${line##* }
             ISO_URL=$base/$n ;;
         ubuntu)
-            base=https://releases.ubuntu.com/noble
+            # the newest supported LTS (its code name), then its newest point release
+            n=$("${CURL_SAFE[@]}" https://changelogs.ubuntu.com/meta-release-lts |
+                awk '/^Dist: / {d = $2} /^Supported: 1/ {s = d} END {print s}')
+            [[ $n =~ ^[a-z]+$ ]] || return 1
+            base=https://releases.ubuntu.com/$n
             sums=$("${CURL_SAFE[@]}" "$base/SHA256SUMS") || return 1
             line=$(grep -E '^[0-9a-f]{64} \*ubuntu-[0-9][0-9.]*-desktop-amd64\.iso$' <<< "$sums" | sort -t'*' -k2 -V | tail -1)
             ISO_SHA=${line%% *}; n=${line##*\*}
@@ -207,20 +314,21 @@ os_resolve() {
             ISO_URL=$base/$n ;;
         *) return 1 ;;
     esac
-    [[ $ISO_SHA =~ ^[0-9a-f]{64}$ && $ISO_URL == https://*.iso ]]
+    [[ $ISO_SHA =~ ^[0-9a-f]{64}$ && $ISO_URL =~ ^https://[A-Za-z0-9./_-]+\.iso$ ]]
 }
 
 # Size of the file at URL $1 in bytes -> ISO_BYTES (0: unknown)
 url_size() {
-    ISO_BYTES=$("${CURL_SAFE[@]}" -sI -L "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "content-length:" {n = $2} END {print n + 0}')
+    ISO_BYTES=$("${CURL_SAFE[@]}" -I -L "$1" 2>/dev/null | tr -d '\r' | awk 'tolower($1) == "content-length:" {n = $2} END {print n + 0}')
     [[ $ISO_BYTES =~ ^[0-9]+$ ]] || ISO_BYTES=0
 }
 
-# Downloads $1 to $2 (root, resumes), with @@progress. $3: expected size (0: unknown)
+# Downloads $1 to $2 as the user (resumes a partial file), with @@progress. $3: expected size
 download_to() {
     local url=$1 dst=$2 total=${3:-0} pid size
     detail "downloading ${url##*/}"
-    as_root curl -fL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 5 --connect-timeout 20 -C - -sS -o "$dst" "$url" &
+    curl -fL --proto '=https' --tlsv1.2 --retry 5 --retry-delay 5 --connect-timeout 20 \
+        --speed-limit 1024 --speed-time 120 -C - -sS -o "$dst" "$url" &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         if (( total > 0 )); then
@@ -233,16 +341,24 @@ download_to() {
     wait "$pid"
 }
 
+# SHA-256 of file $1 is ISO_SHA
+sha_ok() {
+    local sum
+    detail "checking the SHA-256 of ${1##*/}"
+    sum=$(sha256sum "$1" 2>/dev/null) || return 1
+    [[ ${sum%% *} == "$ISO_SHA" ]]
+}
+
 # ── GRUB entry ────────────────────────────────────────────────────────────────────
 
-# Installs /etc/grub.d/45_dotfiles_iso with the entry text from stdin
+# Installs /etc/grub.d/45_dotfiles_iso with the entry ENTRY
 grub_entry_install() {
-    local tmp
+    local tmp rc
     tmp=$(mktemp) || return 1
     { printf '#!/bin/sh\n# dotfiles install.sh: boots the installer of a second system from its partition\n'
       printf 'exec tail -n +4 "$0"\n'
-      cat; } > "$tmp"
-    as_root install -m755 -T -- "$tmp" "$GRUB_ISO_ENTRY"; local rc=$?
+      printf '%s\n' "$ENTRY"; } > "$tmp"
+    as_root install -m755 -T -- "$tmp" "$GRUB_ISO_ENTRY"; rc=$?
     rm -f "$tmp"
     return "$rc"
 }
@@ -260,28 +376,34 @@ plan_othersys() {
     [[ -n $id ]] || return 1
     othersys_gib "$id"
     PLAN+=("!changes the partition table of ${DUAL_DISK:-a disk}: a partition from unallocated space, the old table is saved")
-    PLAN+=("${OS_TITLE[$id]}: download about $(( OS_MB[$id] / 100 / 10 )).$(( OS_MB[$id] / 100 % 10 )) GB, checked against the published SHA-256")
-    [[ $id == windows ]] && PLAN[1]="Windows: ${WIN_ISO:+${WIN_ISO##*/}, }copied onto a FAT32 partition, install.wim split for it"
-    PLAN+=("a GRUB entry \"Install ${OS_TITLE[$id]}\" boots the installer from that partition")
-    PLAN+=("the free space after that ($OS_TOTAL GB needed in total) stays free for the installer of ${OS_TITLE[$id]}")
+    if (( ${OS_WIN[$id]:-0} )); then
+        PLAN+=("Windows: ${WIN_ISO:+${WIN_ISO##*/}, }copied onto a FAT32 partition, install.wim split for it")
+    else
+        PLAN+=("${OS_TITLE[$id]}: download about $(( OS_MB[$id] / 1000 )).$(( OS_MB[$id] / 100 % 10 )) GB, checked against the published SHA-256")
+    fi
+    PLAN+=("a GRUB entry \"Install ${OS_TITLE[$id]}\" boots its installer from that partition")
+    PLAN+=("the rest of the free space ($OS_TOTAL GB needed in total) stays free for the installer of ${OS_TITLE[$id]}")
     [[ $BOOTLOADER == grub ]] || PLAN+=("!needs GRUB: the boot loader is $BOOTLOADER")
-    (( ${OS_EXP[$id]:-0} )) && PLAN+=("!boot line for ${OS_TITLE[$id]} is not tested on hardware")
+    (( ${OS_EXP[$id]:-0} )) && PLAN+=("!the boot line for ${OS_TITLE[$id]} is not tested on hardware")
     return 0
 }
 
 run_othersys() {
-    local id=$DUAL_TARGET need total bytes mnt label fs src="" iso_name=$DUAL_TARGET.iso entry
+    local id=$DUAL_TARGET need bytes mnt fs ptype iso have ready=0 size
     [[ -n $id ]] || { say "no second system chosen"; return 0; }
     detect_boot
     [[ $BOOTLOADER == grub ]] || { warn "needs GRUB (boot loader: $BOOTLOADER)"; return 1; }
+    command -v sfdisk >/dev/null && command -v partx >/dev/null || { warn "sfdisk or partx is missing (util-linux)"; return 1; }
+    need=${OS_NEED[$id]}
     if (( ${OS_WIN[$id]:-0} )); then
         (( EFI )) || { warn "the Windows setup is prepared for UEFI only; this machine boots in BIOS mode"; return 1; }
-        [[ -r $WIN_ISO ]] || { warn "Windows ISO not found: ${WIN_ISO:-none given}"; return 1; }
+        [[ -f $WIN_ISO && -r $WIN_ISO ]] || { warn "Windows ISO not found: ${WIN_ISO:-none given}"; return 1; }
         command -v wimlib-imagex >/dev/null || { warn "wimlib is missing (package wimlib)"; return 1; }
-        label=$WIN_LABEL fs=vfat
+        command -v mkfs.vfat >/dev/null || { warn "mkfs.vfat is missing (package dosfstools)"; return 1; }
+        fs=vfat ptype=fat
         bytes=$(stat -c %s "$WIN_ISO") || return 1
     else
-        label=$ISO_LABEL fs=ext4
+        fs=ext4 ptype=linux
         detail "asking the server"
         os_resolve "$id" || { warn "${OS_TITLE[$id]}: could not read the download and checksum from the server"; return 1; }
         url_size "$ISO_URL"
@@ -289,22 +411,41 @@ run_othersys() {
         bytes=$ISO_BYTES
         (( bytes > 0 )) || bytes=$(( OS_MB[$id] * 1048576 ))
     fi
-    command -v sfdisk >/dev/null || { warn "sfdisk is missing (util-linux)"; return 1; }
-    othersys_gib "$id"; total=$OS_TOTAL need=${OS_NEED[$id]}
+    # the ISO (Alpine: twice, it is unpacked as well) and room to work
+    [[ $id == alpine ]] && bytes=$(( bytes * 2 ))
+    bytes=$(( bytes + 1073741824 ))
 
-    # a partition of an earlier run (the download resumes)
-    if find_part "$label"; then
-        say "the installer partition $PART exists already: reusing it"
+    # the partition of an earlier run (the download resumes there)
+    if find_ours; then
+        if [[ $ST_TARGET != "$id" ]]; then
+            warn "There is an installer partition for ${OS_TITLE[$ST_TARGET]:-$ST_TARGET} already ($PART): run ./install.sh dualboot-clean first."
+            return 1
+        fi
+        if ! part_still_ours; then
+            warn "$PART (the installer partition of an earlier run) has another file system now: did an installer use it? Left alone; ./install.sh dualboot-clean forgets it."
+            return 1
+        fi
+        size=$(as_root blockdev --getsize64 "$PART" 2>/dev/null)
+        if [[ ! $size =~ ^[0-9]+$ ]] || (( size < bytes - 268435456 )); then
+            warn "The installer partition $PART is too small for this ISO: run ./install.sh dualboot-clean, then the installer again."
+            return 1
+        fi
+        say "the installer partition of an earlier run is $PART: using it"
+        # no file system yet (the earlier run stopped before mkfs)
+        [[ -n $ST_FSUUID ]] || format_part "$fs" || return 1
     else
+        [[ -n $ST_PARTUUID ]] && say "the installer partition of an earlier run is gone: making a new one"
         [[ -b $DUAL_DISK ]] || { warn "disk not found: ${DUAL_DISK:-none chosen}"; return 1; }
-        # partition: the ISO and room to work, at the end of the free space; the rest stays free
-        make_partition "$DUAL_DISK" $(( bytes + 1073741824 )) "$fs" "$label" || return 1
+        [[ $(disk_tran "$DUAL_DISK") == usb ]] && warn "$DUAL_DISK is a USB disk: the firmware may not boot the installer from it."
+        make_partition "$DUAL_DISK" "$bytes" "$ptype" || return 1
+        format_part "$fs" || return 1
         # the new system needs room besides it
-        largest_gap "$DUAL_DISK" 2>/dev/null
+        largest_gap "$DUAL_DISK"
         if (( GAP_SECTORS * SECTOR < need * 1073741824 )); then
-            warn "only $(( GAP_SECTORS * SECTOR / 1073741824 )) GB stay free for ${OS_TITLE[$id]} (it needs about $need GB): shrink a partition, or remove this one with ./install.sh dualboot-clean"
+            warn "only $(( GAP_SECTORS * SECTOR / 1073741824 )) GB stay free for ${OS_TITLE[$id]} (it needs about $need GB): free more space, or remove the partition again with ./install.sh dualboot-clean"
         fi
     fi
+
     mnt=$(mktemp -d) || return 1
     # shellcheck disable=SC2064
     trap "as_root umount '$mnt' 2>/dev/null; rmdir '$mnt' 2>/dev/null" EXIT
@@ -312,65 +453,66 @@ run_othersys() {
 
     if (( ${OS_WIN[$id]:-0} )); then
         prepare_windows "$mnt" || return 1
-        entry=$(cat <<EOF
+        ENTRY=$(cat <<EOF
 menuentry "Install Windows (setup from the disk)" --class windows --id dotfiles-windows {
     insmod part_gpt
     insmod part_msdos
     insmod fat
     insmod chain
-    insmod search_label
-    search --no-floppy --label --set=root $WIN_LABEL
+    search --no-floppy --fs-uuid --set=root $ST_FSUUID
     chainloader /efi/boot/bootx64.efi
 }
 EOF
 )
     else
-        if [[ -f $mnt/$iso_name ]] && sha_ok "$mnt/$iso_name"; then
-            say "$iso_name is there and its checksum is right"
-        else
-            download_to "$ISO_URL" "$mnt/$iso_name" "${ISO_BYTES:-0}" || { warn "download failed (run again to resume)"; return 1; }
-            sha_ok "$mnt/$iso_name" || { warn "SHA-256 of $iso_name is wrong: deleted, run again"; as_root rm -f "$mnt/$iso_name"; return 1; }
+        # the download runs as you, not as root: the partition's top directory is yours
+        as_root chown "$USER_NAME:" "$mnt" || return 1
+        iso=$mnt/$id.iso
+        if [[ -f $iso ]]; then
+            have=$(stat -c %s "$iso" 2>/dev/null || echo 0)
+            # complete (or of unknown size): its checksum decides; a stale or broken one goes
+            if (( ISO_BYTES == 0 || have >= ISO_BYTES )); then
+                if sha_ok "$iso"; then ready=1; say "$id.iso is there and its checksum is right"
+                else rm -f "$iso"; say "$id.iso is outdated or broken: downloading it again"; fi
+            fi
         fi
-        entry=$(linux_entry "$id" "$mnt/$iso_name" "$mnt") || return 1
+        if (( ! ready )); then
+            download_to "$ISO_URL" "$iso" "$ISO_BYTES" || { warn "download failed (run the installer again to resume)"; return 1; }
+            sha_ok "$iso" || { rm -f "$iso"; warn "the SHA-256 of $id.iso is wrong: deleted, run the installer again"; return 1; }
+            say "$id.iso downloaded, checksum right"
+        fi
+        linux_entry "$id" "$iso" "$mnt" || return 1
     fi
     as_root sync
     as_root umount "$mnt" && rmdir "$mnt"
     trap - EXIT
 
-    grub_entry_install <<< "$entry" || return 1
+    grub_entry_install || return 1
     say "GRUB entry: $GRUB_ISO_ENTRY"
     grub_regen || return 1
-    note "${OS_TITLE[$id]}: restart and choose \"Install ${OS_TITLE[$id]%% *}...\" in the GRUB menu. Its installer offers the free space on the disk; leave the installer partition ($label) as it is until the new system is installed."
-    note "${OS_TITLE[$id]}: when it is installed run ./install.sh dualboot-clean (removes the menu entry and the installer partition), then ./install.sh modules dualboot (puts the new system in the menu)."
-    (( ${OS_WIN[$id]:-0} )) && note "Windows: its setup puts \"Windows Boot Manager\" first in the firmware boot order. GRUB is still there: choose Void in the firmware boot menu once and run  sudo efibootmgr -o  with the Void entry first, or pick it with the boot menu key."
+    note "${OS_TITLE[$id]}: restart and choose \"Install ${OS_TITLE[$id]%% *} ...\" in the GRUB menu. Its installer offers the free space on the disk; leave the installer partition ($PART) alone until the new system is installed."
+    note "${OS_TITLE[$id]}: once it is installed, run ./install.sh dualboot-clean (removes the menu entry and the installer partition), then ./install.sh modules dualboot (puts the new system in the menu)."
+    (( ${OS_WIN[$id]:-0} )) && note "Windows: its setup puts \"Windows Boot Manager\" first in the firmware boot order. Choose Void once in the firmware boot menu, then put it first again: sudo efibootmgr -o <Void's number>,<the others>."
     need_reboot
     return 0
 }
 
-# SHA-256 of file $1 is ISO_SHA (root: the partition is root's)
-sha_ok() {
-    local sum
-    detail "checking the SHA-256 of ${1##*/}"
-    sum=$(as_root sha256sum "$1" 2>/dev/null) || return 1
-    [[ ${sum%% *} == "$ISO_SHA" ]]
-}
-
-# GRUB entry text of Linux system $1 (ISO $2 on mount $3) -> stdout
+# GRUB entry of Linux system $1 (ISO $2, partition mounted at $3) -> ENTRY
 linux_entry() {
-    local id=$1 iso=$2 mnt=$3 label uuid
-    local head='    insmod part_gpt
+    local id=$1 iso=$2 mnt=$3 label tmp rc
+    local head="    insmod part_gpt
     insmod part_msdos
     insmod ext2
     insmod loopback
     insmod iso9660
-    insmod search_label'
+    search --no-floppy --fs-uuid --set=isodev $ST_FSUUID"
+    ENTRY=""
     case $id in
         arch|debian|ubuntu)
-            # these ISOs bring a loopback.cfg for exactly this
-            cat <<EOF
+            # these ISOs bring a loopback.cfg for exactly this (it reads iso_path)
+            ENTRY=$(cat <<EOF
 menuentry "Install ${OS_TITLE[$id]} (installer from the disk)" --class $id --id dotfiles-$id {
 $head
-    search --no-floppy --label --set=isodev $ISO_LABEL
     set iso_path="/$id.iso"
     export iso_path
     loopback loop (\$isodev)\$iso_path
@@ -378,67 +520,75 @@ $head
     configfile /boot/grub/loopback.cfg
 }
 EOF
+)
             ;;
         fedora)
-            label=$(as_root blkid -s LABEL -o value "$iso" 2>/dev/null)
-            [[ $label =~ ^[A-Za-z0-9._-]+$ ]] || { warn "cannot read the volume label of the ISO ($label)"; return 1; }
-            cat <<EOF
+            label=$(blkid -p -s LABEL -o value "$iso" 2>/dev/null)
+            [[ $label =~ ^[A-Za-z0-9._-]+$ ]] || { warn "cannot read the volume label of the ISO (${label//[[:cntrl:]]/ })"; return 1; }
+            ENTRY=$(cat <<EOF
 menuentry "Install Fedora (installer from the disk)" --class fedora --id dotfiles-fedora {
 $head
-    search --no-floppy --label --set=isodev $ISO_LABEL
     loopback loop (\$isodev)/fedora.iso
     linux (loop)/images/pxeboot/vmlinuz root=live:CDLABEL=$label iso-scan/filename=/fedora.iso rd.live.image quiet
     initrd (loop)/images/pxeboot/initrd.img
 }
 EOF
+)
             ;;
         alpine)
-            # the ISO is unpacked: Alpine's initramfs looks for the files, not for an ISO
-            as_root mkdir -p "$mnt/alpine" || return 1
+            # unpacked onto the partition like a boot stick (setup-bootable): Alpine's initramfs
+            # looks for boot/ and apks/ on the device, not for an ISO
             detail "unpacking the Alpine ISO"
-            local tmp; tmp=$(mktemp -d) || return 1
+            tmp=$(mktemp -d) || return 1
             as_root mount -o loop,ro "$iso" "$tmp" || { rmdir "$tmp"; warn "cannot mount the ISO"; return 1; }
-            as_root cp -r "$tmp"/. "$mnt/alpine/" ; local rc=$?
+            as_root cp -a "$tmp"/. "$mnt"/; rc=$?
             as_root umount "$tmp"; rmdir "$tmp"
             (( rc == 0 )) || { warn "copying the Alpine ISO failed"; return 1; }
-            uuid=$(as_root blkid -s UUID -o value "$PART" 2>/dev/null)
-            [[ $uuid =~ ^[A-Fa-f0-9-]+$ ]] || { warn "no UUID for $PART"; return 1; }
-            cat <<EOF
+            ENTRY=$(cat <<EOF
 menuentry "Install Alpine (installer from the disk)" --class alpine --id dotfiles-alpine {
     insmod part_gpt
     insmod part_msdos
     insmod ext2
-    insmod search_label
-    search --no-floppy --label --set=root $ISO_LABEL
-    linux /alpine/boot/vmlinuz-lts modules=loop,squashfs,sd-mod,usb-storage,nvme,ext4 alpine_dev=UUID=$uuid quiet
-    initrd /alpine/boot/initramfs-lts
+    search --no-floppy --fs-uuid --set=root $ST_FSUUID
+    linux /boot/vmlinuz-lts modules=loop,squashfs,sd-mod,usb-storage,nvme,ext4 alpine_dev=UUID=$ST_FSUUID modloop=/boot/modloop-lts quiet
+    initrd /boot/initramfs-lts
 }
 EOF
+)
             ;;
+        *) return 1 ;;
     esac
 }
 
 # The Windows ISO $WIN_ISO onto the FAT32 partition mounted at $1
 prepare_windows() {
-    local dst=$1 src wim size
+    local dst=$1 src wim size rc
     src=$(mktemp -d) || return 1
     detail "mounting the Windows ISO"
     as_root mount -o loop,ro "$WIN_ISO" "$src" || { rmdir "$src"; warn "cannot mount $WIN_ISO (is it an ISO?)"; return 1; }
-    wim=$(find "$src" -maxdepth 2 -ipath '*/sources/install.wim' | head -1)
-    [[ -z $wim ]] && wim=$(find "$src" -maxdepth 2 -ipath '*/sources/install.esd' | head -1)
-    if [[ -z $wim ]] || ! find "$src" -maxdepth 3 -ipath '*/efi/boot/bootx64.efi' | grep -q .; then
+    # read as root: UDF keeps the permissions of the disc
+    wim=$(as_root find "$src" -maxdepth 2 -ipath '*/sources/install.wim' | head -1)
+    [[ -z $wim ]] && wim=$(as_root find "$src" -maxdepth 2 -ipath '*/sources/install.esd' | head -1)
+    if [[ -z $wim ]] || ! as_root find "$src" -maxdepth 3 -ipath '*/efi/boot/bootx64.efi' | grep -q .; then
         as_root umount "$src"; rmdir "$src"
-        warn "this is not a Windows 64-bit UEFI installation ISO (sources/install.wim or efi/boot/bootx64.efi missing)"
+        warn "this is not a 64-bit UEFI Windows installation ISO (sources/install.wim or efi/boot/bootx64.efi missing)"
         return 1
     fi
-    size=$(stat -c %s "$wim")
+    size=$(as_root stat -c %s "$wim")
+    [[ $size =~ ^[0-9]+$ ]] || size=0
+    if [[ $wim == *.esd ]] && (( size >= 4294967295 )); then
+        as_root umount "$src"; rmdir "$src"
+        warn "install.esd is larger than 4 GB and cannot be split for FAT32: use an ISO with install.wim"
+        return 1
+    fi
     detail "copying the files"
-    ( cd "$src" && as_root tar cf - --exclude="${wim#"$src"/}" . ) | ( cd "$dst" && as_root tar xf - --no-same-owner --no-same-permissions )
-    if (( ${PIPESTATUS[0]} || ${PIPESTATUS[1]} )); then
+    as_root tar cf - -C "$src" --exclude="${wim#"$src"/}" . | as_root tar xf - -C "$dst" --no-same-owner --no-same-permissions
+    rc=$(( PIPESTATUS[0] || PIPESTATUS[1] ))
+    if (( rc )); then
         as_root umount "$src"; rmdir "$src"; warn "copying the Windows files failed"; return 1
     fi
     as_root mkdir -p "$dst/sources"
-    if (( size >= 4294967295 )) && [[ $wim == *.wim ]]; then
+    if (( size >= 4294967295 )); then
         detail "splitting install.wim for FAT32"
         as_root wimlib-imagex split "$wim" "$dst/sources/install.swm" 3800 >/dev/null || { as_root umount "$src"; rmdir "$src"; warn "wimlib-imagex split failed"; return 1; }
     else
@@ -446,36 +596,110 @@ prepare_windows() {
         as_root cp "$wim" "$dst/sources/${wim##*/}" || { as_root umount "$src"; rmdir "$src"; return 1; }
     fi
     as_root umount "$src"; rmdir "$src"
-    say "Windows setup files are on the partition"
+    say "the Windows setup files are on the partition"
 }
 
 # ── Remove again (./install.sh dualboot-clean) ────────────────────────────────────
 
-dualboot_clean() {
-    local p disk num answer found=0
-    [[ -e $GRUB_ISO_ENTRY ]] && found=1
-    for p in "$ISO_LABEL" "$WIN_LABEL"; do find_part "$p" && found=1; done
-    (( found )) || { echo "Nothing to remove: no installer entry, no installer partition."; return 0; }
-    echo "This removes the GRUB entry of the second system's installer and the installer partition"
-    echo "(label $ISO_LABEL or $WIN_LABEL, with the downloaded ISO). The new system and everything else stay."
-    read -rp "Remove? [y/N] " answer
-    [[ $answer == [yYjJ]* ]] || { echo "Nothing changed."; return 0; }
-    sudo -v || return 1
-    [[ -e $GRUB_ISO_ENTRY ]] && sudo rm -f "$GRUB_ISO_ENTRY" && echo "removed $GRUB_ISO_ENTRY"
-    for p in "$ISO_LABEL" "$WIN_LABEL"; do
-        find_part "$p" || continue
-        sudo umount "$PART" 2>/dev/null
-        disk=$(lsblk -no PKNAME "$PART" 2>/dev/null | head -1); disk=/dev/$disk
-        num=$(cat "/sys/class/block/${PART##*/}/partition" 2>/dev/null)
-        if [[ -b $disk && $num =~ ^[0-9]+$ ]]; then
-            sudo sfdisk --delete "$disk" "$num" && echo "deleted $PART"
-            sudo partprobe "$disk" 2>/dev/null
-        fi
+# Partitions an earlier version of this installer made without a record: in the current table,
+# not in the oldest saved table of that disk, and either without a file system or with our label
+# (a system installed into the free space since then has its own file system: never offered)
+# -> LEFTOVERS
+find_leftovers() {
+    local dump disk f out start fstype label
+    local -A seen=() old=()
+    LEFTOVERS=()
+    for dump in $(ls -tr "$STATE_DIR"/partition-table-*.sfdisk 2>/dev/null); do
+        disk=$(sed -n 's/^device: \(\/dev\/[A-Za-z0-9\/_-]*\)$/\1/p' "$dump" | head -1)
+        [[ -n $disk && -z ${seen[$disk]-} && -b $disk ]] || continue
+        seen[$disk]=1
+        old=()
+        while read -r f out; do
+            [[ $f == /dev/* && $out =~ start=\ *([0-9]+), ]] && old[${BASH_REMATCH[1]}]=1
+        done < "$dump"
+        while read -r f out; do
+            [[ $f == /dev/* && $out =~ start=\ *([0-9]+), ]] || continue
+            [[ -n ${old[${BASH_REMATCH[1]}]-} || $f == "$PART" ]] && continue
+            # only the types this installer makes (Linux data, Microsoft basic data): never an MSR or
+            # BIOS boot partition another installer made (they have no file system either)
+            [[ ${out^^} =~ TYPE=(0FC63DAF-8483-4772-8E79-3D69D8477DE4|EBD0A0A2-B9E5-4433-87C0-68B6B72699C7|83|C)(,|$) ]] || continue
+            fstype=$(sudo blkid -s TYPE -o value "$f" 2>/dev/null)
+            label=$(sudo blkid -s LABEL -o value "$f" 2>/dev/null)
+            [[ -z $fstype || $label == "$ISO_LABEL" || $label == "$WIN_LABEL" ]] && LEFTOVERS+=("$f")
+        done < <(sudo sfdisk --dump "$disk" 2>/dev/null)
     done
-    if command -v grub-mkconfig >/dev/null; then
-        local cfg=/boot/grub/grub.cfg
+}
+
+# Deletes partition $1 (asks nothing; the caller did). Refuses a mounted one.
+delete_part() {
+    local mp
+    mp=$(findmnt -rno TARGET -S "$1" 2>/dev/null | head -1)
+    [[ -z $mp ]] || { echo "$1 is mounted at $mp: unmount it first, then run this again." >&2; return 1; }
+    if part_pos "$1" && sudo sfdisk --delete --no-reread --no-tell-kernel "$PART_DISK" "$PART_NUM" >/dev/null 2>&1; then
+        sudo partx -d --nr "$PART_NUM" "$PART_DISK" 2>/dev/null
+        echo "deleted $1"
+        return 0
+    fi
+    echo "could not delete $1 (sudo sfdisk --delete DISK NUMBER)" >&2
+    return 1
+}
+
+dualboot_clean() {
+    local answer cfg f fstype changed=0
+    [[ -t 0 ]] || { echo "dualboot-clean asks before it deletes: run it in a terminal." >&2; return 1; }
+    command -v sudo >/dev/null || { echo "sudo is not installed" >&2; return 1; }
+    sudo -v || return 1
+    PART=""
+    if state_read && find_ours && ! part_still_ours; then
+        echo "$PART (the installer partition of the record) has another file system now: an installer used it."
+        echo "It is left alone; the record is removed."
+        PART=""
+        rm -f "$DUAL_STATE"
+    fi
+    find_leftovers
+    if [[ -z $PART && ! -e $GRUB_ISO_ENTRY && ${#LEFTOVERS[@]} -eq 0 ]]; then
+        echo "Nothing to remove: no installer entry, no installer partition of this installer."
+        rm -f "$DUAL_STATE"
+        sudo -k
+        return 0
+    fi
+    echo "This removes:"
+    [[ -e $GRUB_ISO_ENTRY ]] && echo "  the boot menu entry $GRUB_ISO_ENTRY"
+    if [[ -n $PART ]]; then
+        human_size "$(sudo blockdev --getsize64 "$PART" 2>/dev/null || echo 0)"
+        echo "  the installer partition $PART ($_HS, ${OS_TITLE[$ST_TARGET]:-$ST_TARGET} installer, PARTUUID $ST_PARTUUID)"
+    fi
+    echo "The new system and everything else stay."
+    if [[ -e $GRUB_ISO_ENTRY || -n $PART ]]; then
+        read -rp "Remove? [y/N] " answer
+        if [[ $answer == [yYjJ]* ]]; then
+            if [[ -e $GRUB_ISO_ENTRY ]] && sudo rm -f -- "$GRUB_ISO_ENTRY"; then
+                echo "removed $GRUB_ISO_ENTRY"; changed=1
+            fi
+            if [[ -n $PART ]]; then
+                delete_part "$PART" && { rm -f "$DUAL_STATE"; changed=1; }
+            else
+                rm -f "$DUAL_STATE"
+            fi
+        else
+            echo "Nothing changed."
+        fi
+    fi
+    # an earlier version made partitions without a record: one by one
+    for f in "${LEFTOVERS[@]}"; do
+        human_size "$(sudo blockdev --getsize64 "$f" 2>/dev/null || echo 0)"
+        fstype=$(sudo blkid -s TYPE -o value "$f" 2>/dev/null)
+        echo
+        echo "$f ($_HS, ${fstype:-no file system}) was not on the disk when the installer first saved its partition table:"
+        echo "probably an installer partition of an earlier run."
+        read -rp "Delete $f? [y/N] " answer
+        [[ $answer == [yYjJ]* ]] && delete_part "$f" && changed=1
+    done
+    if (( changed )) && command -v grub-mkconfig >/dev/null; then
+        cfg=/boot/grub/grub.cfg
         sudo test -e /boot/grub2/grub.cfg && cfg=/boot/grub2/grub.cfg
-        sudo grub-mkconfig -o "$cfg" 2>&1 | grep -i 'found\|done' 
+        echo "making the boot menu again"
+        sudo grub-mkconfig -o "$cfg" 2>&1 | grep -E '^(Found|done)'
     fi
     sudo -k
 }

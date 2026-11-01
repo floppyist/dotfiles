@@ -244,16 +244,19 @@ cli_other_os() {
         [[ -n ${WINISO_ARG-} && -r $WINISO_ARG ]] || die "windows: --windows-iso FILE (a readable Windows ISO)"
         WIN_ISO=$(readlink -f "$WINISO_ARG")
     fi
-    if [[ -n ${DISK_ARG-} ]]; then
-        [[ $DISK_ARG == /dev/* && -b $DISK_ARG ]] || die "--disk: a block device like /dev/sda"
+    if state_part_seen; then
+        [[ $ST_TARGET == "$DUAL_TARGET" ]] ||
+            die "there is an installer partition for $ST_TARGET from an earlier run ($PART): ./install.sh dualboot-clean first"
+        DUAL_DISK=$ST_DISK
+    elif [[ -n ${DISK_ARG-} ]]; then
+        [[ $DISK_ARG =~ ^/dev/[A-Za-z0-9/_-]+$ && -b $DISK_ARG && $(lsblk -dno TYPE "$DISK_ARG" 2>/dev/null) == disk ]] ||
+            die "--disk: a whole disk like /dev/sda (not a partition)"
         DUAL_DISK=$DISK_ARG
     else
         detect_disks; disks_with_room "$OS_TOTAL"
         (( ${#DISK_OK[@]} )) || die "no disk has $OS_TOTAL GB of unallocated space (free some in Windows or with gparted)"
-        local nonusb=()
-        for i in "${DISK_OK[@]}"; do [[ ${DISK_TRAN[i]} == usb ]] || nonusb+=("$i"); done
-        (( ${#nonusb[@]} == 1 )) || die "several disks have room: choose one with --disk (${DISKS[*]})"
-        DUAL_DISK=${DISKS[${nonusb[0]}]}
+        (( ${#DISK_OK[@]} == 1 )) || die "several disks have room: choose one with --disk (${DISKS[*]})"
+        DUAL_DISK=${DISKS[${DISK_OK[0]}]}
     fi
     mods_scan
 }

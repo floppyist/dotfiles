@@ -141,12 +141,17 @@ services_todo() {
 }
 
 # The elogind service of runit is enabled, but another elogind (started by D-Bus) runs: runit starts
-# its own over and over, "elogind is already running" on every console. Needs root to ask runit.
+# its own over and over ("elogind is already running" on every console). The supervised process is
+# the one runit started (supervise/pid); any other elogind means the loop. Needs root to read it.
 elogind_loop() {
+    local pid p
     service_on elogind || return 1
     pgrep -x elogind >/dev/null || return 1
     (( EUID == 0 )) || sudo -n true 2>/dev/null || return 1
-    ! as_root sv check "$RUNSV_DIR/elogind" >/dev/null 2>&1
+    pid=$(as_root cat "$RUNSV_DIR/elogind/supervise/pid" 2>/dev/null)
+    [[ $pid =~ ^[0-9]+$ ]] || pid=0
+    for p in $(pgrep -x elogind); do [[ $p == "$pid" ]] && return 1; done
+    return 0
 }
 
 plan_services() {
@@ -157,12 +162,12 @@ plan_services() {
     (( ${#PLAN[@]} ))
 }
 
-# Waits until runit reports service $1 as running (the first start needs a few seconds)
+# Waits until runit reports service $1 as running (runsvdir picks a new link up within 5 s)
 wait_service() {
-    local i
+    local end=$(( SECONDS + 20 ))
     command -v sv >/dev/null || return 0
-    for (( i = 0; i < 20; i++ )); do
-        as_root sv check "$RUNSV_DIR/$1" >/dev/null 2>&1 && return 0
+    while (( SECONDS < end )); do
+        as_root sv -w 2 check "$RUNSV_DIR/$1" >/dev/null 2>&1 && return 0
         sleep 1
     done
     return 1
@@ -203,7 +208,8 @@ run_services() {
             wait_service dbus || warn "D-Bus did not start within 20 s"
         elif [[ $s == elogind ]]; then
             detail "waiting for elogind"
-            if ! wait_service elogind && pgrep -x elogind >/dev/null; then
+            wait_service elogind
+            if elogind_loop; then
                 # another elogind won the race: the service would fail forever
                 disable_service elogind
                 say "elogind was started by D-Bus in the meantime: service removed again"
@@ -740,11 +746,36 @@ grub_regen() {
         warn "grub-mkconfig is not installed"; return 1
     fi
     printf '%s\n' "$GRUB_OUT"
+    # os-prober found a system on a disk GRUB cannot address (USB disk, a disk the firmware does not
+    # list): grub-probe complains, GRUB skips that one entry, everything else is fine
+    local bad
+    grub_bad_devices
+    # (the dual boot step says it itself, with what to do)
+    [[ -n ${GRUB_BAD_QUIET-} ]] && GRUB_BAD=()
+    for bad in "${GRUB_BAD[@]}"; do
+        warn "GRUB cannot address $bad (a USB disk or one the firmware does not list): its menu entry will not work. Unplug it and run the installer again, or boot that system from the firmware boot menu."
+    done
     (( rc == 0 )) || warn "grub-mkconfig failed ($rc), see the log"
     return "$rc"
 }
 
 # ── Dual boot ─────────────────────────────────────────────────────────────────────
+
+# Devices of the "cannot find a GRUB drive for /dev/X" lines of grub-mkconfig -> GRUB_BAD
+grub_bad_devices() {
+    local l
+    GRUB_BAD=()
+    while IFS= read -r l; do
+        [[ $l =~ cannot\ find\ a\ GRUB\ drive\ for\ (/dev/[A-Za-z0-9/_-]+) ]] && GRUB_BAD+=("${BASH_REMATCH[1]}")
+    done < <(grep 'cannot find a GRUB drive' <<< "${GRUB_OUT-}" | sort -u)
+}
+
+# True if device $1 (a partition or a disk) is on a USB disk
+dev_on_usb() {
+    local d
+    d=$(lsblk -no PKNAME "$1" 2>/dev/null | head -1)
+    [[ $(disk_tran "/dev/${d:-${1#/dev/}}") == usb ]]
+}
 
 plan_dualboot() {
     local o
@@ -756,6 +787,7 @@ plan_dualboot() {
             [[ $_GV == false ]] && command -v os-prober >/dev/null && return 1
             PLAN+=("os-prober (and ntfs-3g) read the other disks when the boot menu is made")
             [[ $_GV == false ]] || PLAN+=("GRUB_DISABLE_OS_PROBER=false in /etc/default/grub (GRUB switches it off by default)")
+            PLAN+=("!unplug USB sticks first: os-prober would put the systems on them into the menu")
             PLAN+=("make the boot menu again, check that every system of the firmware is in it") ;;
         systemd-boot)
             PLAN+=("systemd-boot lists Windows by itself when its boot loader is on the same EFI partition: nothing to set up, notes at the end") ;;
@@ -776,8 +808,21 @@ run_dualboot() {
             fi
             grub_set GRUB_DISABLE_OS_PROBER false || return 1
             say "GRUB_DISABLE_OS_PROBER=false"
-            grub_regen || return 1
-            found=$(grep '^Found ' <<< "$GRUB_OUT")
+            GRUB_BAD_QUIET=1 grub_regen || return 1
+            # a system os-prober found on a USB stick: GRUB cannot address it, its menu entry would
+            # not work (and the stick is gone tomorrow). Unplugging it and retrying makes a clean menu.
+            local dev usb=()
+            grub_bad_devices
+            for dev in "${GRUB_BAD[@]}"; do
+                if dev_on_usb "$dev"; then usb+=("$dev")
+                else warn "GRUB cannot address $dev (a disk the firmware does not list?): the menu entry of the system on it will not work. Boot that one from the firmware boot menu."; fi
+            done
+            if (( ${#usb[@]} )); then
+                warn "Unplug the USB disk with ${usb[*]}, then choose Retry (r): os-prober found a system on it that GRUB cannot boot, and its entry would stay in the boot menu."
+                return 1
+            fi
+            # os-prober's lines: "Found <system> on /dev/..." (not the kernels of this system)
+            found=$(grep -E '^Found .+ on /dev/' <<< "$GRUB_OUT")
             if [[ -n $found ]]; then
                 while IFS= read -r l; do say "$l"; done <<< "$found"
                 note "Boot menu: GRUB found $(grep -c . <<< "$found") other system(s); they are in the menu."
@@ -854,6 +899,7 @@ plan_kernel() {
     PLAN=("${KERNEL_VERSION:+Linux $KERNEL_VERSION}${KERNEL_VERSION:-The newest Linux ${r%.*}.x, like the running kernel} from kernel.org, signature checked")
     PLAN+=("only the modules loaded now (localmodconfig), built as $USER_NAME (10 to 40 minutes, 8 GB)")
     PLAN+=("installed next to the running kernel as ...-kf: modules, initramfs, boot entry (root)")
+    PLAN+=("the new kernel becomes the default of the boot menu; the running one stays under Advanced options")
     [[ -x $KERNELFORGE ]] || PLAN=("!kernelforge is missing in this repository")
     return 0
 }
