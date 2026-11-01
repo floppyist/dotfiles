@@ -291,6 +291,8 @@ The installer installs all of it (see [Installation](#installation)), in modules
 | **Mail** | `neomutt` | sources the theme in your muttrc |
 | **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | links the MPRIS plugin into `~/.config/mpv/scripts` (Void installs it where mpv does not look; without it the music capsule does not see mpv) |
 | **Tools** | `htop xdg-utils` | |
+| **Dual boot** (on when another system is found) | with GRUB: `os-prober ntfs-3g`; for Windows also `dosfstools wimlib` | sets `GRUB_DISABLE_OS_PROBER=false`, makes the boot menu again and checks that Windows or another Linux is in it; notes on Fast Startup, the clock and the boot order, see [Dual boot](#dual-boot) |
+| **Hardware fixes** (on when this machine needs one) | none | kernel parameters for special hardware, chosen in a screen of their own, see [Hardware fixes](#hardware-fixes) |
 | **Custom kernel** (off by default) | `base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut` | builds and installs a kernel for this machine, see [Custom kernel](#custom-kernel) |
 | **Start X on login** | | `startx` after logging in on tty1 |
 
@@ -380,11 +382,61 @@ Without the menus:
 | `./install.sh all` | the complete installation (`--skip network,neovim` leaves modules out, `--nvidia nvidia` picks the driver) |
 | `./install.sh modules audio,bluetooth` | these modules (and the desktop) |
 | `./install.sh modules kernel --kernel-version 6.18.60` | the custom kernel (not part of `all`); without the version: the newest of the running series |
+| `./install.sh modules dualboot --other-os arch [--disk /dev/sda]` | sets up a second system (`arch debian ubuntu fedora alpine windows`; Windows needs `--windows-iso FILE`), see [Dual boot](#dual-boot) |
+| `./install.sh dualboot-clean` | removes the installer entry and installer partition of a second system again |
+| `./install.sh modules fixes --fix amdgpu-dpm` | these hardware fixes (default: the ones this machine needs) |
 | `./install.sh plan [modules]` | shows what would happen, changes nothing |
 | `./install.sh list` | the modules and their state on this machine |
 | `./install.sh links` | links and theme only (also what runs without a terminal) |
 
 `all` and `modules` ask before they start; `-y` starts right away.
+
+### Dual boot
+
+The module **Dual boot** is on by default when the firmware lists another system (Windows Boot Manager, another
+distribution) or there are NTFS partitions. With GRUB it installs `os-prober` and `ntfs-3g`, sets
+`GRUB_DISABLE_OS_PROBER=false` (GRUB switches it off by default; the old file is kept as
+`/etc/default/grub.dotfiles-bak`), makes the boot menu again and checks the `Found ...` lines of os-prober against the
+firmware list. When a system is missing it says why. At the end it prints what you have to do by hand:
+
+- Windows **Fast Startup** off (a partition Windows has not released cannot be read, os-prober skips it).
+- The **clock**: Windows takes the hardware clock for local time, Linux for UTC (`RealTimeIsUniversal` in Windows).
+- Windows updates may put their boot manager first in the firmware order (`efibootmgr -o`).
+
+**A second system, set up for you.** In the installer the module asks which system you want (Arch, Debian, Ubuntu LTS,
+Fedora, Alpine, Windows) and does the rest:
+
+1. Looks for **unallocated** space on the internal disks (nothing is shrunk, moved or deleted: free it first in Windows
+   Disk Management or gparted) and lets you pick the disk when several have room.
+2. Makes a partition from the end of the largest free stretch (the old table is saved to
+   `~/.local/state/dotfiles/partition-table-*.sfdisk`, put back with `sfdisk DISK < FILE`). The rest of the space stays
+   in one piece for the new system.
+3. Downloads the current ISO from the distribution's own https server, checks it against the published SHA-256
+   (resumes after an interruption) and writes it to that partition. **Windows**: Microsoft has no stable download
+   link, so you save the ISO in `~/Downloads` and the installer finds it; it copies the files to a FAT32 partition and
+   splits `install.wim` for it (UEFI only).
+4. Adds a GRUB entry (`/etc/grub.d/45_dotfiles_iso`) that boots the installer from the disk, no USB stick.
+5. You restart, choose the entry, and the distribution's own installer installs into the free space. Afterwards
+   `./install.sh dualboot-clean` removes the entry and the installer partition, and `./install.sh modules dualboot`
+   puts the new system in the menu.
+
+Arch, Debian and Ubuntu boot through the `loopback.cfg` of their ISOs. The boot lines of Fedora and Alpine are written
+from their documentation and **not tested on hardware**; the Windows setup is not either.
+
+systemd-boot lists Windows by itself when its boot loader is on the same EFI partition. Order of the steps: dual boot
+and fixes run before the custom kernel, so its boot menu contains every system and the kernel is the default.
+
+### Hardware fixes
+
+The module **Hardware fixes** is a short list of settings for special hardware, each with its own description and
+"this machine needs it" marker (DMI product name). On is only what matches; you can tick others by hand. Kernel
+parameters go into `GRUB_CMDLINE_LINUX_DEFAULT` (other boot loaders: you get the parameter to add).
+
+| Fix | For |
+| --- | --- |
+| `amdgpu-dpm` (`amdgpu.dpm=0`) | iMac late 2015: without it booting and rebooting takes forever |
+
+A new fix is a few lines in `install/modules.sh` (`FIXES`, `FIX_*`, `fix_match_<id>`).
 
 ### Custom kernel
 
@@ -401,8 +453,10 @@ of the running series.
   Root (sudo) is used only to copy the result to `/lib/modules` and `/boot`, to build the initramfs
   (dracut, mkinitcpio, initramfs-tools) and to add the boot entry (GRUB; systemd-boot, an entry on the ESP).
 - The new kernel is called `<version>-kf`, never a name that exists: nothing installed is overwritten, and if a step
-  fails the files of this run are removed again. Choose it in the boot menu; the old kernel stays the way back.
-  GRUB may make it the default (it sorts by version).
+  fails the files of this run are removed again. The installer makes it the default entry of the boot menu
+  (`kernelforge --set-default`: GRUB gets `GRUB_DEFAULT=saved` + `grub-set-default`, the old file is kept as
+  `/etc/default/grub.kernelforge-bak`; systemd-boot `bootctl set-default`). The old kernel stays the way back
+  (Advanced options).
 - Not for Secure Boot (the kernel is not signed) and without DKMS modules (NVIDIA: no build directory).
 - Standalone: `kernelforge/bin/kernelforge --dry-run`, `--version`, `--no-install`, `--help`. Logs in
   `~/.local/state/kernelforge/`. Remove a kernel by hand: `/boot/*-<release>`, `/lib/modules/<release>`, the entry

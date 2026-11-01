@@ -10,6 +10,19 @@ for _ in {1..50}; do
     sleep 0.1
 done
 
+# The volume module (libpulse) crashes the bar on the first scroll when the PulseAudio socket was
+# not there at its start: at the first login i3 starts pipewire-pulse at the same moment as the
+# bar. Wait for it (at most 10 s; not at all without pipewire-pulse, and instantly on a restart).
+if command -v pipewire-pulse >/dev/null; then
+    for _ in {1..100}; do
+        if [[ -S "${XDG_RUNTIME_DIR:-/nonexistent}/pulse/native" ]] &&
+           { ! command -v pactl >/dev/null || timeout 2 pactl info >/dev/null 2>&1; }; then
+            break
+        fi
+        sleep 0.1
+    done
+fi
+
 # Primary output, else the first connected one
 MONITOR=$(polybar --list-monitors 2>/dev/null | awk -F: '/\(primary\)/ {print $1; exit}')
 [[ -z "$MONITOR" ]] && MONITOR=$(polybar --list-monitors 2>/dev/null | awk -F: 'NR == 1 {print $1}')

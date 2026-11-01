@@ -91,6 +91,7 @@ add_boot_entry() {
     case $BOOTLOADER in
         grub)
             # grub-mkconfig finds every vmlinuz-* in /boot: the new kernel appears by itself
+            (( KF_SET_DEFAULT )) && { grub_saved_default || warn "GRUB_DEFAULT is not 'saved': the new kernel will not be the default"; }
             GRUB_CFG=$BOOT_DIR/grub/grub.cfg
             priv_test_e "$BOOT_DIR/grub2/grub.cfg" && GRUB_CFG=$BOOT_DIR/grub2/grub.cfg
             if command -v grub-mkconfig >/dev/null; then
@@ -101,7 +102,16 @@ add_boot_entry() {
             priv grep -q -- "vmlinuz-$rel" "$GRUB_CFG" 2>/dev/null \
                 || warn "$rel is not in $GRUB_CFG: add it by hand"
             ok "GRUB: $GRUB_CFG updated"
-            note "GRUB may make the new kernel the default (the newest version): the old one is under Advanced options."
+            if (( KF_SET_DEFAULT )); then
+                if grub_set_default "$rel" "$GRUB_CFG"; then
+                    ok "GRUB: $rel is the default entry"
+                    note "Kernel $rel is the default in the GRUB menu. The old kernel is under Advanced options; to go back: grub-set-default with its entry, or choose it once in the menu."
+                else
+                    warn "could not make $rel the default entry: choose it in the GRUB menu (Advanced options)"
+                fi
+            else
+                note "GRUB may make the new kernel the default (the newest version): the old one is under Advanced options."
+            fi
             ;;
         systemd-boot)
             local dir=$ESP/loader/entries conf lin ini
@@ -124,9 +134,51 @@ add_boot_entry() {
                 "$rel" "$rel" "$lin" "${ini:+initrd  $ini$'\n'}" "$(clean_cmdline)" > "$tmp" || die "cannot write the entry"
             put_file "$tmp" "$conf" 0644
             ok "systemd-boot: $conf"
+            if (( KF_SET_DEFAULT )) && [[ -z $KF_SYSROOT ]] && command -v bootctl >/dev/null; then
+                if run_logged priv bootctl set-default "${conf##*/}"; then
+                    ok "systemd-boot: $rel is the default entry"
+                else
+                    warn "could not make $rel the default entry: choose it in the boot menu"
+                fi
+            fi
             ;;
         *)
             note "Add boot entry by hand: kernel $BOOT_DIR/vmlinuz-$rel${INITRD:+, initrd $INITRD}, command line like /proc/cmdline."
             ;;
     esac
+}
+
+# GRUB only remembers a default entry with GRUB_DEFAULT=saved (grub-set-default writes it to grubenv)
+grub_saved_default() {
+    local f=$KF_SYSROOT/etc/default/grub tmp
+    [[ -r $f ]] || return 1
+    grep -Eq '^[[:space:]]*GRUB_DEFAULT=("?)saved\1[[:space:]]*$' "$f" && return 0
+    mktmp; tmp=$MKTMP/grub-default
+    awk 'BEGIN { d = 0 }
+         /^[ \t]*GRUB_DEFAULT=/ { if (!d) print "GRUB_DEFAULT=saved"; d = 1; next }
+         { print }
+         END { if (!d) print "GRUB_DEFAULT=saved" }' "$f" > "$tmp" || return 1
+    priv cp -n -- "$f" "$f.kernelforge-bak" 2>/dev/null
+    priv install -m 0644 -T -- "$tmp" "$f" || return 1
+    ok "/etc/default/grub: GRUB_DEFAULT=saved (the old file: $f.kernelforge-bak)"
+}
+
+# The menu entry of kernel $1 in the generated config $2 -> grub-set-default. The entry sits in the
+# submenu "Advanced options" (gnulinux-advanced-UUID>gnulinux-RELEASE-advanced-UUID) unless the
+# submenu is switched off.
+grub_set_default() {
+    local rel=$1 cfg=$2 text line sub="" id="" rest
+    text=$(priv cat -- "$cfg" 2>/dev/null) || return 1
+    while IFS= read -r line; do
+        if [[ $line == submenu\ * && $line == *"'gnulinux-advanced-"* ]]; then
+            rest=${line#*"'gnulinux-advanced-"}
+            sub=gnulinux-advanced-${rest%%"'"*}
+        elif [[ $line == *"menuentry "* && $line == *"'gnulinux-$rel-advanced-"* ]]; then
+            rest=${line#*"'gnulinux-$rel-advanced-"}
+            id=gnulinux-$rel-advanced-${rest%%"'"*}
+            break
+        fi
+    done <<< "$text"
+    [[ -n $id ]] || return 1
+    run_logged priv grub-set-default "${sub:+$sub>}$id"
 }

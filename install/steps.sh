@@ -4,7 +4,7 @@
 #                          returns 1 if there is nothing to do; MODULE limits it to one module
 #   run_<step>            does it; runs in the background, output in the log (lib.sh protocol)
 
-STEP_ORDER=(update packages font services swcursor pointer backlight alsa shell links firefox mail mpris theme nvim kernel autostart network)
+STEP_ORDER=(update packages font services swcursor pointer backlight alsa shell links firefox mail mpris theme nvim dualboot othersys fixes kernel autostart network)
 
 declare -A STEP_TITLE=(
     [update]="System update"  [packages]="Packages"        [font]="Font"
@@ -14,13 +14,14 @@ declare -A STEP_TITLE=(
     [firefox]="Firefox"       [mail]="neomutt"             [mpris]="mpv MPRIS"
     [theme]="Theme"           [nvim]="Neovim plugins"      [autostart]="Start X on login"
     [network]="NetworkManager" [kernel]="Custom kernel"
+    [dualboot]="Dual boot"    [othersys]="Second system"  [fixes]="Hardware fixes"
 )
 # share of the whole installation, for the progress bar
 declare -A STEP_WEIGHT=(
     [update]=12 [packages]=40 [font]=4 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1
-    [shell]=1 [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [kernel]=30 [autostart]=1 [network]=3
+    [shell]=1 [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [dualboot]=2 [othersys]=20 [fixes]=1 [kernel]=30 [autostart]=1 [network]=3
 )
-declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 [kernel]=1 )
+declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 [kernel]=1 [dualboot]=1 [othersys]=1 [fixes]=1 )
 
 plan_step() {
     PLAN=()
@@ -139,23 +140,75 @@ services_todo() {
     done
 }
 
+# The elogind service of runit is enabled, but another elogind (started by D-Bus) runs: runit starts
+# its own over and over, "elogind is already running" on every console. Needs root to ask runit.
+elogind_loop() {
+    service_on elogind || return 1
+    pgrep -x elogind >/dev/null || return 1
+    (( EUID == 0 )) || sudo -n true 2>/dev/null || return 1
+    ! as_root sv check "$RUNSV_DIR/elogind" >/dev/null 2>&1
+}
+
 plan_services() {
     services_todo "${1-}"
-    (( ${#SVC[@]} )) || return 1
-    PLAN=("enable ${SVC[*]}")
+    PLAN=()
+    (( ${#SVC[@]} )) && PLAN=("enable ${SVC[*]}")
+    [[ -z ${1-} || $1 == core ]] && elogind_loop && PLAN+=("disable the elogind service of runit: elogind runs already and the service fails over and over")
+    (( ${#PLAN[@]} ))
+}
+
+# Waits until runit reports service $1 as running (the first start needs a few seconds)
+wait_service() {
+    local i
+    command -v sv >/dev/null || return 0
+    for (( i = 0; i < 20; i++ )); do
+        as_root sv check "$RUNSV_DIR/$1" >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Takes the runit service $1 out again (stops it first)
+disable_service() {
+    as_root sv down "$RUNSV_DIR/$1" >/dev/null 2>&1
+    as_root rm -f "$RUNSV_DIR/$1"
 }
 
 run_services() {
     local s changed=0
+    # a service of an earlier run that loops: out with it
+    if elogind_loop; then
+        disable_service elogind || return 1
+        say "disabled the elogind service of runit (elogind runs already, D-Bus started it)"
+        changed=1
+    fi
     services_todo
     for s in "${SVC[@]}"; do
         if [[ ! -d $SV_DIR/$s ]]; then
             warn "Service $s is not installed ($SV_DIR/$s is missing)"
             continue
         fi
+        # D-Bus activation may have started elogind since the plan
+        if [[ $s == elogind ]] && pgrep -x elogind >/dev/null; then
+            say "elogind runs already (started by D-Bus): no service needed"
+            continue
+        fi
         as_root ln -s "$SV_DIR/$s" "$RUNSV_DIR/" || return 1
         say "enabled $s"
         changed=1
+        # elogind needs D-Bus: wait for it, so runit does not start elogind first
+        # (and D-Bus activation does not start a second one in between)
+        if [[ $s == dbus ]]; then
+            detail "waiting for D-Bus"
+            wait_service dbus || warn "D-Bus did not start within 20 s"
+        elif [[ $s == elogind ]]; then
+            detail "waiting for elogind"
+            if ! wait_service elogind && pgrep -x elogind >/dev/null; then
+                # another elogind won the race: the service would fail forever
+                disable_service elogind
+                say "elogind was started by D-Bus in the meantime: service removed again"
+            fi
+        fi
     done
     (( changed )) && need_reboot
     (( ${#SVC[@]} )) || say "every service is enabled"
@@ -610,6 +663,187 @@ run_network() {
     return 0
 }
 
+# ── GRUB (helpers of the steps dual boot, hardware fixes) ─────────────────────────
+
+GRUB_DEFAULTS=$SYSROOT/etc/default/grub
+
+# The value of KEY $1 in /etc/default/grub, without quotes -> _GV
+grub_value() {
+    local l v=""
+    _GV=""
+    [[ -r $GRUB_DEFAULTS ]] || return 1
+    while IFS= read -r l || [[ -n $l ]]; do
+        [[ $l =~ ^[[:space:]]*$1=(.*)$ ]] && v=${BASH_REMATCH[1]}
+    done < "$GRUB_DEFAULTS"
+    v=${v%"${v##*[![:space:]]}"}
+    v=${v#[\"\']}; v=${v%[\"\']}
+    _GV=$v
+}
+
+# Installs the edited copy $1 as /etc/default/grub (the original is kept once as *.dotfiles-bak)
+grub_install() {
+    as_root cp -n -- "$GRUB_DEFAULTS" "$GRUB_DEFAULTS.dotfiles-bak" 2>/dev/null
+    as_root install -m644 -T -- "$1" "$GRUB_DEFAULTS"
+}
+
+# KEY=VALUE as the only uncommented line of that key
+grub_set() {
+    local key=$1 val=$2 l tmp done=0
+    [[ -r $GRUB_DEFAULTS ]] || { warn "$GRUB_DEFAULTS is missing"; return 1; }
+    tmp=$(mktemp) || return 1
+    while IFS= read -r l || [[ -n $l ]]; do
+        if [[ $l =~ ^[[:space:]]*$key= ]]; then
+            (( done )) || printf '%s=%s\n' "$key" "$val"
+            done=1
+        else
+            printf '%s\n' "$l"
+        fi
+    done < "$GRUB_DEFAULTS" > "$tmp"
+    (( done )) || printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    grub_install "$tmp"; local rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# Adds the word $2 to the quoted value of KEY $1 (GRUB_CMDLINE_LINUX_DEFAULT)
+grub_add_word() {
+    local key=$1 word=$2 l tmp done=0 pre q rest
+    [[ -r $GRUB_DEFAULTS ]] || { warn "$GRUB_DEFAULTS is missing"; return 1; }
+    tmp=$(mktemp) || return 1
+    while IFS= read -r l || [[ -n $l ]]; do
+        if [[ $l =~ ^([[:space:]]*$key=)([\"\']?)(.*)$ ]]; then
+            pre=${BASH_REMATCH[1]} q=${BASH_REMATCH[2]} rest=${BASH_REMATCH[3]}
+            rest=${rest%"${rest##*[![:space:]]}"}
+            if [[ -n $q ]]; then rest=${rest%"$q"}; else q='"'; fi
+            rest=${rest%"${rest##*[![:space:]]}"}
+            l="$pre$q${rest:+$rest }$word$q"
+            done=1
+        fi
+        printf '%s\n' "$l"
+    done < "$GRUB_DEFAULTS" > "$tmp"
+    (( done )) || printf '%s="%s"\n' "$key" "$word" >> "$tmp"
+    grub_install "$tmp"; local rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+# Makes the boot menu again -> GRUB_OUT (what grub-mkconfig printed; os-prober reports there)
+grub_regen() {
+    local cfg=/boot/grub/grub.cfg rc
+    as_root test -e "$SYSROOT/boot/grub2/grub.cfg" && cfg=/boot/grub2/grub.cfg
+    detail "making the boot menu (grub-mkconfig)"
+    if command -v grub-mkconfig >/dev/null; then
+        GRUB_OUT=$(as_root grub-mkconfig -o "$SYSROOT$cfg" 2>&1); rc=$?
+    elif command -v update-grub >/dev/null; then
+        GRUB_OUT=$(as_root update-grub 2>&1); rc=$?
+    else
+        warn "grub-mkconfig is not installed"; return 1
+    fi
+    printf '%s\n' "$GRUB_OUT"
+    (( rc == 0 )) || warn "grub-mkconfig failed ($rc), see the log"
+    return "$rc"
+}
+
+# ── Dual boot ─────────────────────────────────────────────────────────────────────
+
+plan_dualboot() {
+    local o
+    PLAN=()
+    detect_boot; detect_other_os
+    case $BOOTLOADER in
+        grub)
+            grub_value GRUB_DISABLE_OS_PROBER
+            [[ $_GV == false ]] && command -v os-prober >/dev/null && return 1
+            PLAN+=("os-prober (and ntfs-3g) read the other disks when the boot menu is made")
+            [[ $_GV == false ]] || PLAN+=("GRUB_DISABLE_OS_PROBER=false in /etc/default/grub (GRUB switches it off by default)")
+            PLAN+=("make the boot menu again, check that every system of the firmware is in it") ;;
+        systemd-boot)
+            PLAN+=("systemd-boot lists Windows by itself when its boot loader is on the same EFI partition: nothing to set up, notes at the end") ;;
+        *)  PLAN+=("!boot loader not recognized: nothing is changed, notes at the end") ;;
+    esac
+    for o in "${OTHER_OS[@]}"; do PLAN+=("found: $o"); done
+    (( ${#OTHER_OS[@]} )) || [[ -n $DUAL_TARGET ]] || PLAN+=("!no other system found: the boot menu will only list this one")
+    return 0
+}
+
+run_dualboot() {
+    local found l win=0
+    detect_boot; detect_other_os
+    case $BOOTLOADER in
+        grub)
+            if ! command -v os-prober >/dev/null; then
+                warn "os-prober is not installed (package os-prober)"; return 1
+            fi
+            grub_set GRUB_DISABLE_OS_PROBER false || return 1
+            say "GRUB_DISABLE_OS_PROBER=false"
+            grub_regen || return 1
+            found=$(grep '^Found ' <<< "$GRUB_OUT")
+            if [[ -n $found ]]; then
+                while IFS= read -r l; do say "$l"; done <<< "$found"
+                note "Boot menu: GRUB found $(grep -c . <<< "$found") other system(s); they are in the menu."
+                [[ ${found,,} == *windows* ]] && win=1
+            elif [[ -n $DUAL_TARGET ]]; then
+                say "no other system yet: the installer of ${OS_TITLE[$DUAL_TARGET]} comes next"
+            elif (( ${#OTHER_OS[@]} )); then
+                warn "GRUB found no other system, but the firmware lists: ${OTHER_OS[*]}. A system that was not shut down properly (Windows Fast Startup, hibernation) cannot be read: switch it off in Windows (see the note), shut down completely and run the installer again."
+            else
+                note "Boot menu: no other system found. Connect the disk (or install the other system) and run ./install.sh modules dualboot again."
+            fi ;;
+        systemd-boot)
+            note "Boot menu: systemd-boot shows Windows by itself if its boot loader (EFI/Microsoft) is on the EFI partition that systemd-boot uses. Another EFI partition: copy EFI/Microsoft there, or pick it in the firmware boot menu." ;;
+        *)  warn "Boot loader not recognized: add the other systems to your boot menu by hand." ;;
+    esac
+    (( OTHER_WINDOWS || win )) || return 0
+    note "Windows, Fast Startup: switch it off in Windows (Control Panel > Power Options > Choose what the power buttons do), and shut Windows down completely before you start Linux. Otherwise Windows keeps its partition locked and Linux cannot read it."
+    note "Windows, clock: Windows takes the hardware clock for local time, Linux for UTC: the time is off by your time zone after switching. Fix it once in Windows (administrator prompt): reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation\" /v RealTimeIsUniversal /d 1 /t REG_QWORD /f"
+    note "Windows updates may put the Windows boot manager first in the firmware order: change it back in the firmware setup, or with efibootmgr -o."
+    return 0
+}
+
+# ── Hardware fixes ────────────────────────────────────────────────────────────────
+
+plan_fixes() {
+    local f
+    PLAN=()
+    fixes_chosen
+    (( ${#FIXC[@]} )) || return 1
+    detect_boot
+    for f in "${FIXC[@]}"; do
+        if [[ $BOOTLOADER == grub ]]; then
+            grub_value GRUB_CMDLINE_LINUX_DEFAULT
+            [[ " $_GV " == *" ${FIX_PARAM[$f]} "* ]] && continue
+            PLAN+=("${FIX_PARAM[$f]} into GRUB_CMDLINE_LINUX_DEFAULT: ${FIX_TITLE[$f]}, for ${FIX_WHO[$f]}")
+        else
+            PLAN+=("!${FIX_PARAM[$f]}: boot loader is ${BOOTLOADER}, add it to the kernel command line by hand")
+        fi
+    done
+    (( ${#PLAN[@]} )) && [[ $BOOTLOADER == grub ]] && PLAN+=("make the boot menu again")
+    (( ${#PLAN[@]} ))
+}
+
+run_fixes() {
+    local f changed=0
+    fixes_chosen
+    detect_boot
+    if [[ $BOOTLOADER != grub ]]; then
+        for f in "${FIXC[@]}"; do
+            warn "Add ${FIX_PARAM[$f]} to the kernel command line of your boot loader ($BOOTLOADER) by hand."
+        done
+        return 0
+    fi
+    for f in "${FIXC[@]}"; do
+        grub_value GRUB_CMDLINE_LINUX_DEFAULT
+        if [[ " $_GV " == *" ${FIX_PARAM[$f]} "* ]]; then say "${FIX_PARAM[$f]} is set already"; continue; fi
+        grub_add_word GRUB_CMDLINE_LINUX_DEFAULT "${FIX_PARAM[$f]}" || return 1
+        say "GRUB_CMDLINE_LINUX_DEFAULT += ${FIX_PARAM[$f]}"
+        changed=1
+    done
+    (( changed )) || return 0
+    grub_regen || return 1
+    need_reboot
+    note "Hardware fix: ${FIXC[*]} is in the boot menu now; it takes effect with the next start."
+}
+
 # ── Custom kernel ─────────────────────────────────────────────────────────────────
 
 KERNELFORGE=$DOTFILES/kernelforge/bin/kernelforge
@@ -626,7 +860,7 @@ plan_kernel() {
 
 # kernelforge runs as the user and uses sudo (the installer keeps it alive) for /boot and /lib/modules
 run_kernel() {
-    local args=(--yes)
+    local args=(--yes --set-default)
     [[ -x $KERNELFORGE ]] || { say "$KERNELFORGE is missing"; return 1; }
     [[ -n ${KERNEL_VERSION-} ]] && args+=(--version "$KERNEL_VERSION")
     KF_PROTOCOL=1 KF_NONINTERACTIVE=1 "$KERNELFORGE" "${args[@]}"

@@ -16,6 +16,8 @@
 #       --jobs N         parallel compile jobs (default: by memory and threads)
 #       --build-dir DIR  source and build (default: ~/.cache/kernelforge)
 #       --no-install     only build
+#       --set-default    make the new kernel the default of the boot menu (GRUB: GRUB_DEFAULT=saved
+#                        + grub-set-default; systemd-boot: bootctl set-default); the others stay
 #   -h, --help
 #
 # Environment: KF_PROTOCOL=1 (messages for the dotfiles installer), KF_NONINTERACTIVE=1 (never ask,
@@ -32,7 +34,7 @@ done
 usage() { sed -n '2,/^[^#]/{/^#/{s/^# \{0,1\}//;p}}' "${BASH_SOURCE[0]}"; }
 
 parse_args() {
-    KF_VERSION="" KF_YES=0 KF_LOCALMOD=1 KF_NATIVE=1 KF_KEEP=() KF_JOBS="" KF_INSTALL=1 KF_CMD=build
+    KF_VERSION="" KF_YES=0 KF_LOCALMOD=1 KF_NATIVE=1 KF_KEEP=() KF_JOBS="" KF_INSTALL=1 KF_SET_DEFAULT=0 KF_CMD=build
     CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/kernelforge
     while (( $# )); do
         case $1 in
@@ -49,6 +51,7 @@ parse_args() {
                            KF_JOBS=$2; shift ;;
             --build-dir)   [[ -n ${2-} ]] || die "--build-dir: a directory"; CACHE=$2; shift ;;
             --no-install)  KF_INSTALL=0 ;;
+            --set-default) KF_SET_DEFAULT=1 ;;
             versions)      KF_CMD=versions ;;
             *)             die "unknown argument '$1' (see --help)" ;;
         esac
@@ -76,6 +79,7 @@ show_plan() {
     info "CPU tuning   $( (( KF_NATIVE )) && echo "-march=native if the version has it" || echo off)"
     if (( KF_INSTALL )); then
         info "installed    $BOOT_DIR/vmlinuz-...${KF_SUFFIX}, $MOD_ROOT/...${KF_SUFFIX}, initramfs, boot entry (root, sudo)"
+        (( KF_SET_DEFAULT )) && info "default      the new kernel becomes the default boot entry"
     else
         info "installed    nothing (--no-install)"
     fi

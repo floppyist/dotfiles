@@ -612,6 +612,25 @@ det_module() {
             d_kv Now "$l"
             d_kv WiFi "${WIFI_IFS[*]:-no WiFi}" ;;
         autostart) d_blank; d_kv Now "${DM:+display manager }${DM:-startx by hand}" ;;
+        dualboot)
+            d_blank
+            d_kv "Boot loader" "$BOOTLOADER"
+            if [[ -n $DUAL_TARGET ]]; then
+                d_kv "Install" "${OS_TITLE[$DUAL_TARGET]} on ${DUAL_DISK:-?}" "${F[accent_text]}"
+            else
+                d_kv "Install" "no second system (m: choose one)" "${F[muted]}"
+            fi
+            if (( ${#OTHER_OS[@]} )); then
+                for l in "${OTHER_OS[@]}"; do d_kv Found "$l" "${F[fg]}"; done
+            else
+                d_kv Found "no other system" "${F[muted]}"
+            fi ;;
+        fixes)
+            d_blank
+            d_kv Machine "${DMI_VENDOR:-?} ${DMI_PRODUCT:-?}"
+            for l in "${FIXES[@]}"; do
+                fix_match_"$l" && d_kv "${FIX_TITLE[$l]}" "recommended for this machine" "${F[ok]}"
+            done ;;
     esac
     mod_pkgs "$m"
     if (( ${#MP[@]} )); then
@@ -706,6 +725,248 @@ screen_nvidia() {
     LS_HINTS=("$G_UPDN" move enter choose esc back)
     list_screen
     mods_scan
+}
+
+# ── Second system (module dual boot) ──────────────────────────────────────────────
+
+OS_PICK=()
+
+row_os() {
+    local id=${OS_PICK[$1]} t
+    if [[ -z $id ]]; then t="No new system, only the boot menu"
+    else
+        t=${OS_TITLE[$id]}
+        (( ${OS_EXP[$id]:-0} )) && t+="  (untested boot line)"
+    fi
+    [[ $id == "$DUAL_TARGET" ]] && t+="  $G_ON"
+    fit "$t" $(( $3 - 2 ))
+    if (( $2 )); then _ROW="${B[surface]}${F[accent]}$G_BAR ${F[fg]}$BOLD$_F$N"
+    else _ROW="  ${F[fg]}$_F$N"; fi
+}
+
+det_os() {
+    local id=${OS_PICK[$1]}
+    d_reset
+    if [[ -z $id ]]; then
+        d_text "${F[fg]}" "Only find the other systems on this machine and put them in the GRUB menu. Nothing is downloaded and no partition is made."
+        return
+    fi
+    d_head "${OS_TITLE[$id]}"
+    d_text "${F[fg]}" "${OS_DESC[$id]}"
+    d_blank
+    othersys_gib "$id"
+    d_kv Space "$OS_TOTAL GB unallocated: the installer files, and ${OS_NEED[$id]} GB for the system" "${F[fg]}"
+    d_kv Changes "a partition from unallocated space (the old table is saved), a GRUB entry" "${F[fg]}"
+    d_kv Not "nothing is shrunk, moved or deleted" "${F[fg]}"
+    d_kv Afterwards "restart, choose the entry; its own installer does the rest" "${F[fg]}"
+    if (( ${OS_WIN[$id]:-0} )) && (( ! EFI )); then
+        d_blank
+        d_text "${F[warn]}" "This machine starts in BIOS mode: the Windows setup is prepared for UEFI only."
+    fi
+    [[ $BOOTLOADER == grub ]] || { d_blank; d_text "${F[warn]}" "The boot loader is $BOOTLOADER: this needs GRUB."; }
+}
+
+key_os() {
+    case $1 in
+        enter|right|l) DUAL_TARGET=${OS_PICK[LS_SEL]}; LS_OUT=next; return 2 ;;
+        esc|left|h|q)  LS_OUT=back; return 2 ;;
+        ctrl-c)        LS_OUT=quit; return 2 ;;
+    esac
+    return 1
+}
+
+screen_os() {
+    local i
+    OS_PICK=("" "${OSES[@]}")
+    LS_N=${#OS_PICK[@]} LS_SEL=0 LS_ROWFN=row_os LS_DETFN=det_os LS_EXTRAFN=""
+    for i in "${!OS_PICK[@]}"; do [[ ${OS_PICK[i]} == "$DUAL_TARGET" ]] && LS_SEL=$i; done
+    LS_KEYFN=key_os LS_TL="Second system" LS_TR="Details" LS_CRUMB=2
+    LS_HINTS=("$G_UPDN" move enter choose esc back)
+    list_screen
+}
+
+# A page of text with a Back button -> DOC_BTN
+build_info() { d_reset; d_text "${F[fg]}" "$INFO_TEXT"; }
+info_screen() {
+    INFO_TEXT=$1 DOC_FN=build_info DOC_TITLE_C=${F[warn]} DOC_SEL=0 DOC_HINTS=(enter back)
+    doc_screen 3 "$2" Back
+    DOC_TITLE_C=""
+}
+
+# Disks with room -> DUAL_DISK
+row_disk() {
+    local i=${DISK_OK[$1]} t
+    human_size "${DISK_FREE[i]}"
+    t="${DISKS[i]}  $_HS free  ${DISK_DESC[i]}"
+    [[ ${DISKS[i]} == "$DUAL_DISK" ]] && t+="  $G_ON"
+    fit "$t" $(( $3 - 2 ))
+    if (( $2 )); then _ROW="${B[surface]}${F[accent]}$G_BAR ${F[fg]}$BOLD$_F$N"
+    else _ROW="  ${F[fg]}$_F$N"; fi
+}
+
+det_disk() {
+    local i=${DISK_OK[$1]}
+    d_reset
+    d_head "${DISKS[i]}"
+    human_size "${DISK_FREE[i]}"
+    d_kv Free "about $_HS not in any partition" "${F[fg]}"
+    d_kv Disk "${DISK_DESC[i]}"
+    d_blank
+    d_text "${F[subtle]}" "The installer partition goes to the end of the largest free stretch, so the rest stays in one piece for the new system. The estimate is checked again with root before anything is written."
+}
+
+key_disk() {
+    case $1 in
+        enter|right|l) DUAL_DISK=${DISKS[${DISK_OK[LS_SEL]}]}; LS_OUT=next; return 2 ;;
+        esc|left|h|q)  LS_OUT=back; return 2 ;;
+        ctrl-c)        LS_OUT=quit; return 2 ;;
+    esac
+    return 1
+}
+
+screen_disk() {
+    LS_N=${#DISK_OK[@]} LS_SEL=0 LS_ROWFN=row_disk LS_DETFN=det_disk LS_EXTRAFN=""
+    LS_KEYFN=key_disk LS_TL="Disk" LS_TR="Details" LS_CRUMB=2
+    LS_HINTS=("$G_UPDN" move enter choose esc back)
+    list_screen
+}
+
+# Windows ISOs in the usual places -> WIN_FOUND
+find_win_isos() {
+    local d f
+    WIN_FOUND=()
+    for d in "$HOME/Downloads" "$HOME" "$HOME/images" "$HOME/Desktop" "$HOME/Documents"; do
+        [[ -d $d ]] || continue
+        while IFS= read -r f; do WIN_FOUND+=("$f"); done < <(find "$d" -maxdepth 2 -type f -iname '*win*.iso' -size +2G 2>/dev/null)
+    done
+    mapfile -t WIN_FOUND < <(printf '%s\n' "${WIN_FOUND[@]}" | awk 'NF && !seen[$0]++')
+}
+
+row_win() {
+    local f=${WIN_FOUND[$1]} sz
+    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    human_size "$sz"
+    fit "${f/#$HOME/\~}  $_HS" $(( $3 - 2 ))
+    if (( $2 )); then _ROW="${B[surface]}${F[accent]}$G_BAR ${F[fg]}$BOLD$_F$N"
+    else _ROW="  ${F[fg]}$_F$N"; fi
+}
+
+det_win() {
+    d_reset
+    d_text "${F[fg]}" "${WIN_FOUND[$1]//[[:cntrl:]]/ }"
+    d_blank
+    d_text "${F[subtle]}" "The installer checks that it is a 64-bit UEFI Windows installation ISO before it touches the disk."
+}
+
+key_win() {
+    case $1 in
+        enter|right|l) WIN_ISO=${WIN_FOUND[LS_SEL]}; LS_OUT=next; return 2 ;;
+        esc|left|h|q)  LS_OUT=back; return 2 ;;
+        ctrl-c)        LS_OUT=quit; return 2 ;;
+    esac
+    return 1
+}
+
+# -> LS_OUT next (WIN_ISO set), back, quit
+screen_winiso() {
+    while :; do
+        find_win_isos
+        if (( ${#WIN_FOUND[@]} )); then
+            LS_N=${#WIN_FOUND[@]} LS_SEL=0 LS_ROWFN=row_win LS_DETFN=det_win LS_EXTRAFN=""
+            LS_KEYFN=key_win LS_TL="Windows ISO" LS_TR="Details" LS_CRUMB=2
+            LS_HINTS=("$G_UPDN" move enter choose esc back)
+            list_screen
+            return 0
+        fi
+        INFO_TEXT="No Windows ISO found (a file *win*.iso, 2 GB or more, in ~/Downloads, ~, ~/images, ~/Desktop or ~/Documents).
+
+Microsoft offers no download the installer could fetch by itself: get the ISO at microsoft.com/software-download/windows11 (or windows10), save it in ~/Downloads and choose Search again."
+        DOC_FN=build_info DOC_TITLE_C=${F[warn]} DOC_SEL=0 DOC_HINTS=("$G_LR" choose enter confirm)
+        doc_screen 3 "Windows ISO" "Search again" Back
+        DOC_TITLE_C=""
+        case $DOC_BTN in 0) ;; -2) LS_OUT=quit; return 0 ;; *) LS_OUT=back; return 0 ;; esac
+    done
+}
+
+# The whole dialog: system, disk, (ISO) -> DUAL_TARGET DUAL_DISK WIN_ISO; LS_OUT next, back, quit
+flow_dualboot() {
+    while :; do
+        screen_os
+        [[ $LS_OUT == next ]] || return 0
+        [[ -n $DUAL_TARGET ]] && [[ $BOOTLOADER != grub ]] && {
+            info_screen "Second systems need GRUB; the boot loader here is $BOOTLOADER. Without a new system the installer only sets up the boot menu notes." "Needs GRUB"
+            DUAL_TARGET=""; continue; }
+        [[ -z $DUAL_TARGET ]] && { DUAL_DISK="" WIN_ISO=""; mods_scan; return 0; }
+        if (( ${OS_WIN[$DUAL_TARGET]:-0} )) && (( ! EFI )); then
+            info_screen "This machine starts in BIOS mode (no UEFI): the Windows setup is prepared for UEFI only." "Windows needs UEFI"
+            DUAL_TARGET=""; continue
+        fi
+        othersys_gib "$DUAL_TARGET"
+        detect_disks; disks_with_room "$OS_TOTAL"
+        if (( ! ${#DISK_OK[@]} )); then
+            info_screen "No disk has $OS_TOTAL GB of unallocated space (the installer files and ${OS_NEED[$DUAL_TARGET]} GB for ${OS_TITLE[$DUAL_TARGET]}). The installer never shrinks or deletes anything: free the space first (shrink a volume in Windows Disk Management, or with gparted), then run the installer again." "No room on the disks"
+            DUAL_TARGET=""; continue
+        fi
+        if (( ${#DISK_OK[@]} == 1 )); then DUAL_DISK=${DISKS[${DISK_OK[0]}]}
+        else
+            screen_disk
+            [[ $LS_OUT == next ]] || { DUAL_TARGET=""; [[ $LS_OUT == quit ]] && return 0; continue; }
+        fi
+        if (( ${OS_WIN[$DUAL_TARGET]:-0} )); then
+            screen_winiso
+            [[ $LS_OUT == next ]] || { DUAL_TARGET=""; [[ $LS_OUT == quit ]] && return 0; continue; }
+        fi
+        mods_scan
+        LS_OUT=next
+        return 0
+    done
+}
+
+# Hardware fixes: which ones (space toggles)
+row_fix() {
+    local f=${FIXES[$1]} w=$3 chk chkc l
+    if (( ${FIX_SEL[$f]:-0} )); then chk=$G_ON chkc=${F[accent_text]}; else chk=$G_OFF chkc=${F[muted]}; fi
+    l=${FIX_TITLE[$f]}
+    fix_match_"$f" && l+="  recommended"
+    fit "$l" $(( w - 4 ))
+    if (( $2 )); then _ROW="${B[surface]}${F[accent]}$G_BAR $chkc$chk ${F[fg]}$BOLD$_F$N"
+    else _ROW="  $chkc$chk ${F[fg]}$_F$N"; fi
+}
+
+det_fix() {
+    local f=${FIXES[$1]}
+    d_reset
+    d_head "${FIX_TITLE[$f]}"
+    d_text "${F[fg]}" "${FIX_DESC[$f]}"
+    d_blank
+    d_kv For "${FIX_WHO[$f]}" "${F[fg]}"
+    d_kv Machine "${DMI_VENDOR:-?} ${DMI_PRODUCT:-?}"
+    if fix_match_"$f"; then d_kv "" "this machine needs it" "${F[ok]}"
+    else d_kv "" "not this machine: only if you know you need it" "${F[muted]}"; fi
+    d_blank
+    d_kv Where "kernel command line (GRUB_CMDLINE_LINUX_DEFAULT), next start" "${F[fg]}"
+    [[ $BOOTLOADER == grub ]] || d_text "${F[warn]}" "Boot loader: $BOOTLOADER. Only GRUB is changed by the installer; for this one you get the parameter to add by hand."
+}
+
+key_fix() {
+    local f=${FIXES[LS_SEL]}
+    case $1 in
+        space|x)       FIX_SEL[$f]=$(( 1 - ${FIX_SEL[$f]:-0} )); return 0 ;;
+        enter|right|l) LS_OUT=next; return 2 ;;
+        esc|left|h|q)  LS_OUT=back; return 2 ;;
+        ctrl-c)        LS_OUT=quit; return 2 ;;
+    esac
+    return 1
+}
+
+screen_fixes() {
+    LS_N=${#FIXES[@]} LS_SEL=0 LS_ROWFN=row_fix LS_DETFN=det_fix LS_EXTRAFN=""
+    LS_KEYFN=key_fix LS_TL="Hardware fixes" LS_TR="Details" LS_CRUMB=2
+    LS_HINTS=("$G_UPDN" move space toggle enter continue esc back)
+    list_screen
+    [[ $LS_OUT == next ]] || return 0
+    fixes_chosen
+    (( ${#FIXC[@]} )) || SEL[fixes]=0
 }
 
 # Custom kernel: which version. KV_LIST[0] is "" (the newest of the running series).
@@ -1149,7 +1410,7 @@ build_done() {
 }
 
 screen_done() {
-    local title btns=(Exit)
+    local title btns=(Exit) acts=(exit)
     DOC_FN=build_done
     DW=$(( W - 7 )); build_done
     if (( DONE_PROBLEMS )); then
@@ -1157,10 +1418,18 @@ screen_done() {
         DOC_TITLE_C=${F[err]}
     elif (( ABORT )); then title="Stopped"; DOC_TITLE_C=${F[warn]}
     else title="$G_OK Done"; DOC_TITLE_C=${F[ok]}; fi
-    (( REBOOT )) && btns=(Exit "Reboot now")
+    # X can be started right here, from the tty the installer runs on
+    if [[ $FLOW != links ]] && (( ! IN_X && ! DONE_PROBLEMS && ! ABORT )) && command -v startx >/dev/null; then
+        btns+=("Start the desktop"); acts+=(startx)
+    fi
+    (( REBOOT )) && { btns+=("Reboot now"); acts+=(reboot); }
+    FINAL_TITLE=$title FINAL_C=$DOC_TITLE_C FINAL_PLAN=("${PLAN[@]}")
     DOC_SEL=0 DOC_HINTS=("$G_LR" choose enter confirm j/k scroll)
     doc_screen 4 "$title" "${btns[@]}"
-    (( DOC_BTN == 1 )) && WANT_REBOOT=1
+    (( DOC_BTN >= 0 )) && case ${acts[DOC_BTN]} in
+        reboot) WANT_REBOOT=1 ;;
+        startx) WANT_STARTX=1 ;;
+    esac
     return 0
 }
 
@@ -1190,13 +1459,29 @@ flow_install() {
     PLAN_TITLE="What happens" PLAN_ACTION=Install
     while :; do
         if [[ $FLOW == modules ]]; then
-            KV_ASKED=""
+            KV_ASKED="" FX_ASKED="" DB_ASKED=""
             screen_modules
             case $LS_OUT in back) return 0 ;; quit) exit 0 ;; esac
         elif (( GPU_NVIDIA && SEL[graphics] && ${#NVIDIA_DRIVERS[@]} > 1 )) && [[ -z ${NV_ASKED-} ]]; then
             screen_nvidia
             case $LS_OUT in back) return 0 ;; quit) exit 0 ;; esac
             NV_ASKED=1
+        fi
+        if (( SEL[dualboot] )) && [[ -z ${DB_ASKED-} ]]; then
+            flow_dualboot
+            case $LS_OUT in
+                back) [[ $FLOW == modules ]] && continue; return 0 ;;
+                quit) exit 0 ;;
+            esac
+            DB_ASKED=1
+        fi
+        if (( SEL[fixes] )) && [[ -z ${FX_ASKED-} ]]; then
+            screen_fixes
+            case $LS_OUT in
+                back) [[ $FLOW == modules ]] && continue; return 0 ;;
+                quit) exit 0 ;;
+            esac
+            FX_ASKED=1
         fi
         if (( SEL[kernel] )) && [[ -z ${KV_ASKED-} ]]; then
             screen_kernel
@@ -1210,7 +1495,7 @@ flow_install() {
         rc=$?
         (( rc == 0 )) && break
         (( rc == 2 )) && exit 0
-        [[ $FLOW == complete ]] && { NV_ASKED=""; return 0; }
+        [[ $FLOW == complete ]] && { NV_ASKED="" FX_ASKED="" DB_ASKED=""; return 0; }
     done
     run_install
 }
@@ -1240,4 +1525,22 @@ run_install() {
     run_steps_tui
     screen_done
     FLOW_DONE=1
+}
+
+# What the done screen said, on the normal screen: the installer's own screen disappears
+# when it ends, and that must not look like "nothing happened". Needs FINAL_* (screen_done).
+final_summary() {
+    local l c=$'\e[0m'
+    [[ -n ${FINAL_TITLE-} ]] || return 0
+    printf '\n%s%s%s\n' "${FINAL_C-}$BOLD" "$FINAL_TITLE" "$c"
+    for l in "${FINAL_PLAN[@]}"; do
+        l=${l//[[:cntrl:]]/ }
+        case $l in
+            !*) printf '  %s! %s%s\n' "${F[warn]}" "${l#!}" "$c" ;;
+            "") ;;
+            *)  printf '  %s %s\n' "$G_DOT" "$l" ;;
+        esac
+    done
+    [[ -s $LOG ]] && printf '\n  Log: %s\n' "$LOG"
+    printf '\n'
 }

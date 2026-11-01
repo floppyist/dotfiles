@@ -2,7 +2,7 @@
 # install/modules.sh  ·  what the installer can set up, in parts ("modules"), and the plan for
 # a selection of them. Every module has packages and steps (install/steps.sh).
 
-MODULES=(core system graphics audio network bluetooth laptop neovim firefox mail music tools kernel autostart)
+MODULES=(core system graphics audio network bluetooth laptop neovim firefox mail music tools dualboot fixes kernel autostart)
 
 declare -A M_TITLE M_DESC M_PKGS M_STEPS M_REQ M_OFF M_MISSING M_WORK SEL
 
@@ -89,12 +89,30 @@ M_DESC[tools]="htop (in Rofi as a floating window) and xdg-utils (opens files an
 right program)."
 M_PKGS[tools]="htop xdg-utils"
 
+M_TITLE[dualboot]="Dual boot"
+M_DESC[dualboot]="Windows or another Linux next to this system: os-prober looks at the other disks \
+and GRUB lists what it finds in the boot menu (GRUB switches this off by default). Afterwards the \
+installer checks that every system the firmware knows is in the menu, and tells you what to do when one \
+is missing: Windows Fast Startup, the clock, the boot order. You can also have a second system set up: \
+choose Arch, Debian, Ubuntu, Fedora, Alpine or Windows in the next screen. The installer makes a \
+partition from unallocated space (nothing is shrunk or deleted), downloads the ISO (checked against \
+the published SHA-256; Windows: your ISO) and adds a boot entry; the rest of the space stays free for \
+that system's own installer. Only for GRUB; systemd-boot lists \
+Windows by itself when it is on the same EFI partition."
+M_STEPS[dualboot]="dualboot othersys"
+
+M_TITLE[fixes]="Hardware fixes"
+M_DESC[fixes]="Settings for special hardware that would otherwise be a problem, like a kernel parameter \
+for one model. Nothing here is on unless this machine needs it; you choose which ones in the next \
+screen of the installation. Kernel parameters go into GRUB_CMDLINE_LINUX_DEFAULT."
+M_STEPS[fixes]="fixes"
+
 M_TITLE[kernel]="Custom kernel"
 M_DESC[kernel]="kernelforge: a Linux kernel for this machine only. Takes the configuration of the \
 running kernel, keeps the modules that are loaded now, builds it from the signed source of kernel.org \
 (you choose the version) and installs it next to the running one: modules, initramfs, boot entry. \
-Nothing that is installed gets replaced. Takes 10 to 40 minutes and needs about 8 GB; not part of the \
-complete installation. Plug in the devices you use first: a module that is not loaded is left out."
+Nothing that is installed gets replaced. It becomes the default entry of the boot menu (the others stay). \
+Takes 10 to 40 minutes and needs about 8 GB; not part of the complete installation. Plug in the devices you use first: a module that is not loaded is left out."
 M_PKGS[kernel]="base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut"
 M_STEPS[kernel]="kernel"
 
@@ -103,9 +121,44 @@ M_DESC[autostart]="Logging in on tty1 starts the desktop (startx from ~/.bash_pr
 of i3 ends the login again. Not for a display manager: it does not read ~/.xinitrc."
 M_STEPS[autostart]="autostart"
 
+# ── Hardware fixes ────────────────────────────────────────────────────────────────
+# One entry per fix: FIX_TITLE, FIX_DESC, FIX_PARAM (kernel parameter) and fix_match_<id>
+# (true if this machine needs it). New fixes are added here.
+
+FIXES=(amdgpu-dpm)
+declare -A FIX_TITLE FIX_DESC FIX_PARAM FIX_WHO FIX_SEL
+
+FIX_TITLE[amdgpu-dpm]="amdgpu.dpm=0"
+FIX_PARAM[amdgpu-dpm]="amdgpu.dpm=0"
+FIX_WHO[amdgpu-dpm]="iMac late 2015 (iMac16,x and iMac17,1)"
+FIX_DESC[amdgpu-dpm]="Switches the power management of the AMD GPU off. On the iMac late 2015 the \
+amdgpu driver otherwise waits for it for a long time: booting and rebooting takes forever. Costs a \
+little idle power and the GPU clocks stay fixed."
+fix_match_amdgpu-dpm() {
+    [[ $DMI_VENDOR == Apple* && $DMI_PRODUCT == iMac1[67],* ]] && (( GPU_AMDGPU ))
+}
+
+fixes_matching() {
+    local f
+    FX_MATCH=()
+    for f in "${FIXES[@]}"; do "fix_match_$f" && FX_MATCH+=("$f"); done
+}
+
+# The chosen fixes -> FIXC
+fixes_chosen() {
+    local f
+    FIXC=()
+    for f in "${FIXES[@]}"; do (( ${FIX_SEL[$f]:-0} )) && FIXC+=("$f"); done
+}
+
 # Packages of module $1 -> MP
 mod_pkgs() {
     MP=()
+    if [[ $1 == dualboot ]]; then
+        [[ $BOOTLOADER == grub ]] && MP=(os-prober ntfs-3g)
+        [[ $DUAL_TARGET == windows ]] && MP+=(dosfstools wimlib)
+        return
+    fi
     if [[ $1 == graphics ]]; then
         MP=(mesa-dri)
         (( GPU_INTEL ))  && MP+=(vulkan-loader mesa-vulkan-intel intel-video-accel)
@@ -144,6 +197,13 @@ mods_default() {
     [[ -n $DM ]]         && { SEL[autostart]=0; M_OFF[autostart]="uses $DM"; }
     # a long build: only when asked for (also not in `all`)
     SEL[kernel]=0; M_OFF[kernel]="optional"
+    DUAL_TARGET="" DUAL_DISK="" WIN_ISO=""
+    (( ${#OTHER_OS[@]} )) || { SEL[dualboot]=0; M_OFF[dualboot]="no other system found"; }
+    local f
+    fixes_matching
+    for f in "${FIXES[@]}"; do FIX_SEL[$f]=0; done
+    for f in "${FX_MATCH[@]}"; do FIX_SEL[$f]=1; done
+    (( ${#FX_MATCH[@]} )) || { SEL[fixes]=0; M_OFF[fixes]="none needed here"; }
     if [[ -z $NVIDIA_DRIVER ]]; then
         NVIDIA_DRIVER=nouveau
         local d
@@ -195,6 +255,7 @@ sel_steps() {
             (( HAVE_XBPS && ${#SM[@]} )) && SS+=(packages)
             continue
         fi
+        [[ $st == othersys && -z $DUAL_TARGET ]] && continue
         for m in "${MODULES[@]}"; do
             (( ${SEL[$m]:-0} )) || continue
             [[ " ${M_STEPS[$m]-} " == *" $st "* ]] && { SS+=("$st"); break; }

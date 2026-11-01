@@ -1,0 +1,54 @@
+{ "frames": [
+   {
+    "filename": "fury_engine_mascot-animated 0.gif",
+    "frame": { "x": 0, "y": 0, "w": 42, "h": 54 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 42, "h": 54 },
+    "sourceSize": { "w": 42, "h": 54 },
+    "duration": 100
+   },
+   {
+    "filename": "fury_engine_mascot-animated 1.gif",
+    "frame": { "x": 42, "y": 0, "w": 42, "h": 54 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 42, "h": 54 },
+    "sourceSize": { "w": 42, "h": 54 },
+    "duration": 100
+   },
+   {
+    "filename": "fury_engine_mascot-animated 2.gif",
+    "frame": { "x": 84, "y": 0, "w": 42, "h": 54 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 42, "h": 54 },
+    "sourceSize": { "w": 42, "h": 54 },
+    "duration": 100
+   },
+   {
+    "filename": "fury_engine_mascot-animated 3.gif",
+    "frame": { "x": 126, "y": 0, "w": 42, "h": 54 },
+    "rotated": false,
+    "trimmed": false,
+    "spriteSourceSize": { "x": 0, "y": 0, "w": 42, "h": 54 },
+    "sourceSize": { "w": 42, "h": 54 },
+    "duration": 100
+   }
+ ],
+ "meta": {
+  "app": "http://www.aseprite.org/",
+  "version": "1.x-dev",
+  "image": "dancer.png",
+  "format": "I8",
+  "size": { "w": 168, "h": 54 },
+  "scale": "1",
+  "frameTags": [
+  ],
+  "layers": [
+   { "name": "Layer", "opacity": 255, "blendMode": "normal" }
+  ],
+  "slices": [
+  ]
+ }
+}

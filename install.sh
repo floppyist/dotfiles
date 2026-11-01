@@ -6,11 +6,18 @@
 #   ./install.sh modules LIST    these modules (comma separated, see `list`), without the menus
 #   ./install.sh plan [LIST]     what would happen (all modules without LIST); changes nothing
 #   ./install.sh list            the modules and their state on this machine
+#   ./install.sh dualboot-clean  remove the installer entry and partition of a second system again
 #   ./install.sh links           only link the files and generate the theme (after git pull; no root)
 #
 #   -y, --yes                    do not ask before starting (all, modules)
 #   --skip LIST                  leave these modules out (all)
 #   --nvidia DRIVER              nouveau (default), nvidia, nvidia580 or nvidia470
+#   --fix LIST                   hardware fixes (comma separated, see `list`): turns the module `fixes` on and
+#                                chooses exactly these (default: the ones this machine needs)
+#   --other-os SYSTEM            sets up a second system (arch, debian, ubuntu, fedora, alpine, windows):
+#                                a partition from unallocated space, the ISO, a GRUB entry; turns `dualboot` on
+#   --disk DEVICE                the disk for it (default: the only one with enough free space)
+#   --windows-iso FILE           the Windows ISO for --other-os windows
 #   --kernel-version VERSION     the version of the `kernel` module, like 6.18.60 (default: the newest
 #                                of the running series); the module is never part of `all`
 #
@@ -29,6 +36,8 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$DOTFILES/install/links.sh"
 # shellcheck source=install/modules.sh
 . "$DOTFILES/install/modules.sh"
+# shellcheck source=install/dualboot.sh
+. "$DOTFILES/install/dualboot.sh"
 # shellcheck source=install/steps.sh
 . "$DOTFILES/install/steps.sh"
 # shellcheck source=install/tui.sh
@@ -40,6 +49,7 @@ die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
     tui_stop
+    final_summary
     if (( ${WANT_REBOOT:-0} )); then
         printf 'Rebooting...\n'
         sudo reboot
@@ -50,8 +60,12 @@ cleanup() {
         kill "$SUDO_KEEP" 2>/dev/null
         sudo -k
     fi
-    if [[ -n ${FLOW_DONE-} && -s $LOG ]]; then
+    if [[ -n ${FLOW_DONE-} && -s $LOG && -z ${FINAL_TITLE-} ]]; then
         printf 'dotfiles: the log of this run is %s\n' "$LOG"
+    fi
+    if (( ${WANT_STARTX:-0} )); then
+        printf 'Starting the desktop...\n'
+        exec startx
     fi
 }
 
@@ -84,6 +98,8 @@ log_header() {
         printf 'graphics    %s%s\n' "${GPU_LIST:-none}" "$( (( GPU_NVIDIA )) && echo " (driver $NVIDIA_DRIVER)")"
         printf 'modules     %s\n' "${sel[*]}"
         (( ${SEL[kernel]:-0} )) && printf 'kernel      %s\n' "${KERNEL_VERSION:-newest of the running series}"
+        (( ${SEL[fixes]:-0} )) && { fixes_chosen; printf 'fixes       %s\n' "${FIXC[*]}"; }
+        printf 'boot        %s, other systems: %s\n' "$BOOTLOADER" "${OTHER_OS[*]:-none}"
         printf 'steps       %s\n' "${SS[*]}"
         printf 'packages    %s\n' "${SM[*]}"
     } >> "$LOG"
@@ -216,6 +232,30 @@ select_modules() {
     done
 }
 
+# --other-os, --disk, --windows-iso -> DUAL_TARGET DUAL_DISK WIN_ISO
+cli_other_os() {
+    local id ok=0 i
+    for id in "${OSES[@]}"; do [[ $id == "$OTHER_OS_ARG" ]] && ok=1; done
+    (( ok )) || die "unknown system '$OTHER_OS_ARG' (${OSES[*]})"
+    DUAL_TARGET=$OTHER_OS_ARG
+    SEL[dualboot]=1; M_OFF[dualboot]=""
+    othersys_gib "$DUAL_TARGET"
+    if [[ $DUAL_TARGET == windows ]]; then
+        [[ -n ${WINISO_ARG-} && -r $WINISO_ARG ]] || die "windows: --windows-iso FILE (a readable Windows ISO)"
+        WIN_ISO=$(readlink -f "$WINISO_ARG")
+    fi
+    if [[ -n ${DISK_ARG-} ]]; then
+        [[ $DISK_ARG == /dev/* && -b $DISK_ARG ]] || die "--disk: a block device like /dev/sda"
+        DUAL_DISK=$DISK_ARG
+    else
+        detect_disks; disks_with_room "$OS_TOTAL"
+        (( ${#DISK_OK[@]} )) || die "no disk has $OS_TOTAL GB of unallocated space (free some in Windows or with gparted)"
+        (( ${#DISK_OK[@]} == 1 )) || die "several disks have room: choose one with --disk (${DISKS[*]})"
+        DUAL_DISK=${DISKS[${DISK_OK[0]}]}
+    fi
+    mods_scan
+}
+
 # The old install.sh: links and theme, plain output
 cli_links() {
     detect
@@ -230,7 +270,7 @@ cli_links() {
 }
 
 main() {
-    local cmd="" list="" skip="" m
+    local cmd="" list="" skip="" m want
     YES=0
     while (( $# )); do
         case $1 in
@@ -240,9 +280,17 @@ main() {
             --skip=*)     skip=${1#*=} ;;
             --nvidia)     NVIDIA_DRIVER=${2-}; shift ;;
             --nvidia=*)   NVIDIA_DRIVER=${1#*=} ;;
+            --other-os)   OTHER_OS_ARG=${2-}; shift ;;
+            --other-os=*) OTHER_OS_ARG=${1#*=} ;;
+            --disk)       DISK_ARG=${2-}; shift ;;
+            --disk=*)     DISK_ARG=${1#*=} ;;
+            --windows-iso)   WINISO_ARG=${2-}; shift ;;
+            --windows-iso=*) WINISO_ARG=${1#*=} ;;
+            --fix)        FIX_LIST=${2-}; shift ;;
+            --fix=*)      FIX_LIST=${1#*=} ;;
             --kernel-version)   KERNEL_VERSION=${2-}; shift ;;
             --kernel-version=*) KERNEL_VERSION=${1#*=} ;;
-            all|links|list|tui) [[ -z $cmd ]] || die "one command only"; cmd=$1 ;;
+            all|links|list|tui|dualboot-clean) [[ -z $cmd ]] || die "one command only"; cmd=$1 ;;
             modules|plan) [[ -z $cmd ]] || die "one command only"; cmd=$1
                           [[ ${2-} != -* && -n ${2-} ]] && { list=$2; shift; } ;;
             *)            die "unknown argument '$1' (see --help)" ;;
@@ -251,6 +299,9 @@ main() {
     done
     if [[ -n ${NVIDIA_DRIVER-} && $NVIDIA_DRIVER != @(nouveau|nvidia|nvidia580|nvidia470) ]]; then
         die "unknown NVIDIA driver '$NVIDIA_DRIVER'"
+    fi
+    if [[ -n ${FIX_LIST-} && ! $FIX_LIST =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
+        die "invalid fix list '$FIX_LIST'"
     fi
     if [[ -n ${KERNEL_VERSION-} && ! $KERNEL_VERSION =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
         die "invalid kernel version '$KERNEL_VERSION' (like 6.18.60)"
@@ -265,6 +316,7 @@ main() {
 
     case $cmd in
         links) cli_links ;;
+        dualboot-clean) dualboot_clean ;;
         tui)   tui_main ;;
         list)  scan_machine; cli_list ;;
         all|modules|plan)
@@ -272,6 +324,18 @@ main() {
             if [[ $cmd == modules || ( $cmd == plan && -n $list ) ]]; then
                 [[ -n $list ]] || die "modules: which ones? (see ./install.sh list)"
                 select_modules "$list"
+            fi
+            [[ -n ${OTHER_OS_ARG-} ]] && cli_other_os
+            if [[ -n ${FIX_LIST-} ]]; then
+                local f ok
+                for f in "${FIXES[@]}"; do FIX_SEL[$f]=0; done
+                IFS=, read -ra want <<< "$FIX_LIST"
+                for f in "${want[@]}"; do
+                    ok=0; for m in "${FIXES[@]}"; do [[ $m == "$f" ]] && ok=1; done
+                    (( ok )) || die "unknown fix '$f' (${FIXES[*]})"
+                    FIX_SEL[$f]=1
+                done
+                SEL[fixes]=1
             fi
             if [[ -n $skip ]]; then
                 IFS=, read -ra skip <<< "$skip"

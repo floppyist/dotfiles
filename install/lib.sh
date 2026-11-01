@@ -193,6 +193,54 @@ detect() {
     done
     IN_X=0; [[ -n ${DISPLAY-} ]] && IN_X=1
     detect_net
+    detect_boot
+    detect_other_os
+}
+
+EFIVARS=${DOTFILES_EFIVARS:-/sys/firmware/efi/efivars}
+
+# Hardware and boot loader: DMI_VENDOR DMI_PRODUCT, BOOTLOADER (grub, systemd-boot, unknown), EFI (0/1)
+detect_boot() {
+    local f
+    DMI_VENDOR="" DMI_PRODUCT=""
+    read -r DMI_VENDOR < "$SYSROOT/sys/class/dmi/id/sys_vendor" 2>/dev/null
+    read -r DMI_PRODUCT < "$SYSROOT/sys/class/dmi/id/product_name" 2>/dev/null
+    EFI=0; [[ -d $EFIVARS ]] && EFI=1
+    BOOTLOADER=unknown
+    for f in "$EFIVARS"/LoaderInfo-*; do
+        [[ -r $f ]] && grep -aq 'systemd-boot' "$f" && BOOTLOADER=systemd-boot
+    done
+    [[ $BOOTLOADER == unknown && -e $SYSROOT/etc/default/grub ]] && BOOTLOADER=grub
+}
+
+# Other systems on this machine -> OTHER_OS (descriptions), OTHER_WINDOWS (0/1). Without root:
+# the firmware boot entries (UEFI variables Boot0000...: attributes, flags, path length, then the
+# UTF-16 description) and NTFS partitions.
+detect_other_os() {
+    local f a b c desc low n=0 ntfs
+    OTHER_OS=() OTHER_WINDOWS=0
+    for f in "$EFIVARS"/Boot[0-9A-F][0-9A-F][0-9A-F][0-9A-F]-*; do
+        [[ -r $f ]] || continue
+        desc=""
+        while read -r a b; do
+            [[ $a == 00 && $b == 00 ]] && break
+            [[ $b == 00 && $a =~ ^[2-7][0-9a-f]$ ]] || continue
+            printf -v c "\\x$a"
+            desc+=$c
+        done < <(tail -c +11 "$f" 2>/dev/null | od -An -v -tx1 -w2 | head -n 64)
+        [[ -n $desc ]] || continue
+        low=${desc,,}
+        case $low in
+            uefi*|efi*|*pxe*|*network*|*usb*|*cd/dvd*|*cdrom*|*"hard drive"*|*shell*|"linux boot manager"*) continue ;;
+        esac
+        [[ -n ${OS_ID-} && $low == *"${OS_ID,,}"* ]] && continue
+        OTHER_OS+=("$desc")
+        [[ $low == *windows* ]] && OTHER_WINDOWS=1
+    done
+    if (( ! OTHER_WINDOWS )) && command -v lsblk >/dev/null; then
+        ntfs=$(lsblk -rno FSTYPE 2>/dev/null | grep -c '^ntfs')
+        (( ntfs )) && { OTHER_OS+=("$ntfs NTFS partition(s), probably Windows"); OTHER_WINDOWS=1; }
+    fi
 }
 
 # Network services that NetworkManager replaces (NET_OLD) and whether it is enabled (NM_ON)
