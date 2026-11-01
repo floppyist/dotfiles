@@ -90,7 +90,7 @@ right program)."
 M_PKGS[tools]="htop xdg-utils"
 
 M_TITLE[dualboot]="Dual boot"
-M_DESC[dualboot]="Windows or another Linux next to this system: os-prober looks at the other disks \
+M_DESC[dualboot]="Experimental. Windows or another Linux next to this system: os-prober looks at the other disks \
 and GRUB lists what it finds in the boot menu (GRUB switches this off by default). Afterwards the \
 installer checks that every system the firmware knows is in the menu, and tells you what to do when one \
 is missing: Windows Fast Startup, the clock, the boot order. You can also have a second system set up: \
@@ -108,7 +108,7 @@ screen of the installation. Kernel parameters go into GRUB_CMDLINE_LINUX_DEFAULT
 M_STEPS[fixes]="fixes"
 
 M_TITLE[kernel]="Custom kernel"
-M_DESC[kernel]="kernelforge: a Linux kernel for this machine only. Takes the configuration of the \
+M_DESC[kernel]="Experimental. kernelforge: a Linux kernel for this machine only. Takes the configuration of the \
 running kernel, keeps the modules that are loaded now, builds it from the signed source of kernel.org \
 (you choose the version) and installs it next to the running one: modules, initramfs, boot entry. \
 Nothing that is installed gets replaced. It becomes the default entry of the boot menu (the others stay). \

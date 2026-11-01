@@ -291,9 +291,9 @@ The installer installs all of it (see [Installation](#installation)), in modules
 | **Mail** | `neomutt` | sources the theme in your muttrc |
 | **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | links the MPRIS plugin into `~/.config/mpv/scripts` (Void installs it where mpv does not look; without it the music capsule does not see mpv) |
 | **Tools** | `htop xdg-utils` | |
-| **Dual boot** (on when another system is found) | with GRUB: `os-prober ntfs-3g`; for Windows also `dosfstools wimlib` | sets `GRUB_DISABLE_OS_PROBER=false`, makes the boot menu again and checks that Windows or another Linux is in it; notes on Fast Startup, the clock and the boot order, see [Dual boot](#dual-boot) |
+| **Dual boot** (experimental; on when another system is found) | with GRUB: `os-prober ntfs-3g`; for Windows also `dosfstools wimlib` | sets `GRUB_DISABLE_OS_PROBER=false`, makes the boot menu again and checks that Windows or another Linux is in it; notes on Fast Startup, the clock and the boot order, see [Dual boot](#dual-boot) |
 | **Hardware fixes** (on when this machine needs one) | none | kernel parameters for special hardware, chosen in a screen of their own, see [Hardware fixes](#hardware-fixes) |
-| **Custom kernel** (off by default) | `base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut` | builds and installs a kernel for this machine, see [Custom kernel](#custom-kernel) |
+| **Custom kernel** (experimental; off by default) | `base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut` | builds and installs a kernel for this machine, see [Custom kernel](#custom-kernel) |
 | **Start X on login** | | `startx` after logging in on tty1 |
 
 Minimum versions: i3 4.22, polybar 3.6, picom 12 (uses the `rules` syntax), rofi 1.7, dunst 1.9, scrot 1.7,
@@ -393,6 +393,12 @@ Without the menus:
 
 ### Dual boot
 
+> [!WARNING]
+> **Experimental.** The detection and the boot menu part are in daily use; setting up a second system (partitioning,
+> the ISO entries, the Windows setup) has not been run to the end on real hardware yet. It writes a partition table
+> and the GRUB configuration: have a backup, and read the plan screen before you confirm. The installer saves the
+> old partition table first (`~/.local/state/dotfiles/partition-table-*.sfdisk`).
+
 The module **Dual boot** is on by default when the firmware lists another system (Windows Boot Manager, another
 distribution) or there are NTFS partitions. With GRUB it installs `os-prober` and `ntfs-3g`, sets
 `GRUB_DISABLE_OS_PROBER=false` (GRUB switches it off by default; the old file is kept as
@@ -448,6 +454,11 @@ parameters go into `GRUB_CMDLINE_LINUX_DEFAULT` (other boot loaders: you get the
 A new fix is a few lines in `install/modules.sh` (`FIXES`, `FIX_*`, `fix_match_<id>`).
 
 ### Custom kernel
+
+> [!WARNING]
+> **Experimental.** The build and the configuration checks work; installing the kernel (`/boot`, initramfs, boot
+> entry, making it the default) has not been verified on every setup. The running kernel is never touched and stays
+> in the boot menu as the way back; still, keep a rescue stick at hand.
 
 The module **Custom kernel** (not selected by default, never part of `all`) runs `kernelforge/bin/kernelforge`: a
 kernel for this machine only. It takes the configuration of the running kernel (`/proc/config.gz`), keeps the
@@ -528,3 +539,8 @@ run `./install.sh links` again.
   `~/.icons/default/index.theme`; put `Inherits=dotfiles` there to get the same cursor. `dotfiles apply` leaves a
   `~/.icons/dotfiles` alone that it did not create (it says so); rename that directory.
 - **GTK program still light or unchanged:** GTK reads `~/.config/gtk-3.0/` only when a program starts; restart it. Tools like `lxappearance` replace the linked `settings.ini` with their own file, run `./install.sh links` again to restore the link (your file is kept as a backup).
+
+## License
+
+[MIT](LICENSE). Downloaded software keeps its own license: the JetBrainsMono Nerd Font (SIL OFL), the Linux kernel
+and the distributions' ISOs that the installer fetches.
