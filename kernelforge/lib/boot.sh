@@ -13,8 +13,10 @@ put_file() {
 
 # the kernel command line of the running system, without what the boot loader adds
 clean_cmdline() {
-    local w out=()
-    for w in $(< /proc/cmdline); do
+    local w words out=()
+    # read -a: no glob expansion of the words
+    read -ra words < /proc/cmdline
+    for w in "${words[@]}"; do
         case $w in BOOT_IMAGE=*|initrd=*) ;; *) out+=("$w") ;; esac
     done
     clean "${out[*]}"

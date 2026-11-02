@@ -38,6 +38,9 @@ tui_stop() {
     TUI_ON=0
     printf '\e[0m\e[?7h\e[?25h\e[?1049l'
     stty "$TUI_STTY" 2>/dev/null
+    # an ignored signal stays ignored across exec: startx ("Start the desktop") and everything
+    # in that session would inherit it
+    trap - QUIT TSTP WINCH
 }
 
 tui_size() {
@@ -644,7 +647,7 @@ det_module() {
         plan_step "$st" "$m" || (( ${#PLAN[@]} )) || PLAN=("%nothing to do")
         # the step in a column when there is room, else as a heading
         if (( DW >= 56 )); then
-            d_plan "${STEP_TITLE[$st]}" 18
+            d_plan "${STEP_TITLE[$st]}" "$STEP_KW"
         else
             DL+=("${F[subtle]}${STEP_TITLE[$st]}$N")
             d_plan
@@ -980,7 +983,8 @@ screen_fixes() {
 
 # Custom kernel: which version. KV_LIST[0] is "" (the newest of the running series).
 kernel_versions() {
-    local line v k r=$(uname -r)
+    local v k r
+    r=$(uname -r)
     r=${r%%[!0-9.]*}; r=${r%.}
     KV_SERIES=${r%.*}
     KV_LIST=("") KV_KIND=(auto)
@@ -1049,7 +1053,7 @@ plan_compute() {
 }
 
 build_plan() {
-    local st m root=0 home=0 off=() kw=20
+    local st m root=0 home=0 off=() kw=$(( STEP_KW + 2 ))
     d_reset
     d_text "${F[subtle]}" "Nothing has changed yet. This is what happens, in this order:"
     if (( ${#SM[@]} )); then
@@ -1433,8 +1437,9 @@ screen_done() {
         DOC_TITLE_C=${F[err]}
     elif (( ABORT )); then title="Stopped"; DOC_TITLE_C=${F[warn]}
     else title="$G_OK Done"; DOC_TITLE_C=${F[ok]}; fi
-    # X can be started right here, from the console the installer runs on (not over ssh)
-    if [[ $FLOW != links ]] && (( ! IN_X && ! DONE_PROBLEMS && ! ABORT )) && command -v startx >/dev/null &&
+    # X can be started right here, from the console the installer runs on (not over ssh). Not
+    # while a restart is due: a service enabled just now (elogind) has no session for this login.
+    if [[ $FLOW != links ]] && (( ! IN_X && ! DONE_PROBLEMS && ! ABORT && ! REBOOT )) && command -v startx >/dev/null &&
        [[ $(tty 2>/dev/null) == /dev/tty[0-9]* ]]; then
         btns+=("Start the desktop"); acts+=(startx)
     fi
@@ -1511,7 +1516,7 @@ flow_install() {
         rc=$?
         (( rc == 0 )) && break
         (( rc == 2 )) && exit 0
-        [[ $FLOW == complete ]] && { NV_ASKED="" FX_ASKED="" DB_ASKED=""; return 0; }
+        [[ $FLOW == complete ]] && { NV_ASKED="" FX_ASKED="" DB_ASKED="" KV_ASKED=""; return 0; }
     done
     run_install
 }

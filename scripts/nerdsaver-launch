@@ -3,6 +3,7 @@ import ctypes
 import ctypes.util
 import fcntl
 import glob
+import importlib.util
 import json
 import os
 import shlex
@@ -306,9 +307,10 @@ def audio_playing():
 
 
 def have_numpy():
+    # nerdsaver runs with the same python3; find_spec looks without importing it
     try:
-        return subprocess.run(["python3", "-c", "import numpy"], capture_output=True, timeout=10).returncode == 0
-    except (OSError, subprocess.SubprocessError):
+        return importlib.util.find_spec("numpy") is not None
+    except (ImportError, ValueError):
         return False
 
 

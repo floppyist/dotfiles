@@ -95,8 +95,8 @@ and GRUB lists what it finds in the boot menu (GRUB switches this off by default
 installer checks that every system the firmware knows is in the menu, and tells you what to do when one \
 is missing: Windows Fast Startup, the clock, the boot order. You can also have a second system set up: \
 choose Arch, Debian, Ubuntu, Fedora, Alpine or Windows in the next screen. The installer makes a \
-partition from unallocated space (nothing is shrunk or deleted), downloads the ISO (checked against \
-the published SHA-256; Windows: your ISO) and adds a boot entry; the rest of the space stays free for \
+partition from unallocated space (nothing is shrunk or deleted), downloads the ISO (signed by the \
+distribution, checked against its pinned key; Windows: your ISO) and adds a boot entry; the rest of the space stays free for \
 that system's own installer. Only for GRUB; systemd-boot lists \
 Windows by itself when it is on the same EFI partition."
 M_STEPS[dualboot]="dualboot othersys"
@@ -158,6 +158,7 @@ mod_pkgs() {
     if [[ $1 == dualboot ]]; then
         [[ $BOOTLOADER == grub ]] && MP=(os-prober ntfs-3g)
         [[ $DUAL_TARGET == windows ]] && MP+=(dosfstools wimlib)
+        [[ -n $DUAL_TARGET && $DUAL_TARGET != windows ]] && MP+=(gnupg)
         return
     fi
     if [[ $1 == graphics ]]; then

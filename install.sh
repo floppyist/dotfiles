@@ -251,6 +251,8 @@ cli_other_os() {
     elif [[ -n ${DISK_ARG-} ]]; then
         [[ $DISK_ARG =~ ^/dev/[A-Za-z0-9/_-]+$ && -b $DISK_ARG && $(lsblk -dno TYPE "$DISK_ARG" 2>/dev/null) == disk ]] ||
             die "--disk: a whole disk like /dev/sda (not a partition)"
+        # like the menu, which never offers one: the firmware and GRUB often cannot boot from it
+        [[ $(disk_tran "$DISK_ARG") == usb ]] && die "--disk: $DISK_ARG is a USB disk; choose an internal one"
         DUAL_DISK=$DISK_ARG
     else
         detect_disks; disks_with_room "$OS_TOTAL"
@@ -310,6 +312,9 @@ main() {
     fi
     if [[ -n ${KERNEL_VERSION-} && ! $KERNEL_VERSION =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
         die "invalid kernel version '$KERNEL_VERSION' (like 6.18.60)"
+    fi
+    if [[ -z ${OTHER_OS_ARG-} && -n ${DISK_ARG-}${WINISO_ARG-} ]]; then
+        die "--disk and --windows-iso belong to --other-os"
     fi
     (( EUID == 0 )) && die "run it as your user, not as root: it sets up your home directory and uses sudo itself"
     if [[ -z $cmd ]]; then

@@ -16,6 +16,10 @@ declare -A STEP_TITLE=(
     [network]="NetworkManager" [kernel]="Custom kernel"
     [dualboot]="Dual boot"    [othersys]="Second system"  [fixes]="Hardware fixes"
 )
+# width of the title column in plans: the longest title and two spaces
+STEP_KW=0
+for _t in "${STEP_TITLE[@]}"; do (( ${#_t} + 2 > STEP_KW )) && STEP_KW=$(( ${#_t} + 2 )); done
+unset _t
 # share of the whole installation, for the progress bar
 declare -A STEP_WEIGHT=(
     [update]=12 [packages]=40 [font]=4 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1
@@ -673,16 +677,29 @@ run_network() {
 
 GRUB_DEFAULTS=$SYSROOT/etc/default/grub
 
-# The value of KEY $1 in /etc/default/grub, without quotes -> _GV
+# Line $1 if it sets KEY $2 -> _GPRE ("KEY="), _GQ (its quote or empty), _GV (the value),
+# _GTAIL (what follows the value: spaces, a comment)
+grub_parse() {
+    local rest
+    [[ $1 =~ ^([[:space:]]*$2=)(.*)$ ]] || return 1
+    _GPRE=${BASH_REMATCH[1]} rest=${BASH_REMATCH[2]} _GQ="" _GTAIL=""
+    case $rest in
+        \"*|\'*)
+            _GQ=${rest:0:1} rest=${rest:1}
+            if [[ $rest == *"$_GQ"* ]]; then _GV=${rest%%"$_GQ"*} _GTAIL=${rest#*"$_GQ"}
+            else _GV=$rest; fi ;;
+        *)  _GV=${rest%%[[:space:]#]*} _GTAIL=${rest:${#_GV}} ;;
+    esac
+}
+
+# The value of KEY $1 in /etc/default/grub (the last line that sets it), without quotes -> _GV
 grub_value() {
     local l v=""
     _GV=""
     [[ -r $GRUB_DEFAULTS ]] || return 1
     while IFS= read -r l || [[ -n $l ]]; do
-        [[ $l =~ ^[[:space:]]*$1=(.*)$ ]] && v=${BASH_REMATCH[1]}
+        grub_parse "$l" "$1" && v=$_GV
     done < "$GRUB_DEFAULTS"
-    v=${v%"${v##*[![:space:]]}"}
-    v=${v#[\"\']}; v=${v%[\"\']}
     _GV=$v
 }
 
@@ -713,16 +730,15 @@ grub_set() {
 
 # Adds the word $2 to the quoted value of KEY $1 (GRUB_CMDLINE_LINUX_DEFAULT)
 grub_add_word() {
-    local key=$1 word=$2 l tmp done=0 pre q rest
+    local key=$1 word=$2 l tmp done=0 q rest
     [[ -r $GRUB_DEFAULTS ]] || { warn "$GRUB_DEFAULTS is missing"; return 1; }
     tmp=$(mktemp) || return 1
     while IFS= read -r l || [[ -n $l ]]; do
-        if [[ $l =~ ^([[:space:]]*$key=)([\"\']?)(.*)$ ]]; then
-            pre=${BASH_REMATCH[1]} q=${BASH_REMATCH[2]} rest=${BASH_REMATCH[3]}
-            rest=${rest%"${rest##*[![:space:]]}"}
-            if [[ -n $q ]]; then rest=${rest%"$q"}; else q='"'; fi
-            rest=${rest%"${rest##*[![:space:]]}"}
-            l="$pre$q${rest:+$rest }$word$q"
+        if grub_parse "$l" "$key"; then
+            # the word goes inside the quotes; a comment after them stays where it is
+            q=${_GQ:-\"}
+            rest=${_GV%"${_GV##*[![:space:]]}"}
+            l="$_GPRE$q${rest:+$rest }$word$q$_GTAIL"
             done=1
         fi
         printf '%s\n' "$l"
@@ -907,7 +923,7 @@ plan_kernel() {
 # kernelforge runs as the user and uses sudo (the installer keeps it alive) for /boot and /lib/modules
 run_kernel() {
     local args=(--yes --set-default)
-    [[ -x $KERNELFORGE ]] || { say "$KERNELFORGE is missing"; return 1; }
+    [[ -x $KERNELFORGE ]] || { warn "$KERNELFORGE is missing"; return 1; }
     [[ -n ${KERNEL_VERSION-} ]] && args+=(--version "$KERNEL_VERSION")
     KF_PROTOCOL=1 KF_NONINTERACTIVE=1 "$KERNELFORGE" "${args[@]}"
 }

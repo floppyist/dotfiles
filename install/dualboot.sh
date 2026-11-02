@@ -2,8 +2,8 @@
 # install/dualboot.sh  ·  a second system next to this one. The installer
 #   1. makes a partition from UNALLOCATED space (nothing existing is shrunk or deleted; the table
 #      is saved first),
-#   2. puts the installer of the other system on it (ISO downloaded and checked against the
-#      published SHA-256; Windows: your ISO, copied onto a FAT32 partition),
+#   2. puts the installer of the other system on it (ISO downloaded, the distribution's signature
+#      checked against its pinned key; Windows: your ISO, copied onto a FAT32 partition),
 #   3. adds a GRUB entry that boots it. The rest of the free space stays free: the installer of the
 #      new system offers it.
 # The system itself is then installed by its own installer (reboot, choose the entry).
@@ -53,11 +53,12 @@ WIN_ISO=""           # path of the Windows ISO
 # ── Disks ─────────────────────────────────────────────────────────────────────────
 
 # Internal disks and the space no partition uses (an estimate without root: size minus the
-# partitions) -> DISKS, DISK_FREE (bytes), DISK_DESC, DISK_TRAN. USB disks are left out: the
-# firmware and GRUB often cannot boot from them, and an installer stick must never be chosen.
+# partitions) -> DISKS, DISK_FREE (bytes), DISK_DESC. USB disks are left out: the firmware and
+# GRUB often cannot boot from them, and an installer stick must never be chosen. So are devices
+# without a GPT or MBR partition table (zram swap, empty disks): make_partition needs one.
 detect_disks() {
-    local line name size type rm ro model tran psum t s
-    DISKS=() DISK_FREE=() DISK_DESC=() DISK_TRAN=()
+    local line name size type rm ro model tran pt psum t s
+    DISKS=() DISK_FREE=() DISK_DESC=()
     command -v lsblk >/dev/null || return 0
     while IFS= read -r line; do
         [[ $line =~ NAME=\"([^\"]*)\" ]] && name=${BASH_REMATCH[1]} || continue
@@ -67,8 +68,10 @@ detect_disks() {
         [[ $line =~ RO=\"([01])\" ]] && ro=${BASH_REMATCH[1]} || ro=0
         model=""; [[ $line =~ MODEL=\"([^\"]*)\" ]] && model=${BASH_REMATCH[1]}
         tran=""; [[ $line =~ TRAN=\"([^\"]*)\" ]] && tran=${BASH_REMATCH[1]//[^a-z0-9]/}
+        pt=""; [[ $line =~ PTTYPE=\"([^\"]*)\" ]] && pt=${BASH_REMATCH[1]}
         [[ $type == disk && $rm == 0 && $ro == 0 && $name == /dev/* && $size -gt 0 ]] || continue
         [[ $tran == usb ]] && continue
+        [[ $pt == gpt || $pt == dos ]] || continue
         psum=0
         while read -r s t; do
             [[ $t == part && $s =~ ^[0-9]+$ ]] && (( psum += s ))
@@ -76,10 +79,10 @@ detect_disks() {
         # 2 MiB at the start, the GPT copy at the end
         s=$(( size - psum - 3 * 1048576 ))
         (( s < 0 )) && s=0
-        DISKS+=("$name") DISK_FREE+=("$s") DISK_TRAN+=("$tran")
+        DISKS+=("$name") DISK_FREE+=("$s")
         human_size "$size"
         DISK_DESC+=("${model//[[:cntrl:]]/ } ($_HS${tran:+, $tran})")
-    done < <(lsblk -bdnPp -o NAME,SIZE,TYPE,RM,RO,MODEL,TRAN 2>/dev/null)
+    done < <(lsblk -bdnPp -o NAME,SIZE,TYPE,RM,RO,MODEL,TRAN,PTTYPE 2>/dev/null)
 }
 
 # Disks with at least $1 GiB free -> DISK_OK (indices into DISKS)
@@ -268,21 +271,105 @@ format_part() {
     state_write
 }
 
+# ── Signatures ────────────────────────────────────────────────────────────────────
+# Every distribution signs its checksum list (Arch, Alpine: the ISO itself). Only a signature by
+# one of these primary keys counts, wherever the key was fetched from. Fingerprints from
+# archlinux.org/download, debian.org/CD/verify, ubuntu.com/tutorials/how-to-verify-ubuntu and
+# alpinelinux.org/keys/ncopa.asc. Fedora signs every release with a new key: its keys come from
+# fedoraproject.org (not the download server), and the signer must be the key of exactly that
+# release ("Fedora (44)").
+declare -A OS_SIGNERS=(
+    [arch]=3E80CA1A8B89F69CBA57D98A76A5EF9054449A5C
+    [debian]="DF9B9C49EAA9298432589D76DA87E80D6294BE9B 10460DAD76165AD81FBC0CE9988021A964E6EA7D"
+    [ubuntu]=843938DF228D22F7B3742BC0D94AA3F0EFE21092
+    [alpine]=0482D84022F52DF1C4E7CD43293ACD0907D9495A
+)
+# where the keys come from (wkd: = the web key directory of that address); what is still
+# missing then comes from the key server
+declare -A OS_KEYSRC=(
+    [arch]=wkd:pierre@archlinux.org
+    [debian]="https://www.debian.org/CD/key-DA87E80D6294BE9B.txt https://www.debian.org/CD/key-988021A964E6EA7D.txt"
+    [alpine]=https://alpinelinux.org/keys/ncopa.asc
+    [fedora]=https://fedoraproject.org/fedora.gpg
+)
+KEYSERVER=hkps://keyserver.ubuntu.com
+GPGH=""
+
+# A keyring of its own for this run -> GPGH (mktemp -d: 0700); gpg_stop removes it again
+gpg_start() { GPGH=$(mktemp -d) || { GPGH=""; return 1; }; }
+gpg_stop() {
+    [[ -n $GPGH ]] || return 0
+    gpgconf --homedir "$GPGH" --kill all 2>/dev/null
+    rm -rf -- "$GPGH"
+    GPGH=""
+}
+pgp() { gpg --homedir "$GPGH" --batch --no-tty --quiet "$@"; }
+
+# The signing keys of system $1 into that keyring
+os_keys() {
+    local src f
+    detail "fetching the signing key of ${OS_TITLE[$1]}"
+    for src in ${OS_KEYSRC[$1]-}; do
+        case $src in
+            wkd:*) pgp --auto-key-locate clear,wkd --locate-keys "${src#wkd:}" >/dev/null 2>&1 ;;
+            *)     "${CURL_SAFE[@]}" "$src" 2>/dev/null | pgp --import >/dev/null 2>&1 ;;
+        esac
+    done
+    for f in ${OS_SIGNERS[$1]-}; do
+        pgp --list-keys "$f" >/dev/null 2>&1 || pgp --keyserver "$KEYSERVER" --recv-keys "$f" >/dev/null 2>&1
+    done
+}
+
+# The signature of file $1 by system $2: detached in file $3, or (no $3) $1 is clearsigned and
+# its signed text goes to $4. $5: the Fedora release. True if it is good and made by a key of
+# that system.
+sig_check() {
+    local file=$1 id=$2 sig=${3-} out=${4-} rel=${5-} st fpr f
+    if [[ -n $sig ]]; then
+        st=$(pgp --status-fd 1 --verify "$sig" "$file" 2>/dev/null)
+    else
+        # exactly one signed message: nothing next to it that could pass for signed text
+        [[ $(grep -c '^-----BEGIN PGP SIGNED MESSAGE-----' "$file") == 1 ]] || return 1
+        st=$(pgp --status-fd 1 --yes --output "$out" --decrypt "$file" 2>/dev/null)
+    fi
+    grep -q '^\[GNUPG:\] BADSIG ' <<< "$st" && return 1
+    grep -q '^\[GNUPG:\] GOODSIG ' <<< "$st" || return 1
+    # VALIDSIG <fingerprint> <8 fields> <fingerprint of the primary key>
+    while read -r fpr; do
+        [[ $fpr =~ ^[0-9A-F]{40}$ ]] || continue
+        for f in ${OS_SIGNERS[$id]-}; do [[ $fpr == "$f" ]] && return 0; done
+        if [[ $id == fedora && $rel =~ ^[0-9]+$ ]] && pgp --with-colons --list-keys "$fpr" 2>/dev/null |
+                awk -F: -v u="Fedora ($rel) <fedora-$rel-primary@fedoraproject.org>" \
+                    '$1 == "uid" && $2 != "r" && $10 == u {ok = 1} END {exit !ok}'; then
+            return 0
+        fi
+    done < <(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" {print $NF}' <<< "$st")
+    return 1
+}
+
+# Downloads URL $1 to the keyring directory as $2, for checking
+sig_fetch() { "${CURL_SAFE[@]}" -o "$GPGH/$2" "$1"; }
+
 # ── ISO sources ───────────────────────────────────────────────────────────────────
 
-# os_resolve ID -> ISO_URL ISO_SHA. The checksums come from the same https server as the file.
+# os_resolve ID -> ISO_URL ISO_SHA, ISO_SIG_URL (Arch, Alpine: the signature of the ISO itself,
+# checked after the download); ISO_ERR says what went wrong. Needs gpg_start. The checksum
+# lists of Debian, Ubuntu and Fedora are signed: they count only with a good signature.
 os_resolve() {
     local base sums line n h
-    ISO_URL="" ISO_SHA=""
+    ISO_URL="" ISO_SHA="" ISO_SIG_URL="" ISO_ERR=""
+    os_keys "$1"
     case $1 in
         arch)
             base=https://geo.mirror.pkgbuild.com/iso/latest
             sums=$("${CURL_SAFE[@]}" "$base/sha256sums.txt") || return 1
             ISO_SHA=$(awk '$2 == "archlinux-x86_64.iso" {print $1; exit}' <<< "$sums")
-            ISO_URL=$base/archlinux-x86_64.iso ;;
+            ISO_URL=$base/archlinux-x86_64.iso ISO_SIG_URL=$base/archlinux-x86_64.iso.sig ;;
         debian)
             base=https://cdimage.debian.org/debian-cd/current/amd64/iso-cd
-            sums=$("${CURL_SAFE[@]}" "$base/SHA256SUMS") || return 1
+            sig_fetch "$base/SHA256SUMS" sums && sig_fetch "$base/SHA256SUMS.sign" sums.sig || return 1
+            sig_check "$GPGH/sums" debian "$GPGH/sums.sig" || { ISO_ERR="the checksum list is not signed by the Debian CD key"; return 1; }
+            sums=$(< "$GPGH/sums")
             line=$(grep -E '^[0-9a-f]{64}  debian-[0-9][0-9.]*-amd64-netinst\.iso$' <<< "$sums" | head -1)
             ISO_SHA=${line%% *}; n=${line##* }
             ISO_URL=$base/$n ;;
@@ -292,7 +379,9 @@ os_resolve() {
                 awk '/^Dist: / {d = $2} /^Supported: 1/ {s = d} END {print s}')
             [[ $n =~ ^[a-z]+$ ]] || return 1
             base=https://releases.ubuntu.com/$n
-            sums=$("${CURL_SAFE[@]}" "$base/SHA256SUMS") || return 1
+            sig_fetch "$base/SHA256SUMS" sums && sig_fetch "$base/SHA256SUMS.gpg" sums.sig || return 1
+            sig_check "$GPGH/sums" ubuntu "$GPGH/sums.sig" || { ISO_ERR="the checksum list is not signed by the Ubuntu CD image key"; return 1; }
+            sums=$(< "$GPGH/sums")
             line=$(grep -E '^[0-9a-f]{64} \*ubuntu-[0-9][0-9.]*-desktop-amd64\.iso$' <<< "$sums" | sort -t'*' -k2 -V | tail -1)
             ISO_SHA=${line%% *}; n=${line##*\*}
             ISO_URL=$base/$n ;;
@@ -303,7 +392,10 @@ os_resolve() {
             base=$base/$n/Workstation/x86_64/iso
             h=$("${CURL_SAFE[@]}" "$base/" | grep -o 'Fedora-Workstation-Live-[0-9][0-9.-]*\.x86_64\.iso' | head -1)
             [[ -n $h ]] || return 1
-            sums=$("${CURL_SAFE[@]}" "$base/$(sed 's/Workstation-Live-\([0-9][0-9]*\)-\([0-9.]*\)\.x86_64\.iso/Workstation-\1-\2-x86_64-CHECKSUM/' <<< "$h")") || return 1
+            sig_fetch "$base/$(sed 's/Workstation-Live-\([0-9][0-9]*\)-\([0-9.]*\)\.x86_64\.iso/Workstation-\1-\2-x86_64-CHECKSUM/' <<< "$h")" sums || return 1
+            # clearsigned: only the text the signature covers counts
+            sig_check "$GPGH/sums" fedora "" "$GPGH/sums.txt" "$n" || { ISO_ERR="the checksum list is not signed by the key of Fedora $n"; return 1; }
+            sums=$(< "$GPGH/sums.txt")
             ISO_SHA=$(sed -n "s/^SHA256 ($h) = \([0-9a-f]\{64\}\)\$/\1/p" <<< "$sums")
             ISO_URL=$base/$h ;;
         alpine)
@@ -311,7 +403,7 @@ os_resolve() {
             sums=$("${CURL_SAFE[@]}" "$base/latest-releases.yaml") || return 1
             line=$(awk '/flavor: alpine-standard$/ {f=1} f && /^  file:/ {n=$2} f && /^  sha256:/ {print $2, n; exit}' <<< "$sums")
             ISO_SHA=${line%% *}; n=${line##* }
-            ISO_URL=$base/$n ;;
+            ISO_URL=$base/$n ISO_SIG_URL=$base/$n.asc ;;
         *) return 1 ;;
     esac
     [[ $ISO_SHA =~ ^[0-9a-f]{64}$ && $ISO_URL =~ ^https://[A-Za-z0-9./_-]+\.iso$ ]]
@@ -379,7 +471,7 @@ plan_othersys() {
     if (( ${OS_WIN[$id]:-0} )); then
         PLAN+=("Windows: ${WIN_ISO:+${WIN_ISO##*/}, }copied onto a FAT32 partition, install.wim split for it")
     else
-        PLAN+=("${OS_TITLE[$id]}: download about $(( OS_MB[$id] / 1000 )).$(( OS_MB[$id] / 100 % 10 )) GB, checked against the published SHA-256")
+        PLAN+=("${OS_TITLE[$id]}: download about $(( OS_MB[$id] / 1000 )).$(( OS_MB[$id] / 100 % 10 )) GB, the signature of ${OS_TITLE[$id]%% *} checked ($([[ $id == fedora ]] && echo "key of that release from fedoraproject.org" || echo "pinned key"))")
     fi
     PLAN+=("a GRUB entry \"Install ${OS_TITLE[$id]}\" boots its installer from that partition")
     PLAN+=("the rest of the free space ($OS_TOTAL GB needed in total) stays free for the installer of ${OS_TITLE[$id]}")
@@ -404,8 +496,11 @@ run_othersys() {
         bytes=$(stat -c %s "$WIN_ISO") || return 1
     else
         fs=ext4 ptype=linux
+        command -v gpg >/dev/null || { warn "gpg is missing (package gnupg): the signature cannot be checked"; return 1; }
+        gpg_start || return 1
+        trap gpg_stop EXIT
         detail "asking the server"
-        os_resolve "$id" || { warn "${OS_TITLE[$id]}: could not read the download and checksum from the server"; return 1; }
+        os_resolve "$id" || { warn "${OS_TITLE[$id]}: ${ISO_ERR:-could not read the download and checksum from the server}"; return 1; }
         url_size "$ISO_URL"
         say "${OS_TITLE[$id]}: $ISO_URL"
         bytes=$ISO_BYTES
@@ -436,7 +531,6 @@ run_othersys() {
     else
         [[ -n $ST_PARTUUID ]] && say "the installer partition of an earlier run is gone: making a new one"
         [[ -b $DUAL_DISK ]] || { warn "disk not found: ${DUAL_DISK:-none chosen}"; return 1; }
-        [[ $(disk_tran "$DUAL_DISK") == usb ]] && warn "$DUAL_DISK is a USB disk: the firmware may not boot the installer from it."
         make_partition "$DUAL_DISK" "$bytes" "$ptype" || return 1
         format_part "$fs" || return 1
         # the new system needs room besides it
@@ -448,7 +542,7 @@ run_othersys() {
 
     mnt=$(mktemp -d) || return 1
     # shellcheck disable=SC2064
-    trap "as_root umount '$mnt' 2>/dev/null; rmdir '$mnt' 2>/dev/null" EXIT
+    trap "as_root umount '$mnt' 2>/dev/null; rmdir '$mnt' 2>/dev/null; gpg_stop" EXIT
     as_root mount "$PART" "$mnt" || { warn "cannot mount $PART"; return 1; }
 
     if (( ${OS_WIN[$id]:-0} )); then
@@ -468,6 +562,11 @@ EOF
         # the download runs as you, not as root: the partition's top directory is yours
         as_root chown "$USER_NAME:" "$mnt" || return 1
         iso=$mnt/$id.iso
+        # the file name is the same for every release: a partial download of an older one must
+        # not be resumed with the new one (its checksum, from the earlier run, is next to it)
+        if [[ -f $iso && -s $iso.sha256 && $(< "$iso.sha256") != "$ISO_SHA" ]]; then
+            rm -f "$iso"; say "$id.iso is of an older release: downloading the current one"
+        fi
         if [[ -f $iso ]]; then
             have=$(stat -c %s "$iso" 2>/dev/null || echo 0)
             # complete (or of unknown size): its checksum decides; a stale or broken one goes
@@ -477,15 +576,28 @@ EOF
             fi
         fi
         if (( ! ready )); then
+            printf '%s\n' "$ISO_SHA" > "$iso.sha256" || return 1
             download_to "$ISO_URL" "$iso" "$ISO_BYTES" || { warn "download failed (run the installer again to resume)"; return 1; }
             sha_ok "$iso" || { rm -f "$iso"; warn "the SHA-256 of $id.iso is wrong: deleted, run the installer again"; return 1; }
             say "$id.iso downloaded, checksum right"
         fi
+        # Arch, Alpine: their checksum list is not signed, the ISO is
+        if [[ -n $ISO_SIG_URL ]]; then
+            detail "checking the signature of $id.iso"
+            sig_fetch "$ISO_SIG_URL" iso.sig || { warn "cannot download the signature of $id.iso"; return 1; }
+            if ! sig_check "$iso" "$id" "$GPGH/iso.sig"; then
+                rm -f "$iso"
+                warn "$id.iso is not signed by the key of ${OS_TITLE[$id]}: deleted"
+                return 1
+            fi
+        fi
+        say "$id.iso: signature of ${OS_TITLE[$id]} good"
         linux_entry "$id" "$iso" "$mnt" || return 1
     fi
     as_root sync
     as_root umount "$mnt" && rmdir "$mnt"
     trap - EXIT
+    gpg_stop
 
     grub_entry_install || return 1
     say "GRUB entry: $GRUB_ISO_ENTRY"
@@ -606,10 +718,12 @@ prepare_windows() {
 # (a system installed into the free space since then has its own file system: never offered)
 # -> LEFTOVERS
 find_leftovers() {
-    local dump disk f out start fstype label
+    local dump disk f out fstype label
     local -A seen=() old=()
     LEFTOVERS=()
-    for dump in $(ls -tr "$STATE_DIR"/partition-table-*.sfdisk 2>/dev/null); do
+    # sorted by name: per disk, the oldest table (its time stamp) comes first
+    for dump in "$STATE_DIR"/partition-table-*.sfdisk; do
+        [[ -f $dump ]] || continue
         disk=$(sed -n 's/^device: \(\/dev\/[A-Za-z0-9\/_-]*\)$/\1/p' "$dump" | head -1)
         [[ -n $disk && -z ${seen[$disk]-} && -b $disk ]] || continue
         seen[$disk]=1

@@ -71,7 +71,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 | **GTK apps** | Adwaita dark with the palette on top (file dialogs, tray menus, polkit prompts) |
 | **Mouse cursor** | its own theme, drawn in the palette by `dotfiles apply` (`scripts/dotfiles-cursors`): sharp shapes, the busy indicator in the accent; `light`, `dark` or `accent` |
 | **Mail** | `neomutt` (theme in `config/mutt/theme.muttrc`; accounts stay in `~/.muttrc`) |
-| **Music** | `mpvim`, a vim-style terminal UI for `mpv` with the album cover (embedded or `cover.jpg`; sharper with `chafa`, `:cover` toggles it) |
+| **Music** | `mpvim`, a vim-style terminal UI for `mpv` with the album cover (embedded or `cover.jpg`; sharper with `chafa`, `:cover` toggles it); `:dancer` shows a pixel-art sprite dancing to the track instead (`MPVIM_DANCER` picks another Aseprite sheet) |
 | **Scripts** | Bluetooth, WiFi, VPN, display (Windows-style and `displays`), power menu, volume/brightness OSD, screenshots (region or window on a frozen screen), screensaver, mail notifications |
 
 ## Keybindings
@@ -291,7 +291,7 @@ The installer installs all of it (see [Installation](#installation)), in modules
 | **Mail** | `neomutt` | sources the theme in your muttrc |
 | **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | links the MPRIS plugin into `~/.config/mpv/scripts` (Void installs it where mpv does not look; without it the music capsule does not see mpv) |
 | **Tools** | `htop xdg-utils` | |
-| **Dual boot** (experimental; on when another system is found) | with GRUB: `os-prober ntfs-3g`; for Windows also `dosfstools wimlib` | sets `GRUB_DISABLE_OS_PROBER=false`, makes the boot menu again and checks that Windows or another Linux is in it; notes on Fast Startup, the clock and the boot order, see [Dual boot](#dual-boot) |
+| **Dual boot** (experimental; on when another system is found) | with GRUB: `os-prober ntfs-3g`; for a second Linux also `gnupg`, for Windows `dosfstools wimlib` | sets `GRUB_DISABLE_OS_PROBER=false`, makes the boot menu again and checks that Windows or another Linux is in it; notes on Fast Startup, the clock and the boot order, see [Dual boot](#dual-boot) |
 | **Hardware fixes** (on when this machine needs one) | none | kernel parameters for special hardware, chosen in a screen of their own, see [Hardware fixes](#hardware-fixes) |
 | **Custom kernel** (experimental; off by default) | `base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut` | builds and installs a kernel for this machine, see [Custom kernel](#custom-kernel) |
 | **Start X on login** | | `startx` after logging in on tty1 |
@@ -423,8 +423,11 @@ Fedora, Alpine, Windows) and does the rest:
    space stays in one piece for the new system. The partition is recorded by its PARTUUID and file system UUID in
    `~/.local/state/dotfiles/dualboot.state`; a partition is never taken by its label.
 3. Downloads the current ISO (as you, not as root) from the distribution's own https server (Ubuntu: the newest
-   supported LTS), checks it against the published SHA-256 (resumes after an interruption) and keeps it on that
-   partition; Alpine is unpacked there like a boot stick. **Windows**: Microsoft has no stable download
+   supported LTS), checks the distribution's signature (resumes after an interruption) and keeps it on that
+   partition. Only a signature by the distribution's own key counts: Debian, Ubuntu and Fedora sign their checksum
+   list, Arch and Alpine the ISO; the key fingerprints are pinned in `install/dualboot.sh`. Fedora signs every
+   release with a new key, so its keys come from `fedoraproject.org` (not the download server) and the signer must be
+   the key of exactly that release; Alpine is unpacked there like a boot stick. **Windows**: Microsoft has no stable download
    link, so you save the ISO in `~/Downloads` and the installer finds it; it copies the files to a FAT32 partition and
    splits `install.wim` for it (UEFI only).
 4. Adds a GRUB entry (`/etc/grub.d/45_dotfiles_iso`, finds the partition by its file system UUID) that boots the
@@ -516,7 +519,7 @@ run `./install.sh links` again.
 - The git prompt runs `git status` with `core.fsmonitor=false`, and not at all in a repository whose own config defines filter drivers or includes other files (the capsule then shows the branch and a `!`): both would let the repository start a program of its choice when you `cd` into it, e.g. an unpacked archive. Control characters in directory names are replaced in the prompt (no escape sequences from a crafted directory name).
 - Runtime files (mpv IPC socket, screensaver log/lock, Polybar module outputs, the region screenshot) live in private directories under `$XDG_RUNTIME_DIR` (or `~/.cache`), never under predictable names in `/tmp`.
 - Firefox hides the tab icons and the site identity box, which also show that a page uses the camera, microphone or screen: such a tab gets a red title instead (and a red line in the background). Pages without a secure connection show their address in red.
-- The installer runs as your user and asks for sudo once; it drops the permission again when it ends (`sudo -k`). The font download is checked against a fixed SHA-256. A step that is running when you press <kbd>Ctrl</kbd> <kbd>c</kbd> or close the terminal finishes first, so an xbps transaction is never cut off halfway.
+- The installer runs as your user and asks for sudo once; it drops the permission again when it ends (`sudo -k`). The font download is checked against a fixed SHA-256, the kernel source and the ISOs of a second system against the pinned keys of their signers. A step that is running when you press <kbd>Ctrl</kbd> <kbd>c</kbd> or close the terminal finishes first, so an xbps transaction is never cut off halfway.
 - `dotfiles.conf` values end up in configs that can run commands (i3, Polybar, tmux, shell), so `dotfiles apply` only accepts strict patterns (colors `#rrggbb`, numbers in a range, fonts and paths without quotes or shell characters).
 - A command typed with a leading space is not saved in the bash history.
 

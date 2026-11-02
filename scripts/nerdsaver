@@ -1795,7 +1795,7 @@ class Sorter:
 
     def __init__(s, scr):
         s.scr = scr
-        h, w = scr.getmaxyx()
+        w = scr.getmaxyx()[1]
         # bar slots tile the full width: edges[i]..edges[i+1] (widths differ by at most one column)
         bw = max(2, -(-w // 96))
         s.n = max(8, w // bw)
@@ -2035,7 +2035,7 @@ class Sorter:
     def draw(s):
         scr = s.scr
         scr.erase()
-        h, w = scr.getmaxyx()
+        h = scr.getmaxyx()[0]
         n, ed = s.n, s.edges
         wd = [max(1, ed[i + 1] - ed[i] - (i < n - 1)) for i in range(n)]
         if s.view == "bars":
@@ -3084,9 +3084,9 @@ class Lcars:
         s.next_layout = time.monotonic() + 45
 
     def segs(s, width, texts, ci):
+        # texts[k] labels segment k (None: a random number or nothing); the first one is the title
         out = []
         x = 0
-        texts = [t for t in texts]
         first = texts[0]
         out.append((x, len(first) + 4, ci, first))
         x += len(first) + 5
@@ -3094,8 +3094,14 @@ class Lcars:
             ln = min(random.choice((4, 8, 12, 20, 34)), width - x)
             if ln < 3:
                 break
-            c = s.ci((ci,))
-            out.append((x, ln, c, random.choice(("", "", "%04d" % random.randint(0, 9999), "%02d.%d" % (random.randint(10, 99), random.randint(0, 9))))))
+            k = len(out)
+            text = texts[k] if k < len(texts) else None
+            if text and len(text) + 3 <= width - x:
+                ln = max(ln, len(text) + 3)
+            else:
+                text = random.choice(("", "", "%04d" % random.randint(0, 9999),
+                                      "%02d.%d" % (random.randint(10, 99), random.randint(0, 9))))
+            out.append((x, ln, s.ci((ci,)), text))
             x += ln + 1
         return out
 
@@ -3722,7 +3728,7 @@ class Borg:
     def draw_hud(s, dt, w, h):
         scr = s.scr
         # frame corners
-        for (y, x, g) in ((0, 0, "┏"), (0, w - 1, "┓"), (h - 1, 0, "┗"), (h - 2, w - 2, "┛")):
+        for (y, x, g) in ((0, 0, "┏"), (0, w - 1, "┓"), (h - 1, 0, "┗"), (h - 1, w - 1, "┛")):
             put(scr, y, x, g, s.hud)
         s.pct += dt * 0.35
         if s.pct >= 100:
@@ -6668,8 +6674,7 @@ class Music:
 
     def kaleido(s, dt):
         # mirrored neon filigree, radially modulated by the spectrum
-        H, W = s.H, s.W
-        seg = math.pi / (4 + int(s.bass * 0 + 3))
+        seg = math.pi / 7
         a = np.abs(((s.ang + s.t * 0.08) % (2 * seg)) - seg)
         u, v = s.rho * np.cos(a), s.rho * np.sin(a)
         f = np.sin(u * 8 + s.t * 0.7 + 2.2 * np.sin(v * 6 - s.t * 0.5 + s.bass * 6)) \

@@ -103,7 +103,7 @@ main() {
 
     if ! check_build_tools; then
         warn "missing: ${MISSING[*]}"
-        (( DRY_RUN )) || die "install them first (Void: base-devel flex bison bc openssl-devel elfutils-devel pahole perl cpio gnupg xz curl)"
+        (( DRY_RUN )) || die "install them first (Void: base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut)"
     fi
     if (( DRY_RUN )); then
         say ""; say "Dry run: nothing was downloaded, built or installed."

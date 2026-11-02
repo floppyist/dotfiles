@@ -114,12 +114,6 @@ on_exit() {
 # https only, TLS 1.2+, with retries
 curl_get() { curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 20 "$@"; }
 
-human() {      # bytes -> "1.4 GB"
-    local b=$1
-    if (( b >= 1073741824 )); then printf '%d.%d GB' $(( b / 1073741824 )) $(( b % 1073741824 * 10 / 1073741824 ))
-    else printf '%d MB' $(( (b + 1048575) / 1048576 )); fi
-}
-
 # free bytes at a path (the nearest existing parent)
 free_bytes() {
     local p=$1 kb

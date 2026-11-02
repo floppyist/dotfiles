@@ -16,22 +16,19 @@ valid_version() {
     [[ $1 =~ ^([0-9]+)\.[0-9]+(\.[0-9]+)?$ ]] && (( BASH_REMATCH[1] >= 4 ))
 }
 
-# The versions kernel.org lists as maintained -> RELEASES ("VERSION KIND" per element)
+# The versions kernel.org lists as maintained -> RELEASES ("VERSION KIND" per element). Without
+# python: the installer asks for them before any package is installed. Every release has one
+# "moniker" and one "version" (in either order); the nested objects have neither.
 kernel_releases() {
     RELEASES=()
-    local json line
+    local json v m
     json=$(curl_get --max-time 60 https://www.kernel.org/releases.json 2>/dev/null) || return 1
-    while IFS= read -r line; do RELEASES+=("$line"); done < <(python3 -c '
-import json, re, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    sys.exit(1)
-for r in d.get("releases", []):
-    v, m = str(r.get("version", "")), str(r.get("moniker", ""))
-    if re.fullmatch(r"[0-9]+\.[0-9]+(\.[0-9]+)?", v) and m in ("mainline", "stable", "longterm"):
-        print(v, m)
-' <<< "$json")
+    while read -r v m; do
+        [[ $v =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ && $m =~ ^(mainline|stable|longterm)$ ]] && RELEASES+=("$v $m")
+    done < <(grep -oE '"(moniker|version)"[[:space:]]*:[[:space:]]*"[^"]*"' <<< "$json" | tr -d '"' |
+             awk -F '[[:space:]]*:[[:space:]]*' '
+                 $1 == "moniker" { m = $2 } $1 == "version" { v = $2 }
+                 m != "" && v != "" { print v, m; m = v = "" }')
     (( ${#RELEASES[@]} ))
 }
 
