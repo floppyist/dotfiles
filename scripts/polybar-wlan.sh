@@ -28,7 +28,13 @@ signal_icon() {
 # Polybar: one WiFi glyph whose color shows the signal (aqua >= 50 %, yellow >= 25 %, red below),
 # then the SSID. Two spaces: Nerd Font icons are drawn wider than their one-cell advance.
 wifi_status() {
-    local line signal ssid color
+    local line signal ssid color dev
+    # no WiFi hardware (or no NetworkManager): no capsule
+    dev=(/sys/class/net/*/wireless)
+    if [[ ! -e ${dev[0]} ]] || ! command -v nmcli >/dev/null; then
+        echo ""
+        return
+    fi
     # --rescan no: the status runs on every network event and must not trigger scans
     line=$(nmcli -t -e no -f ACTIVE,SIGNAL,SSID device wifi list --rescan no 2>/dev/null | grep -m1 '^yes:')
     if [[ -z "$line" ]]; then

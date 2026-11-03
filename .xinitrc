@@ -11,7 +11,7 @@ command -v displays >/dev/null && displays restore >/dev/null 2>&1
 command -v dotfiles >/dev/null && dotfiles apply --no-reload >/dev/null 2>&1
 
 # Values from dotfiles.conf (keyboard layout, scale, cursor size); defaults until `dotfiles apply` ran
-DF_KEYBOARD_LAYOUT=de
+DF_KEYBOARD_LAYOUT=auto
 DF_DPI=96
 DF_GDK_SCALE=1
 DF_GDK_DPI_SCALE=1.000
@@ -36,20 +36,32 @@ export MOZ_USE_XINPUT2=0
 
 xsetroot -cursor_name left_ptr
 
-# Keyboard layout from dotfiles.conf (`keyboard_layout`, e.g. de or us,de or de(nodeadkeys))
-layouts="" variants=""
-IFS=, read -ra _kb <<< "$DF_KEYBOARD_LAYOUT"
-for k in "${_kb[@]}"; do
-    case "$k" in
-        *"("*")") layouts+="${k%%(*},"; v=${k#*(}; variants+="${v%)}," ;;
-        *)        layouts+="$k,"; variants+="," ;;
-    esac
-done
-if [[ "$variants" == *[a-z]* ]]; then
-    setxkbmap "${layouts%,}" -variant "${variants%,}"
-else
-    setxkbmap "${layouts%,}"
+# Keyboard layout from dotfiles.conf (`keyboard_layout`, e.g. de or us,de or de(nodeadkeys));
+# auto: the system's (an Xorg keyboard config, e.g. written by localectl)
+if [[ $DF_KEYBOARD_LAYOUT != auto ]]; then
+    layouts="" variants=""
+    IFS=, read -ra _kb <<< "$DF_KEYBOARD_LAYOUT"
+    for k in "${_kb[@]}"; do
+        case "$k" in
+            *"("*")") layouts+="${k%%(*},"; v=${k#*(}; variants+="${v%)}," ;;
+            *)        layouts+="$k,"; variants+="," ;;
+        esac
+    done
+    if [[ "$variants" == *[a-z]* ]]; then
+        setxkbmap "${layouts%,}" -variant "${variants%,}"
+    else
+        setxkbmap "${layouts%,}"
+    fi
+    unset _kb k v layouts variants
 fi
-unset _kb k v layouts variants
 
+# The session bus: with systemd one runs per user already (the user services like PipeWire and
+# the portals are on it); else a private one for this session.
+if [[ -n ${XDG_RUNTIME_DIR-} && -S $XDG_RUNTIME_DIR/bus ]]; then
+    export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+    command -v dbus-update-activation-environment >/dev/null &&
+        dbus-update-activation-environment --systemd DISPLAY XAUTHORITY XCURSOR_THEME XCURSOR_SIZE \
+            ${GDK_SCALE:+GDK_SCALE GDK_DPI_SCALE} 2>/dev/null
+    exec i3
+fi
 exec dbus-run-session i3

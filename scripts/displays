@@ -42,7 +42,10 @@ import time
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROFI_MENU = os.path.join(HERE, "rofi-menu")
 DOTFILES = os.path.join(HERE, "dotfiles")
-CONF = os.environ.get("DOTFILES_CONF") or os.path.join(os.path.dirname(HERE), "dotfiles.conf")
+# dotfiles.conf: the defaults in the repository, the user's own file on top (scripts/dotfiles)
+DEFAULTS = os.path.join(os.path.dirname(HERE), "dotfiles.conf")
+CONF = os.environ.get("DOTFILES_CONF") or os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "dotfiles.conf")
 STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
                      "dotfiles", "displays.json")
 CONFIRM_SECONDS = 15
@@ -186,14 +189,16 @@ def preferred(o):
 
 
 def conf_value(key):
-    """A value from dotfiles.conf (read here: `dotfiles get` would ask `displays` again)."""
-    try:
-        for line in open(CONF, encoding="utf-8"):
-            m = re.match(r"^\s*%s\s*=\s*(\S*)\s*$" % key, line)
-            if m:
-                return m.group(1)
-    except OSError:
-        pass
+    """A value from dotfiles.conf, the user's file first (read here: `dotfiles get` would ask
+    `displays` again)."""
+    for path in (CONF, DEFAULTS):
+        try:
+            for line in open(path, encoding="utf-8"):
+                m = re.match(r"^\s*%s\s*=\s*(\S*)\s*$" % key, line)
+                if m:
+                    return m.group(1)
+        except OSError:
+            pass
     return None
 
 

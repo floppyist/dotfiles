@@ -3,9 +3,11 @@
   <img src="assets/readme/banner.png" width="830" alt="dotfiles: a polybar with workspaces and status capsules, a VPN notification and the two-line shell prompt">
 </div>
 
-A complete i3wm desktop for **Void Linux** (X11, elogind): Polybar, Rofi, Dunst, Alacritty, tmux, Neovim and a
-handful of scripts, all in one design. Gruvbox colors on a dark teal-black, one red accent, sharp corners and
-JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`dotfiles.conf`](dotfiles.conf).
+A complete i3wm desktop (X11) for **Void Linux, Arch, Debian, Ubuntu, Fedora and Alpine**: Polybar, Rofi, Dunst,
+Alacritty, tmux, Neovim and a handful of scripts, all in one design. Gruvbox colors on a dark teal-black, one red
+accent, sharp corners and JetBrainsMono Nerd Font everywhere. All of it comes from one settings file,
+[`dotfiles.conf`](dotfiles.conf); hardware (sensors, backlight, batteries, WiFi, Bluetooth, monitors, mice and
+touchpads) is detected, and every guess can be overridden there.
 
 <!-- Gallery: 3 x 240 px fits the README column on GitHub (830 px); click a picture for full size -->
 <div align="center">
@@ -56,7 +58,7 @@ JetBrainsMono Nerd Font everywhere. All of it comes from one settings file, [`do
 
 | Part | What it is |
 | --- | --- |
-| **Settings** | one file, [`dotfiles.conf`](dotfiles.conf): accent, palette, scale, fonts, sizes, gaps, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings)) |
+| **Settings** | one file, [`dotfiles.conf`](dotfiles.conf), your own values in `~/.config/dotfiles.conf`: accent, palette, scale, fonts, sizes, gaps, bar capsules, sensors, mouse and touchpad, idle times, keyboard layout, terminal, wallpaper (see [Settings](#settings)) |
 | **Monitors** | `displays`: resolution, refresh rate, scale, position, alignment, rotation, primary monitor in Rofi; a window has the same physical size on every monitor (with a TearFree driver); layouts are remembered per set of monitors and come back on hotplug (see [Monitors and scale](#monitors-and-scale)) |
 | **Window manager** | `i3wm` with `picom` |
 | **Terminal and shell** | `Alacritty`; `bash` with a two-line prompt in the Polybar style and vi mode with vim text objects; `fzf` in the Rofi style (see [Shell](#shell)) |
@@ -131,7 +133,12 @@ and the duration of commands that took 2 s or longer. The second line is the inp
 
 Click the WiFi, VPN or Bluetooth capsule for its menu; right-click VPN or Bluetooth to toggle it (VPN: the last
 used profile). Click the IP address to copy it, the music to play/pause (right-click: next), the clock for the
-full date; right-click the volume for `pulsemixer`. The mouse wheel on the volume or the brightness changes it.
+full date; click the volume to mute it, right-click it for `pulsemixer`. The mouse wheel on the volume or the
+brightness changes it (5 % steps, with the on-screen bar).
+
+Capsules without their hardware hide themselves: no WiFi adapter, Bluetooth adapter, backlight, battery, sound
+output or temperature sensor, no capsule. `bar_hide` in `dotfiles.conf` leaves out others; `temperature_sensor` and
+`backlight` pick another sensor or device than the detected one (`dotfiles list` shows what was found).
 
 **When the bar gets too full** (a long song title, many workspaces, tray icons), Polybar would cut off the
 right end, the clock first. `polybar-fit` measures both halves of the bar and hides capsules until everything
@@ -142,7 +149,8 @@ there is room again. An empty capsule (the tray without icons) takes no gap.
 
 | Module | Updated by |
 | --- | --- |
-| Workspaces, volume | Polybar itself (i3 IPC, PulseAudio events) |
+| Workspaces | Polybar itself (i3 IPC) |
+| Volume | `polybar-watch` with `pactl subscribe` (output and server events; PipeWire or PulseAudio) |
 | Brightness | the brightness keys (IPC hook) |
 | Music | `playerctl --follow`: once per second while playing, nothing while paused |
 | WiFi, IP, VPN, Bluetooth, battery | `polybar-watch` with `nmcli monitor`, `ip monitor`, `gdbus monitor` (bluez), `udevadm monitor` (charger, battery); plus a slow fallback refresh |
@@ -178,10 +186,13 @@ and OpenVPN scripts are never run.
 
 ## Settings
 
-All basic settings live in [`dotfiles.conf`](dotfiles.conf) in the repository root. After editing it, run:
+Two files: [`dotfiles.conf`](dotfiles.conf) in the repository holds the defaults and documents every key; your
+own values go into `~/.config/dotfiles.conf` (only the keys you change; it wins, and `git pull` never touches it).
 
 ```bash
-dotfiles apply      # or: dotfiles edit (opens the file, applies after saving)
+dotfiles edit                     # opens ~/.config/dotfiles.conf (created if missing), applies after saving
+dotfiles set accent blue          # changes one key there
+dotfiles apply                    # after editing by hand
 ```
 
 `dotfiles apply` checks every value (unknown keys and invalid values are reported, nothing is changed then),
@@ -195,9 +206,16 @@ open shells on their next start (also the new cursor). Idle times and the keyboa
 | Scale | `scale` (`auto` or a number like `1.25`), `auto_dpi`, `firefox_scale` (see [Monitors and scale](#monitors-and-scale)) |
 | Fonts | `font` (a Nerd Font), `font_size_terminal`, `font_size_bar`, `font_size_menu`, `font_size_notify`, `font_size_window` |
 | Layout | `bar_height`, `border_width`, `gaps`, `terminal_opacity`, `terminal_padding_x`, `terminal_padding_y`, `cursor_style` (`light`, `dark`, `accent`), `cursor_size` |
-| Behaviour | `terminal`, `keyboard_layout`, `wallpaper`, `screensaver_after`, `lock_after`, `display_off_after` |
+| Bar | `bar_hide` (capsules to leave out), `temperature_sensor` (`auto`, `none` or a sensor name), `backlight` (`auto`, `none` or a device) |
+| Input | `mouse_acceleration` (`flat`, `adaptive`), `mouse_speed`, `touchpad_tap`, `touchpad_natural_scroll`, `touchpad_acceleration`, `touchpad_speed` (`auto` leaves a setting to libinput or your Xorg config), `keyboard_layout` (`auto` = the system's), `display_key` (what the XF86Display key does: `display`, `bluetooth`, `none`) |
+| Behaviour | `terminal`, `wallpaper` (empty: the background color), `screenshot_dir` (`auto`: your pictures folder), `compositor` (`auto`, `glx`, `egl`, `xrender`, `off`), `screensaver_after`, `lock_after`, `display_off_after` |
 
-Other commands: `dotfiles check`, `dotfiles get accent`, `dotfiles list`.
+Other commands: `dotfiles check`, `dotfiles get accent`, `dotfiles list` (also shows what was detected:
+`temperature_path`, `backlight_device`, `bar_modules_right`, ...).
+
+Mouse and touchpad settings are set with `xinput` when the session starts and whenever a device is plugged in
+(`input-setup watch`), as your user: no Xorg config in `/etc`. Machine-specific shell additions (PATH entries,
+variables, aliases) go into `~/.config/bash/local.bash`, which `.bashrc` sources.
 
 The configs include the generated files (`include ~/.config/dotfiles/i3.conf`, `include-file` in Polybar,
 `@import` in Rofi and GTK, `import` in Alacritty, `source-file` in tmux, `FZF_DEFAULT_OPTS_FILE` for fzf, a drop-in in
@@ -275,51 +293,60 @@ Notifications are paused while the screen is locked.
 
 ## Dependencies
 
-The installer installs all of it (see [Installation](#installation)), in modules. Package names are Void Linux's.
+The installer installs all of it (see [Installation](#installation)), in modules. The table lists Void Linux's
+package names; [`install/pkgmap.sh`](install/pkgmap.sh) has the names on Arch, Debian, Ubuntu, Fedora and Alpine.
+What a distribution does not package, or only in a version too old for this desktop, comes from its project with
+a pinned version and SHA-256 ([`install/upstream.sh`](install/upstream.sh)):
+
+| Program | Where | How |
+| --- | --- | --- |
+| `i3lock-color` 2.13.c.5 | Arch, Debian, Ubuntu, Fedora | built from source, installed into `/usr/local` |
+| `xss-lock` 0.3.0 | Alpine | built from source, `/usr/local` |
+| `xbanish` 1.8 | Arch (only in the AUR) | built from source, `/usr/local` |
+| `fzf` 0.74.5, `neovim` 0.12.6, `tree-sitter` 0.27.1 | Debian 13 (fzf 0.60, Neovim 0.10, tree-sitter 0.22 are too old) | release binaries into `~/.local/opt`, linked into `~/.local/bin` |
 
 | Module | Packages | It also |
 | --- | --- | --- |
-| **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind`, turns mouse acceleration off (Xorg config, touchpads excluded), links the files, generates the theme |
-| **System update** | | updates xbps and the whole system first |
+| **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap xinput i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` (elsewhere also `procps`, `util-linux`, `iproute2`, ...; Debian and Fedora get `mate-polkit`, they have no `polkit-gnome`) | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind` (Alpine also `udev`), writes your console keymap into `~/.config/dotfiles.conf` as `keyboard_layout` when X has none, links the files, generates the theme |
+| **System update** | | updates the package manager and the whole system first |
 | **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi xf86-video-amdgpu` (`xf86-video-ati` instead on the kernel driver radeon), for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself (AMD's Xorg driver: TearFree, see [Monitors and scale](#monitors-and-scale)); removes the software pointer an earlier version installed |
-| **Audio** | `pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer` | routes ALSA programs through PipeWire |
-| **Network** | `NetworkManager libnm NetworkManager-openvpn NetworkManager-vpnc network-manager-applet` | replaces dhcpcd and wpa_supplicant, takes their WiFi networks along |
-| **Bluetooth** | `bluez libspa-bluetooth` | enables `bluetoothd` |
+| **Audio** | `pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer` | routes ALSA programs through PipeWire (Void; elsewhere its package does) |
+| **Network** | `NetworkManager libnm NetworkManager-openvpn NetworkManager-vpnc network-manager-applet` | Void: replaces dhcpcd and wpa_supplicant, takes their WiFi networks along. Elsewhere: enabled when no other service manages the network, else a note how to switch |
+| **Bluetooth** | `bluez libspa-bluetooth` | enables the Bluetooth service |
 | **Laptop** | `brightnessctl` | udev rule for the backlight, your user in the group `video` |
 | **Neovim** | `neovim git gcc make tree-sitter-cli ripgrep fd curl unzip nodejs openjdk21` | installs the plugins of `lazy-lock.json` |
 | **Firefox** | `firefox noto-fonts-emoji` | puts the look into your profile |
 | **Mail** | `neomutt` | sources the theme in your muttrc |
-| **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | links the MPRIS plugin into `~/.config/mpv/scripts` (Void installs it where mpv does not look; without it the music capsule does not see mpv) |
+| **Music** | `mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow` | Void: links the MPRIS plugin into `~/.config/mpv/scripts` (Void installs it where mpv does not look; without it the music capsule does not see mpv) |
 | **Tools** | `htop xdg-utils` | |
 | **Dual boot** (experimental; on when another system is found) | with GRUB: `os-prober ntfs-3g`; for a second Linux also `gnupg`, for Windows `dosfstools wimlib` | sets `GRUB_DISABLE_OS_PROBER=false`, makes the boot menu again and checks that Windows or another Linux is in it; notes on Fast Startup, the clock and the boot order, see [Dual boot](#dual-boot) |
 | **Hardware fixes** (on when this machine needs one) | none | kernel parameters for special hardware, chosen in a screen of their own, see [Hardware fixes](#hardware-fixes) |
-| **Custom kernel** (experimental; off by default) | `base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut` | builds and installs a kernel for this machine, see [Custom kernel](#custom-kernel) |
+| **Custom kernel** (experimental; off by default; Void only) | `base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut` | builds and installs a kernel for this machine, see [Custom kernel](#custom-kernel) |
 | **Start X on login** | | `startx` after logging in on tty1 |
 
 Minimum versions: i3 4.22, polybar 3.6, picom 12 (uses the `rules` syntax), rofi 1.7, dunst 1.9, scrot 1.7,
 bash 5.1 (text objects; 5.3 for the duration capsule and the prompt without subshells), tmux 3.2,
 alacritty 0.14 (`[general] import`), fzf 0.66 (`--gutter`), NetworkManager 1.20.
 
-Other distributions: install the same programs with your package manager, then run `./install.sh`; without xbps it
-leaves out packages and services and only sets up your home directory. Optional: Wine for the games in
-`applications/local/`.
+Other distributions: install the same programs with your package manager, then run `./install.sh`; without a known
+package manager it leaves out packages and services and only sets up your home directory.
 
 ## Installation
 
 > [!WARNING]
-> `install.sh` has so far only been tested on **Void Linux** (glibc, runit, elogind, X11). It installs packages
-> with `xbps`, changes system files as root (`/etc`, services, the network stack) and can replace dhcpcd and
-> wpa_supplicant with NetworkManager. On other distributions only the steps in your home directory (linking the
-> files, generating the theme) work; package names and service handling are Void's. Read the plan the installer
-> shows before you confirm it, and use it at your own risk.
+> `install.sh` is in daily use on **Void Linux** (glibc, runit, elogind). On **Arch, Debian 13, Ubuntu 26.04,
+> Fedora 43+ and Alpine 3.23+** (pacman, apt, dnf, apk; systemd or OpenRC) the package lists and the builds were
+> run in containers, but not yet on real hardware: services, the network switch and the first login. It changes
+> system files as root (`/etc`, services, the network stack). Read the plan the installer shows before you confirm
+> it, and use it at your own risk. Derivatives (Mint, Pop!_OS, EndeavourOS, ...) are treated like their base.
 
 ### 1. Get the repository
 
-On a fresh Void Linux with i3, as your user (it has to be allowed to use sudo, the Void installer puts it in the
-group `wheel`):
+On a fresh system, as your user (it has to be allowed to use sudo: group `wheel`, on Debian and Ubuntu `sudo`;
+Alpine: `apk add sudo bash` first):
 
 ```bash
-sudo xbps-install -S git
+sudo xbps-install -S git      # Arch: pacman -S git, Debian/Ubuntu: apt install git, Fedora: dnf install git, Alpine: apk add git
 git clone https://github.com/floppyist/dotfiles ~/dotfiles
 cd ~/dotfiles
 ```
@@ -343,31 +370,35 @@ A full-screen installer in the colors of the desktop (it needs nothing but bash,
 Before anything changes it shows the plan: the new packages with their download size, what changes as root and
 what in your home directory. sudo then asks for your password once. The steps run with a progress bar and their
 live output; a step that fails can be retried or skipped, <kbd>Ctrl</kbd> <kbd>c</kbd> stops after the current step
-(a running xbps is never interrupted). Every run writes a log to `~/.local/state/dotfiles/`.
+(a running package manager is never interrupted). Every run writes a log to `~/.local/state/dotfiles/`.
 
 The complete installation, in this order:
 
-1. Updates the system (xbps first), then installs the packages of all modules in one transaction. The graphics
-   drivers follow the GPUs it finds; with an NVIDIA card it asks which driver (nouveau or proprietary).
+1. Updates the system, then installs the packages of all modules in one transaction (Alpine: enables the
+   community repository first). The graphics drivers follow the GPUs it finds; with an NVIDIA card on Void it asks
+   which driver (nouveau or proprietary; other distributions get nouveau, install the proprietary driver their way).
+   Then it builds or downloads what the distribution lacks (see [Dependencies](#dependencies)).
 2. Downloads JetBrainsMono Nerd Font (7 MB from the Nerd Fonts release, checked against a fixed SHA-256) into
    `~/.local/share/fonts`, instead of all Nerd Fonts from `nerd-fonts-ttf` (1.5 GB).
-3. Enables `dbus`, `elogind` and `bluetoothd`, installs the udev rule for the backlight, adds you to the group
-   `video`, routes ALSA through PipeWire, makes bash your login shell if it was `sh`.
+3. Enables `dbus`, `elogind` and Bluetooth (where the init system does not have them anyway), installs the udev
+   rule for the backlight, adds you to the group `video`, routes ALSA through PipeWire (Void), makes bash your login
+   shell if it was `sh`.
 4. Links every file of `config/` into `~/.config/` (file by file, e.g. `~/.config/i3/config`, so your own files in
    those directories stay), the dotfiles into `~/`, the scripts into `~/.local/bin/` and the launchers into
    `~/.local/share/applications/` (see [Launchers](#3-launchers)). Files in the way are kept as
    `*.bak-<timestamp>`, links to files that were removed from the repository are deleted.
 5. Firefox: links `userChrome.css` and `userContent.css` into your profile (Firefox creates one first if there is
    none) and switches them on in `user.js`. neomutt: adds the theme to your muttrc (or creates `~/.muttrc`).
-6. Runs `dotfiles apply` (theme files, cursor theme). Without a wallpaper it puts a plain one in the background
-   color at `~/images/wallpaper`.
+6. Runs `dotfiles apply` (theme files, cursor theme). Your console keymap becomes `keyboard_layout` in
+   `~/.config/dotfiles.conf` when X has no layout of its own.
 7. Installs the Neovim plugins at the versions of `lazy-lock.json`; language servers and Treesitter parsers follow
    on the first start.
 8. Makes `~/.bash_profile` start X after logging in on tty1 (`exec startx`: logging out of i3 ends the login).
-9. Last, NetworkManager replaces dhcpcd and wpa_supplicant.
+9. Last, NetworkManager: on Void it replaces dhcpcd and wpa_supplicant. Elsewhere it is enabled only when nothing
+   else manages the network (systemd-networkd, iwd, ifupdown, ...); otherwise a note says how to switch.
 
 > [!IMPORTANT]
-> The switch to NetworkManager drops the connection for a few seconds. The WiFi networks of wpa_supplicant are
+> The switch to NetworkManager (Void) drops the connection for a few seconds. The WiFi networks of wpa_supplicant are
 > copied to NetworkManager (as root-only files, the keys never on a command line); WPA-Enterprise networks need
 > `nm-connection-editor`, networks saved by iwd are picked again in the WiFi menu.
 
@@ -381,7 +412,7 @@ Without the menus:
 | --- | --- |
 | `./install.sh all` | the complete installation (`--skip network,neovim` leaves modules out, `--nvidia nvidia` picks the driver) |
 | `./install.sh modules audio,bluetooth` | these modules (and the desktop) |
-| `./install.sh modules kernel --kernel-version 6.18.60` | the custom kernel (not part of `all`); without the version: the newest of the running series |
+| `./install.sh modules kernel --kernel-version 6.18.60` | the custom kernel (Void only, not part of `all`); without the version: the newest of the running series |
 | `./install.sh modules dualboot --other-os arch [--disk /dev/sda]` | sets up a second system (`arch debian ubuntu fedora alpine windows`; Windows needs `--windows-iso FILE`), see [Dual boot](#dual-boot) |
 | `./install.sh dualboot-clean` | removes the installer entry and installer partition of a second system again |
 | `./install.sh modules fixes --fix amdgpu-dpm` | these hardware fixes (default: the ones this machine needs) |
@@ -503,10 +534,8 @@ Signal and the author's own tools `calculus` and `notice`) only where their prog
 `Exec=` and `TryExec=`). Run `./install.sh links` again after installing or removing a program: it adds or removes
 the launcher.
 
-The launchers in `applications/local/` (Aseprite, Command & Conquer Generals, Factorio, World of Warcraft, Sunshine) are
-machine-specific and point to install locations under `/home/floppyist/`; for them every absolute path in `Exec=` and
-`Path=` must exist as well. Change `Exec=` and `Path=` to your install locations (or put your own launchers there) and
-run `./install.sh links` again.
+Launchers of your own (games, programs you built) belong into `~/.local/share/applications/` directly, not into the
+repository.
 
 ## Security notes
 
@@ -519,13 +548,14 @@ run `./install.sh links` again.
 - The git prompt runs `git status` with `core.fsmonitor=false`, and not at all in a repository whose own config defines filter drivers or includes other files (the capsule then shows the branch and a `!`): both would let the repository start a program of its choice when you `cd` into it, e.g. an unpacked archive. Control characters in directory names are replaced in the prompt (no escape sequences from a crafted directory name).
 - Runtime files (mpv IPC socket, screensaver log/lock, Polybar module outputs, the region screenshot) live in private directories under `$XDG_RUNTIME_DIR` (or `~/.cache`), never under predictable names in `/tmp`.
 - Firefox hides the tab icons and the site identity box, which also show that a page uses the camera, microphone or screen: such a tab gets a red title instead (and a red line in the background). Pages without a secure connection show their address in red.
-- The installer runs as your user and asks for sudo once; it drops the permission again when it ends (`sudo -k`). The font download is checked against a fixed SHA-256, the kernel source and the ISOs of a second system against the pinned keys of their signers. A step that is running when you press <kbd>Ctrl</kbd> <kbd>c</kbd> or close the terminal finishes first, so an xbps transaction is never cut off halfway.
+- The installer runs as your user and asks for sudo once; it drops the permission again when it ends (`sudo -k`). The font download and the programs from upstream (fzf, Neovim, tree-sitter, i3lock-color, xss-lock, xbanish) are checked against fixed SHA-256 sums, the kernel source and the ISOs of a second system against the pinned keys of their signers. A step that is running when you press <kbd>Ctrl</kbd> <kbd>c</kbd> or close the terminal finishes first, so a package transaction is never cut off halfway.
 - `dotfiles.conf` values end up in configs that can run commands (i3, Polybar, tmux, shell), so `dotfiles apply` only accepts strict patterns (colors `#rrggbb`, numbers in a range, fonts and paths without quotes or shell characters).
 - A command typed with a leading space is not saved in the bash history.
 
 ## Troubleshooting
 
-- **WiFi or VPN: "not authorized":** adding a profile needs a polkit agent for the password dialog. i3 starts `polkit-gnome`; check that it is installed and running.
+- **WiFi or VPN: "not authorized":** adding a profile needs a polkit agent for the password dialog. `session-start` starts `polkit-gnome` (Debian, Fedora: `mate-polkit`); check that it is installed and running.
+- **No volume capsule:** it hides without a sound output. `pactl info` must reach a server (PipeWire's `pipewire-pulse` or PulseAudio) and `pactl get-default-sink` name an output.
 - **WiFi: a network keeps failing with a saved profile:** the menu asks for the password again when NetworkManager rejects the saved one. For other errors, `nmcli connection delete id "<name>"` and connect again.
 - **The music capsule ignores mpv:** mpv needs the MPRIS plugin: `mkdir -p ~/.config/mpv/scripts && ln -s /usr/lib/mpv-mpris/mpris.so ~/.config/mpv/scripts/` (the installer's Music module does that), then restart mpv. `playerctl -l` lists the players it sees.
 - **Everything too small or too large:** `displays scale` shows the primary monitor's density and how the others are scaled; change `auto_dpi`, choose a scale in <kbd>Super</kbd> <kbd>Shift</kbd> <kbd>p</kbd> → the monitor → Scale, or set a number for all (`scale = 1.5`) and run `dotfiles apply`. Firefox only: `firefox_scale`.

@@ -123,10 +123,10 @@ links_run() {
     local rel src dst name dir
     LINKS_TODO=0 LINKS_BACKUPS=()
 
-    # ~/.config/<name>/<file>. config/udev and config/xorg belong to /etc (the installer copies them).
+    # ~/.config/<name>/<file>. config/udev belongs to /etc (the installer copies it).
     while IFS= read -r -d '' rel; do
         [[ -f "$DOTFILES/$rel" ]] || continue   # deleted, but not committed yet
-        [[ "$rel" == config/udev/* || "$rel" == config/xorg/* ]] && continue
+        [[ "$rel" == config/udev/* ]] && continue
         link "$DOTFILES/$rel" "$CONFIG/${rel#config/}" || return 1
     done < <(config_files | sort -z)
 
@@ -146,7 +146,7 @@ links_run() {
     # ~/.local/bin: the menus of this repository and terminal.sh are found there (linked above),
     # also when this shell's PATH does not have it yet.
     local PATH="$HOME/.local/bin:$PATH"
-    for src in "$DOTFILES"/applications/*.desktop "$DOTFILES"/applications/local/*.desktop; do
+    for src in "$DOTFILES"/applications/*.desktop; do
         [[ -f "$src" ]] || continue
         dst="$HOME/.local/share/applications/$(basename "$src")"
         if launcher_ok "$src"; then

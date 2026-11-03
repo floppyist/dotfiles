@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Screenshot (Print) or selected region (Shift+Print).
-# Saved as ~/images/screenshots/screenshot_NNN.png and copied to the clipboard.
+# Saved as <screenshot_dir>/screenshot_NNN.png (dotfiles.conf; auto = the pictures folder) and
+# copied to the clipboard.
 # Usage: screenshot.sh [--select]
 set -u
 
-TARGET_DIR="$HOME/images/screenshots"
+DF_SCREENSHOT_DIR=""
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+TARGET_DIR=${DF_SCREENSHOT_DIR:-$HOME/Pictures/screenshots}
 PREFIX="screenshot_"
 
 notify() { notify-send -a screenshot "$@" >/dev/null 2>&1; }

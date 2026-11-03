@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Volume keys with an on-screen bar (dunst progress bar, replaces itself while you press).
+# Volume keys and the volume capsule, with an on-screen bar (dunst progress bar, replaces itself
+# while you press). pactl works with PipeWire (pipewire-pulse) and PulseAudio.
 # Usage: volume.sh up|down|mute|mic
 set -u
 
-STEP=5%
-SINK=@DEFAULT_AUDIO_SINK@
-SOURCE=@DEFAULT_AUDIO_SOURCE@
+STEP=5          # percent
+MAX=100         # never louder than 100 % (above that the sound clips)
+
+# pactl translates its output
+export LC_ALL=C
 
 # osd TAG SUMMARY [VALUE]
 osd() {
@@ -14,13 +17,39 @@ osd() {
     notify-send -a osd -u low "${hints[@]}" "$2" >/dev/null 2>&1
 }
 
+# Volume of the default output in percent (the loudest channel) -> VOL
+get_volume() {
+    local out pct
+    VOL=-1
+    out=$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null) || return 1
+    for pct in $(grep -o '[0-9]\+%' <<< "$out"); do
+        pct=${pct%\%}
+        (( 10#$pct > VOL )) && VOL=$(( 10#$pct ))
+    done
+    (( VOL >= 0 ))
+}
+
+muted() { [[ $(pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null) == *yes* ]]; }
+
 case "${1:-}" in
-    up)   wpctl set-volume -l 1.0 "$SINK" "$STEP+" ;;
-    down) wpctl set-volume "$SINK" "$STEP-" ;;
-    mute) wpctl set-mute "$SINK" toggle ;;
+    up|down)
+        get_volume || { osd volume "󰝟  No audio output"; exit 1; }
+        if [[ $1 == up ]]; then
+            new=$(( (VOL / STEP + 1) * STEP ))
+            (( new > MAX )) && new=$MAX
+        else
+            new=$(( (VOL + STEP - 1) / STEP * STEP - STEP ))
+            (( new < 0 )) && new=0
+        fi
+        # sets every channel to the same value (a balance set elsewhere is reset)
+        pactl set-sink-volume @DEFAULT_SINK@ "$new%"
+        ;;
+    mute)
+        pactl set-sink-mute @DEFAULT_SINK@ toggle
+        ;;
     mic)
-        wpctl set-mute "$SOURCE" toggle
-        if wpctl get-volume "$SOURCE" | grep -q MUTED; then
+        pactl set-source-mute @DEFAULT_SOURCE@ toggle
+        if [[ $(pactl get-source-mute @DEFAULT_SOURCE@ 2>/dev/null) == *yes* ]]; then
             osd mic "󰍭  Microphone muted"
         else
             osd mic "󰍬  Microphone on"
@@ -30,16 +59,13 @@ case "${1:-}" in
     *) echo "usage: volume.sh up|down|mute|mic" >&2; exit 2 ;;
 esac
 
-# "Volume: 0.56" or "Volume: 0.56 [MUTED]"
-out=$(wpctl get-volume "$SINK" 2>/dev/null) || exit 1
-vol=$(awk '{ printf "%d", $2 * 100 + 0.5 }' <<< "$out")
-
-if [[ "$out" == *MUTED* ]]; then
+get_volume || exit 1
+if muted; then
     osd volume "󰝟  Muted" 0
-elif (( vol >= 66 )); then
-    osd volume "󰕾  Volume  $vol%" "$vol"
-elif (( vol >= 33 )); then
-    osd volume "󰖀  Volume  $vol%" "$vol"
+elif (( VOL >= 66 )); then
+    osd volume "󰕾  Volume  $VOL%" "$VOL"
+elif (( VOL >= 33 )); then
+    osd volume "󰖀  Volume  $VOL%" "$VOL"
 else
-    osd volume "󰕿  Volume  $vol%" "$vol"
+    osd volume "󰕿  Volume  $VOL%" "$VOL"
 fi

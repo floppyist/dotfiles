@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Aseprite
-GenericName=Pixel Art Editor
-Comment=Animated sprite editor and pixel art tool
-Exec=/home/floppyist/workspace/aseprite/build/bin/aseprite
-Path=/home/floppyist/workspace/aseprite/build/bin
-Terminal=false
-Categories=Graphics;

@@ -4,11 +4,11 @@
 #                          returns 1 if there is nothing to do; MODULE limits it to one module
 #   run_<step>            does it; runs in the background, output in the log (lib.sh protocol)
 
-STEP_ORDER=(update packages font services swcursor pointer backlight alsa shell links firefox mail mpris theme nvim dualboot othersys fixes kernel autostart network)
+STEP_ORDER=(update packages upstream font services swcursor pointer backlight alsa shell links firefox mail mpris theme nvim dualboot othersys fixes kernel autostart network)
 
 declare -A STEP_TITLE=(
-    [update]="System update"  [packages]="Packages"        [font]="Font"
-    [services]="Services"     [swcursor]="Mouse pointer"   [pointer]="Mouse acceleration"
+    [update]="System update"  [packages]="Packages"        [font]="Font"   [upstream]="From upstream"
+    [services]="Services"     [swcursor]="Mouse pointer"   [pointer]="Mouse settings"
     [backlight]="Backlight"
     [alsa]="ALSA to PipeWire" [shell]="Login shell"        [links]="Links"
     [firefox]="Firefox"       [mail]="neomutt"             [mpris]="mpv MPRIS"
@@ -22,10 +22,10 @@ for _t in "${STEP_TITLE[@]}"; do (( ${#_t} + 2 > STEP_KW )) && STEP_KW=$(( ${#_t
 unset _t
 # share of the whole installation, for the progress bar
 declare -A STEP_WEIGHT=(
-    [update]=12 [packages]=40 [font]=4 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1
+    [update]=12 [packages]=40 [upstream]=6 [font]=4 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1
     [shell]=1 [links]=3 [firefox]=3 [mail]=1 [mpris]=1 [theme]=5 [nvim]=14 [dualboot]=2 [othersys]=20 [fixes]=1 [kernel]=30 [autostart]=1 [network]=3
 )
-declare -A STEP_ROOT=( [update]=1 [packages]=1 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 [kernel]=1 [dualboot]=1 [othersys]=1 [fixes]=1 )
+declare -A STEP_ROOT=( [update]=1 [packages]=1 [upstream]=1 [services]=1 [swcursor]=1 [pointer]=1 [backlight]=1 [alsa]=1 [shell]=1 [network]=1 [kernel]=1 [dualboot]=1 [othersys]=1 [fixes]=1 )
 
 plan_step() {
     PLAN=()
@@ -35,9 +35,15 @@ plan_step() {
 # ── System update ─────────────────────────────────────────────────────────────────
 
 plan_update() {
-    PLAN=("sync the repositories, update xbps, then every installed package")
-    case ${UPDATES:-0} in
-        0) ;;
+    case $PM in
+        xbps)   PLAN=("sync the repositories, update xbps, then every installed package") ;;
+        pacman) PLAN=("pacman -Syu: sync the repositories and update every installed package") ;;
+        apt)    PLAN=("apt-get update, then full-upgrade: every installed package") ;;
+        dnf)    PLAN=("dnf upgrade --refresh: every installed package") ;;
+        apk)    PLAN=("apk update, then apk upgrade: every installed package") ;;
+    esac
+    case ${UPDATES-} in
+        ""|0) ;;
         1) PLAN+=("1 update is known from the last sync") ;;
         *) PLAN+=("$UPDATES updates are known from the last sync") ;;
     esac
@@ -46,27 +52,27 @@ plan_update() {
 
 run_update() {
     detail "syncing the repositories"
-    as_root xbps-install -S 2>&1 || return 1
-    detail "updating xbps"
-    xbps_install -u xbps || return 1
-    local n=0 pv act _
-    while read -r pv act _; do [[ $act == update ]] && (( n++ )); done < <(xbps-install -nu 2>/dev/null)
-    if (( n == 0 )); then say "the system is up to date"; return 0; fi
-    detail "updating $n packages"
-    xbps_install -u
+    pm_sync || return 1
+    pm_upgrade
 }
 
 # ── Packages ──────────────────────────────────────────────────────────────────────
 
 plan_packages() {
-    (( ${#SM[@]} )) || return 1
-    PLAN=("${SM[*]}")
+    PLAN=()
+    apk_community_off && PLAN+=("enable the community repository in /etc/apk/repositories (i3, polybar, ...)")
+    (( ${#SM[@]} )) && PLAN+=("${SM[*]}")
+    (( ${#PLAN[@]} ))
 }
 
 run_packages() {
     pkg_scan
     sel_pkgs
     local p repos=() rest=()
+    if apk_community_off; then
+        apk_community_on || return 1
+        say "enabled the community repository"
+    fi
     for p in "${SM[@]}"; do
         if [[ $p == void-repo-* ]]; then repos+=("$p"); else rest+=("$p"); fi
     done
@@ -78,14 +84,14 @@ run_packages() {
     fi
     (( ${#rest[@]} )) || { say "every package is installed"; return 0; }
     detail "syncing the repositories"
-    as_root xbps-install -S 2>&1 || return 1
-    # Packages the repository does not have (another architecture, musl) would stop the
-    # whole transaction: leave them out
-    xbps_dry "${rest[@]}"
+    pm_sync || return 1
+    # Packages the repository does not have (another architecture, musl, an older release)
+    # would stop the whole transaction: leave them out
+    pm_dry "${rest[@]}"
     for p in "${TX_UNKNOWN[@]}"; do warn "Package $p is not in the repository, left out"; done
-    (( ${#XBPS_OK[@]} )) || return 1
-    say "installing: ${XBPS_OK[*]}"
-    xbps_install "${XBPS_OK[@]}"
+    (( ${#PM_OK[@]} )) || return 1
+    say "installing: ${PM_OK[*]}"
+    pm_install "${PM_OK[@]}"
 }
 
 # ── Font ──────────────────────────────────────────────────────────────────────────
@@ -124,7 +130,8 @@ run_font() {
 
 # ── Services ──────────────────────────────────────────────────────────────────────
 
-# Services of the selection (or of module $1) that are not enabled yet -> SVC
+# Services of the selection (or of module $1) that are not enabled yet -> SVC (their names in this
+# init system; openrc: name:runlevel)
 services_todo() {
     local m s want=()
     for m in core bluetooth; do
@@ -132,16 +139,24 @@ services_todo() {
         [[ -z ${1-} ]] && ! (( ${SEL[$m]:-0} )) && continue
         case $m in
             core)      want+=(dbus elogind) ;;
-            bluetooth) want+=(bluetoothd) ;;
+            bluetooth) want+=(bluetooth) ;;
         esac
     done
     SVC=()
     for s in "${want[@]}"; do
-        service_on "$s" && continue
+        svc_name "$s"
+        [[ -n $_SN ]] || continue
+        svc_enabled "$_SN" && continue
         # elogind started by D-Bus activation: a second one from runit would fail in a loop
-        [[ $s == elogind ]] && pgrep -x elogind >/dev/null && continue
-        SVC+=("$s")
+        [[ $INIT == runit && $_SN == elogind ]] && pgrep -x elogind >/dev/null && continue
+        SVC+=("$_SN")
     done
+    # Alpine: Xorg finds keyboards and mice through udev (mdev is the default there)
+    if [[ $INIT == openrc && ( -z ${1-} || $1 == core ) ]] && svc_exists udev; then
+        for s in udev:sysinit udev-trigger:sysinit udev-settle:sysinit udev-postmount:default; do
+            svc_enabled "${s%:*}" || SVC+=("$s")
+        done
+    fi
 }
 
 # The elogind service of runit is enabled, but another elogind (started by D-Bus) runs: runit starts
@@ -149,7 +164,8 @@ services_todo() {
 # the one runit started (supervise/pid); any other elogind means the loop. Needs root to read it.
 elogind_loop() {
     local pid p
-    service_on elogind || return 1
+    [[ $INIT == runit ]] || return 1
+    svc_enabled elogind || return 1
     pgrep -x elogind >/dev/null || return 1
     (( EUID == 0 )) || sudo -n true 2>/dev/null || return 1
     pid=$(as_root cat "$RUNSV_DIR/elogind/supervise/pid" 2>/dev/null)
@@ -161,7 +177,7 @@ elogind_loop() {
 plan_services() {
     services_todo "${1-}"
     PLAN=()
-    (( ${#SVC[@]} )) && PLAN=("enable ${SVC[*]}")
+    (( ${#SVC[@]} )) && PLAN=("enable ${SVC[*]%%:*}")
     [[ -z ${1-} || $1 == core ]] && elogind_loop && PLAN+=("disable the elogind service of runit: elogind runs already and the service fails over and over")
     (( ${#PLAN[@]} ))
 }
@@ -169,7 +185,7 @@ plan_services() {
 # Waits until runit reports service $1 as running (runsvdir picks a new link up within 5 s)
 wait_service() {
     local end=$(( SECONDS + 20 ))
-    command -v sv >/dev/null || return 0
+    [[ $INIT == runit ]] && command -v sv >/dev/null || return 0
     while (( SECONDS < end )); do
         as_root sv -w 2 check "$RUNSV_DIR/$1" >/dev/null 2>&1 && return 0
         sleep 1
@@ -177,45 +193,40 @@ wait_service() {
     return 1
 }
 
-# Takes the runit service $1 out again (stops it first)
-disable_service() {
-    as_root sv down "$RUNSV_DIR/$1" >/dev/null 2>&1
-    as_root rm -f "$RUNSV_DIR/$1"
-}
-
 run_services() {
-    local s changed=0
+    local s name changed=0
     # a service of an earlier run that loops: out with it
     if elogind_loop; then
-        disable_service elogind || return 1
+        svc_disable elogind || return 1
         say "disabled the elogind service of runit (elogind runs already, D-Bus started it)"
         changed=1
     fi
     services_todo
     for s in "${SVC[@]}"; do
-        if [[ ! -d $SV_DIR/$s ]]; then
-            warn "Service $s is not installed ($SV_DIR/$s is missing)"
+        name=${s%%:*}
+        if ! svc_exists "$name"; then
+            warn "Service $name is not installed"
             continue
         fi
         # D-Bus activation may have started elogind since the plan
-        if [[ $s == elogind ]] && pgrep -x elogind >/dev/null; then
+        if [[ $INIT == runit && $name == elogind ]] && pgrep -x elogind >/dev/null; then
             say "elogind runs already (started by D-Bus): no service needed"
             continue
         fi
-        as_root ln -s "$SV_DIR/$s" "$RUNSV_DIR/" || return 1
-        say "enabled $s"
+        if [[ $s == *:* ]]; then svc_enable "$name" "${s#*:}"; else svc_enable "$name"; fi || return 1
+        say "enabled $name"
         changed=1
         # elogind needs D-Bus: wait for it, so runit does not start elogind first
         # (and D-Bus activation does not start a second one in between)
-        if [[ $s == dbus ]]; then
+        if [[ $name == dbus ]]; then
             detail "waiting for D-Bus"
             wait_service dbus || warn "D-Bus did not start within 20 s"
-        elif [[ $s == elogind ]]; then
+        elif [[ $INIT == runit && $name == elogind ]]; then
             detail "waiting for elogind"
             wait_service elogind
             if elogind_loop; then
                 # another elogind won the race: the service would fail forever
-                disable_service elogind
+                svc_disable elogind
                 say "elogind was started by D-Bus in the meantime: service removed again"
             fi
         fi
@@ -245,25 +256,24 @@ run_swcursor() {
     note "Mouse pointer: log in again, the graphics card draws it again (no more flickering)."
 }
 
-# ── Mouse acceleration (core) ─────────────────────────────────────────────────────
+# ── Mouse settings (core) ─────────────────────────────────────────────────────────
 
-# xinput set-prop does not survive a restart of X: an Xorg InputClass sets the libinput options
-# for every mouse (also those plugged in later). Touchpads are left alone.
-POINTER_SRC=$DOTFILES/config/xorg/40-dotfiles-pointer.conf
+# Mouse and touchpad settings come from dotfiles.conf now (scripts/input-setup, as the user). An
+# earlier version installed this Xorg config for the flat mouse profile: it would override
+# `mouse_acceleration = adaptive` at the start of X, so it goes.
 POINTER_CONF=$SYSROOT/etc/X11/xorg.conf.d/40-dotfiles-pointer.conf
 
 plan_pointer() {
     PLAN=()
     [[ -z ${1-} || $1 == core ]] || return 1
-    cmp -s "$POINTER_SRC" "$POINTER_CONF" && return 1
-    PLAN=("Xorg config ${POINTER_CONF#"$SYSROOT"}: mice without acceleration (flat profile, speed 0)")
+    grep -qs '"dotfiles pointer"' "$POINTER_CONF" || return 1
+    PLAN=("remove ${POINTER_CONF#"$SYSROOT"} (an earlier version's mouse settings; dotfiles.conf has them now)")
 }
 
 run_pointer() {
-    if cmp -s "$POINTER_SRC" "$POINTER_CONF"; then say "mouse acceleration is configured"; return 0; fi
-    as_root install -D -m644 "$POINTER_SRC" "$POINTER_CONF" || return 1
-    say "installed $POINTER_CONF"
-    note "Mouse: log in again (Xorg reads the config at its start). Until then: xinput set-prop <id> \"libinput Accel Profile Enabled\" 0 1 0"
+    grep -qs '"dotfiles pointer"' "$POINTER_CONF" || { say "no old mouse config"; return 0; }
+    as_root rm -f -- "$POINTER_CONF" || return 1
+    say "removed $POINTER_CONF"
 }
 
 # ── Backlight (laptop) ────────────────────────────────────────────────────────────
@@ -272,7 +282,7 @@ BACKLIGHT_RULE=$SYSROOT/etc/udev/rules.d/90-backlight.rules
 
 plan_backlight() {
     PLAN=()
-    cmp -s "$DOTFILES/config/udev/90-backlight.rules" "$BACKLIGHT_RULE" ||
+    same_file "$DOTFILES/config/udev/90-backlight.rules" "$BACKLIGHT_RULE" ||
         PLAN+=("udev rule $BACKLIGHT_RULE: the group video may set the backlight")
     in_group video || PLAN+=("add $USER_NAME to the group video")
     (( ${#PLAN[@]} ))
@@ -280,7 +290,7 @@ plan_backlight() {
 
 run_backlight() {
     local src=$DOTFILES/config/udev/90-backlight.rules
-    if ! cmp -s "$src" "$BACKLIGHT_RULE"; then
+    if ! same_file "$src" "$BACKLIGHT_RULE"; then
         as_root install -D -m644 "$src" "$BACKLIGHT_RULE" || return 1
         say "installed $BACKLIGHT_RULE"
         as_root udevadm control --reload-rules 2>&1
@@ -301,6 +311,8 @@ ALSA_CONFS=(50-pipewire.conf 99-pipewire-default.conf)
 plan_alsa() {
     local f todo=0
     PLAN=()
+    # other distributions ship these links in their pipewire-alsa package
+    [[ $DISTRO == void ]] || return 1
     for f in "${ALSA_CONFS[@]}"; do
         [[ -e $SYSROOT/etc/alsa/conf.d/$f ]] || todo=1
     done
@@ -313,7 +325,7 @@ plan_alsa() {
 }
 
 # Drop-ins from the Void handbook that make pipewire start wireplumber and pipewire-pulse itself;
-# i3 starts both on its own, they would run twice
+# session-start starts both on its own, they would run twice
 pipewire_dupes() {
     local f
     PW_DUPES=()
@@ -344,7 +356,7 @@ run_alsa() {
 plan_shell() {
     case $LOGIN_SHELL in
         */bash) return 1 ;;
-        ""|/bin/sh|/usr/bin/sh|/bin/dash|/usr/bin/dash)
+        ""|/bin/sh|/usr/bin/sh|/bin/dash|/usr/bin/dash|/bin/ash)
             PLAN=("login shell ${LOGIN_SHELL:-unknown} -> /bin/bash (prompt, vi mode, start of X)") ;;
         *)  PLAN=("!login shell is $LOGIN_SHELL: the prompt, vi mode and the start of X need bash")
             return 1 ;;
@@ -354,7 +366,7 @@ plan_shell() {
 run_shell() {
     case $LOGIN_SHELL in
         */bash) say "the login shell is bash"; return 0 ;;
-        ""|/bin/sh|/usr/bin/sh|/bin/dash|/usr/bin/dash) ;;
+        ""|/bin/sh|/usr/bin/sh|/bin/dash|/usr/bin/dash|/bin/ash) ;;
         *) warn "Your login shell is $LOGIN_SHELL: the prompt, vi mode and the start of X need bash (chsh -s /bin/bash)"
            return 0 ;;
     esac
@@ -405,26 +417,47 @@ plan_firefox() {
         return 0
     fi
     p=${FF_PROFILE/#$HOME/\~}
-    [[ -L $FF_PROFILE/chrome/userChrome.css && -L $FF_PROFILE/chrome/userContent.css ]] ||
+    [[ ( -L $FF_PROFILE/chrome/userChrome.css && -L $FF_PROFILE/chrome/userContent.css ) ||
+       -e $FF_PROFILE/chrome/.dotfiles-copy ]] ||
         PLAN+=("link userChrome.css and userContent.css into $p/chrome")
     ff_pref_on || PLAN+=("enable them in $p/user.js")
     (( ${#PLAN[@]} ))
 }
 
+# The Firefox command: firefox, firefox-esr (Debian) -> FF_BIN
+ff_bin() {
+    FF_BIN=""
+    command -v firefox >/dev/null && { FF_BIN=firefox; return 0; }
+    command -v firefox-esr >/dev/null && { FF_BIN=firefox-esr; return 0; }
+    return 1
+}
+
 run_firefox() {
-    local tmp
-    command -v firefox >/dev/null || { say "firefox is not installed"; return 1; }
+    local tmp f
+    ff_bin || { say "firefox is not installed"; return 1; }
     if ! ff_profile; then
         detail "creating a profile"
         tmp=$(mktemp -d) || return 1
         # a headless screenshot creates the profile the normal way (installs.ini) and quits
-        timeout 120 firefox --headless --no-remote --screenshot "$tmp/shot.png" about:blank >/dev/null 2>&1
+        timeout 120 "$FF_BIN" --headless --no-remote --screenshot "$tmp/shot.png" about:blank >/dev/null 2>&1
         rm -rf "$tmp"
         ff_profile || { say "Firefox did not create a profile"; return 1; }
         say "created the profile $FF_PROFILE"
     fi
-    link "$DOTFILES/firefox/userChrome.css" "$FF_PROFILE/chrome/userChrome.css" || return 1
-    link "$DOTFILES/firefox/userContent.css" "$FF_PROFILE/chrome/userContent.css" || return 1
+    if [[ $FF_PROFILE == "$HOME/snap/"* ]]; then
+        # The snap may not read hidden directories of the home (~/.config/dotfiles): copies,
+        # which `dotfiles apply` keeps up to date (the marker file tells it which profile)
+        mkdir -p "$FF_PROFILE/chrome" || return 1
+        for f in userChrome.css userContent.css; do
+            [[ -L $FF_PROFILE/chrome/$f ]] && rm -f "$FF_PROFILE/chrome/$f"
+            install -m644 "$DOTFILES/firefox/$f" "$FF_PROFILE/chrome/$f" || return 1
+        done
+        : > "$FF_PROFILE/chrome/.dotfiles-copy"
+        say "copied userChrome.css and userContent.css into $FF_PROFILE/chrome (snap)"
+    else
+        link "$DOTFILES/firefox/userChrome.css" "$FF_PROFILE/chrome/userChrome.css" || return 1
+        link "$DOTFILES/firefox/userContent.css" "$FF_PROFILE/chrome/userContent.css" || return 1
+    fi
     if ! ff_pref_on; then
         printf '%s\n' "$FF_PREF" >> "$FF_PROFILE/user.js" || return 1
         say "user.js: $FF_PREF"
@@ -483,6 +516,8 @@ mpris_loaded() {
 
 plan_mpris() {
     PLAN=()
+    # the other distributions install the plugin where mpv loads it (/etc/mpv/scripts)
+    [[ $DISTRO == void ]] || return 1
     mpris_loaded && return 1
     PLAN=("link $MPRIS_SO into ${MPRIS_LINK/#$HOME/\~}: mpv shows up in the music capsule")
 }
@@ -501,48 +536,61 @@ run_mpris() {
 
 plan_theme() {
     PLAN=("generate ~/.config/dotfiles from dotfiles.conf, draw the cursor theme into ~/.icons/dotfiles")
-    wallpaper_path
-    [[ -e $WALLPAPER ]] || PLAN+=("plain wallpaper in the background color at ${WALLPAPER/#$HOME/\~} (replace it with yours)")
+    keyboard_detect && PLAN+=("keyboard layout $KB_LAYOUT (console keymap in $KB_FROM) into ~/.config/dotfiles.conf")
     return 0
 }
 
-# The wallpaper from dotfiles.conf -> WALLPAPER
-wallpaper_path() {
-    local k v
-    WALLPAPER=$HOME/images/wallpaper
-    while IFS='=' read -r k v; do
-        k=${k//[[:space:]]/}
-        [[ $k == wallpaper ]] || continue
-        v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
-        [[ -n $v ]] && WALLPAPER=${v/#\~/$HOME}
-    done < "$DOTFILES/dotfiles.conf"
+# The X keyboard layout from the console keymap -> KB_LAYOUT, KB_FROM. Only when nothing sets
+# one: dotfiles.conf (the user's file), an Xorg config (localectl writes one), or Debian's
+# /etc/default/keyboard (X reads it through udev).
+keyboard_detect() {
+    local f v km=""
+    KB_LAYOUT="" KB_FROM=""
+    grep -qsE '^[[:space:]]*keyboard_layout[[:space:]]*=' "$CONFIG/dotfiles.conf" && return 1
+    grep -qsiE '^[[:space:]]*Option[[:space:]]+"XkbLayout"' "$SYSROOT"/etc/X11/xorg.conf.d/*.conf && return 1
+    [[ $DISTRO == debian || $DISTRO == ubuntu ]] && [[ -r $SYSROOT/etc/default/keyboard ]] && return 1
+    # Void: rc.conf; systemd: vconsole.conf; Alpine: loadkmaps (a path to the .bmap.gz)
+    for f in /etc/rc.conf /etc/vconsole.conf /etc/conf.d/loadkmaps; do
+        [[ -r $SYSROOT$f ]] || continue
+        v=$(sed -n "s/^[[:space:]]*KEYMAP=[\"']\{0,1\}\([^\"' ]*\).*/\1/p" "$SYSROOT$f" | tail -1)
+        [[ -n $v ]] && { km=$v; KB_FROM=$f; break; }
+    done
+    [[ -n $km ]] || return 1
+    km=${km##*/}; km=${km%%.*}
+    keymap_to_xkb "$km"
+}
+
+# Console keymap name $1 (de-latin1-nodeadkeys, uk, fr_CH, ...) -> KB_LAYOUT (de(nodeadkeys), gb, ch(fr))
+keymap_to_xkb() {
+    local base=${1%%-*} variant=""
+    [[ $1 == *nodeadkeys* ]] && variant=nodeadkeys
+    case $base in
+        uk) base=gb ;;
+        sg|de_CH) base=ch ;;
+        fr_CH) base=ch variant=fr ;;
+        dvorak) base=us variant=dvorak ;;
+        colemak) base=us variant=colemak ;;
+        jp106) base=jp ;;
+        trq|trf) base=tr ;;
+        pl[0-9]) base=pl ;;
+        cf) base=ca ;;
+        br) base=br ;;
+    esac
+    [[ $base =~ ^[a-z]{2,3}$ ]] || return 1
+    # X's default anyway
+    [[ $base == us && -z $variant ]] && return 1
+    KB_LAYOUT=$base${variant:+($variant)}
 }
 
 run_theme() {
-    local bg='#191c1c'
     command -v python3 >/dev/null || { say "python3 is not installed (core packages)"; return 1; }
-    mkdir -p "$HOME/images/screenshots"
+    if keyboard_detect; then
+        "$DOTFILES/scripts/dotfiles" set keyboard_layout "$KB_LAYOUT" &&
+            say "keyboard layout $KB_LAYOUT (from the console keymap in $KB_FROM)"
+    fi
     detail "dotfiles apply"
     "$DOTFILES/scripts/dotfiles" apply --no-reload || return 1
-    wallpaper_path
-    if [[ ! -e $WALLPAPER ]]; then
-        bg=$(. "$CONFIG/dotfiles/theme.sh" 2>/dev/null; printf '%s' "${DF_BG:-#191c1c}")
-        mkdir -p "$(dirname "$WALLPAPER")" &&
-            python3 - "$WALLPAPER" "$bg" <<'EOF' || return 1
-# a PNG in one color (feh stretches it over the screen)
-import struct, sys, zlib
-path, rgb = sys.argv[1], bytes.fromhex(sys.argv[2].lstrip("#"))
-w = h = 64
-raw = b"".join(b"\0" + rgb * w for _ in range(h))
-def chunk(kind, data):
-    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
-with open(path, "wb") as f:
-    f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
-EOF
-        say "wallpaper placeholder: $WALLPAPER"
-        note "Wallpaper: ${WALLPAPER/#$HOME/\~} is a plain placeholder, put your own picture there."
-    fi
+    note "Settings: your own go into ~/.config/dotfiles.conf (dotfiles edit). The defaults with every key: $DOTFILES/dotfiles.conf."
 }
 
 # ── Neovim plugins ────────────────────────────────────────────────────────────────
@@ -563,14 +611,14 @@ run_nvim() {
     detail "installing the plugins (lazy.nvim)"
     nvim_headless "+Lazy! install"
     rc=$?
-    [[ -s $saved ]] && ! cmp -s "$saved" "$lock" && cat "$saved" > "$lock"
+    [[ -s $saved ]] && ! same_file "$saved" "$lock" && cat "$saved" > "$lock"
     # 2. Every plugin to its commit in lazy-lock.json
     if (( rc == 0 )); then
         detail "checking out the versions of lazy-lock.json"
         nvim_headless "+Lazy! restore"
         rc=$?
     fi
-    if [[ -s $saved ]] && ! cmp -s "$saved" "$lock"; then
+    if [[ -s $saved ]] && ! same_file "$saved" "$lock"; then
         cat "$saved" > "$lock"
         say "lazy-lock.json put back to the version of the repository"
     fi
@@ -624,7 +672,18 @@ EOF
 plan_network() {
     detect_net
     PLAN=()
+    # no init system to talk to (a container)
+    [[ -n $INIT && $INIT != none ]] || return 1
     (( NM_ON && ${#NET_OLD[@]} == 0 )) && return 1
+    if [[ $DISTRO != void ]]; then
+        (( NM_ON )) && return 1
+        if (( ${#NET_OLD[@]} )); then
+            PLAN=("!${NET_OLD[*]} manages the network: NetworkManager is installed but stays off (a note at the end says how to switch)")
+        else
+            PLAN=("enable NetworkManager (no other service manages the network)")
+        fi
+        return 0
+    fi
     (( NM_ON )) || PLAN+=("enable NetworkManager")
     (( ${#NET_OLD[@]} )) && PLAN+=("disable ${NET_OLD[*]} (last step: the connection drops for a few seconds)")
     (( ${#WPA_CONFS[@]} )) && PLAN+=("copy the WiFi networks of wpa_supplicant to NetworkManager (keys stay root-only)")
@@ -634,30 +693,48 @@ plan_network() {
 
 run_network() {
     local s kind ssid reason state i
-    [[ -d $SV_DIR/NetworkManager ]] || { say "NetworkManager is not installed"; return 1; }
+    [[ -n $INIT && $INIT != none ]] || { say "no init system to enable services with: skipped"; return 0; }
+    svc_name networkmanager
+    local nm=$_SN
+    svc_exists "$nm" || { say "NetworkManager is not installed"; return 1; }
     detect_net
     if (( NM_ON && ${#NET_OLD[@]} == 0 )); then say "NetworkManager is active"; return 0; fi
-    if (( ${#WPA_CONFS[@]} )); then
-        detail "copying the WiFi networks"
-        while IFS=$'\t' read -r kind ssid reason; do
-            case $kind in
-                migrated) say "WiFi network copied: $ssid"; note "WiFi: \"$ssid\" moved to NetworkManager." ;;
-                skipped)  say "WiFi network not copied: $ssid ($reason)"; warn "WiFi: \"$ssid\" not copied: $reason." ;;
-                *)        say "$kind${ssid:+ $ssid}${reason:+ $reason}" ;;
-            esac
-        done < <(as_root python3 "$DOTFILES/install/nm-migrate" --root "${SYSROOT:-/}" 2>&1)
-    fi
-    for s in "${NET_OLD[@]}"; do
-        detail "stopping $s"
-        as_root sv down "$RUNSV_DIR/$s" >/dev/null 2>&1
-        as_root rm "$RUNSV_DIR/$s" || return 1
-        say "disabled $s"
-    done
-    if (( ! NM_ON )); then
-        # dhcpcd's hook starts its own wpa_supplicant; NetworkManager starts one over D-Bus
-        as_root pkill -x wpa_supplicant >/dev/null 2>&1
-        as_root ln -s "$SV_DIR/NetworkManager" "$RUNSV_DIR/" || return 1
+    if [[ $DISTRO != void ]]; then
+        if (( NM_ON )); then say "NetworkManager is active"; return 0; fi
+        if (( ${#NET_OLD[@]} )); then
+            say "${NET_OLD[*]} manages the network: NetworkManager stays off"
+            if [[ $INIT == systemd ]]; then
+                note "Network: ${NET_OLD[*]} manages the network, so NetworkManager was installed but not switched on (the WiFi, IP and VPN capsules need it). To switch: sudo systemctl disable --now ${NET_OLD[*]}; sudo systemctl enable --now NetworkManager (have the WiFi password ready)."
+            else
+                note "Network: ${NET_OLD[*]} manages the network, so NetworkManager was installed but not switched on (the WiFi, IP and VPN capsules need it). To switch: sudo rc-update del <service> for each of them, then sudo rc-update add networkmanager and reboot."
+            fi
+            return 0
+        fi
+        svc_enable "$nm" || return 1
         say "enabled NetworkManager"
+    else
+        if (( ${#WPA_CONFS[@]} )); then
+            detail "copying the WiFi networks"
+            while IFS=$'\t' read -r kind ssid reason; do
+                case $kind in
+                    migrated) say "WiFi network copied: $ssid"; note "WiFi: \"$ssid\" moved to NetworkManager." ;;
+                    skipped)  say "WiFi network not copied: $ssid ($reason)"; warn "WiFi: \"$ssid\" not copied: $reason." ;;
+                    *)        say "$kind${ssid:+ $ssid}${reason:+ $reason}" ;;
+                esac
+            done < <(as_root python3 "$DOTFILES/install/nm-migrate" --root "${SYSROOT:-/}" 2>&1)
+        fi
+        for s in "${NET_OLD[@]}"; do
+            detail "stopping $s"
+            as_root sv down "$RUNSV_DIR/$s" >/dev/null 2>&1
+            as_root rm "$RUNSV_DIR/$s" || return 1
+            say "disabled $s"
+        done
+        if (( ! NM_ON )); then
+            # dhcpcd's hook starts its own wpa_supplicant; NetworkManager starts one over D-Bus
+            as_root pkill -x wpa_supplicant >/dev/null 2>&1
+            svc_enable "$nm" || return 1
+            say "enabled NetworkManager"
+        fi
     fi
     detail "waiting for a connection"
     for (( i = 0; i < 40; i++ )); do
@@ -756,6 +833,9 @@ grub_regen() {
     detail "making the boot menu (grub-mkconfig)"
     if command -v grub-mkconfig >/dev/null; then
         GRUB_OUT=$(as_root grub-mkconfig -o "$SYSROOT$cfg" 2>&1); rc=$?
+    elif command -v grub2-mkconfig >/dev/null; then
+        # Fedora: grub2 names; the EFI grub.cfg only points to this one
+        GRUB_OUT=$(as_root grub2-mkconfig -o "$SYSROOT/boot/grub2/grub.cfg" 2>&1); rc=$?
     elif command -v update-grub >/dev/null; then
         GRUB_OUT=$(as_root update-grub 2>&1); rc=$?
     else

@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Mouse and touchpad settings from dotfiles.conf, set with xinput on every libinput device:
+#   mouse_acceleration  mouse_speed  touchpad_tap  touchpad_natural_scroll
+#   touchpad_acceleration  touchpad_speed            (auto = leave the setting alone)
+# The same as `xinput set-prop <id> "libinput Accel Profile Enabled" 0 1 0` and
+# `xinput set-prop <id> "libinput Accel Speed" 0` by hand, for every device, also for the
+# ones plugged in later. A user setting: no root, no file in /etc/X11.
+#
+# Usage: input-setup          set it on every device now (`dotfiles apply` after a change)
+#        input-setup watch    now and whenever an input device appears (i3 starts this once)
+set -u
+
+DF_MOUSE_ACCELERATION=flat DF_MOUSE_SPEED=0.00 DF_TOUCHPAD_TAP=yes
+DF_TOUCHPAD_NATURAL_SCROLL=auto DF_TOUCHPAD_ACCELERATION=auto DF_TOUCHPAD_SPEED=auto
+load_theme() {
+    # shellcheck source=/dev/null
+    . "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+}
+
+[[ -n ${DISPLAY-} ]] && command -v xinput >/dev/null || exit 0
+
+# prop_values PROPS NAME -> the values of property NAME ("0, 1, 0" -> "0 1 0"), 1 if missing
+prop_values() {
+    local line
+    line=$(grep -m1 -F "	$2 (" <<< "$1") || return 1
+    line=${line#*:}
+    printf '%s\n' "${line//,/}"
+}
+
+# profile ID PROPS flat|adaptive: one 1 at the profile's place, as many values as the device has
+# (adaptive, flat[, custom]: libinput 1.23 added the third)
+set_profile() {
+    local cur n i want=() pos
+    cur=$(prop_values "$2" "libinput Accel Profile Enabled") || return 0
+    read -ra cur <<< "$cur"
+    n=${#cur[@]}
+    (( n >= 2 )) || return 0
+    [[ $3 == adaptive ]] && pos=0 || pos=1
+    for (( i = 0; i < n; i++ )); do want+=($(( i == pos ))); done
+    [[ "${cur[*]}" == "${want[*]}" ]] || xinput set-prop "$1" "libinput Accel Profile Enabled" "${want[@]}"
+}
+
+# set_value ID PROPS NAME VALUE (only if the device has it and it differs)
+set_value() {
+    local cur
+    cur=$(prop_values "$2" "$3") || return 0
+    cur=${cur//[[:space:]]/}
+    # Accel Speed is printed as 0.000000
+    if [[ $4 == *.* && $cur =~ ^-?[0-9.]+$ ]]; then
+        awk -v a="$cur" -v b="$4" 'BEGIN { exit !(a - b < 0.0001 && b - a < 0.0001) }' && return 0
+    elif [[ $cur == "$4" ]]; then
+        return 0
+    fi
+    xinput set-prop "$1" "$3" "$4"
+}
+
+flag() { [[ $1 == yes ]] && echo 1 || echo 0; }
+
+apply_all() {
+    local id props
+    load_theme
+    for id in $(xinput list --id-only 2>/dev/null); do
+        [[ $id =~ ^[0-9]+$ ]] || continue
+        props=$(xinput list-props "$id" 2>/dev/null) || continue
+        # libinput pointers only (keyboards and the virtual core devices have no Accel Speed)
+        [[ $props == *"	libinput Accel Speed ("* ]] || continue
+        if [[ $props == *"	libinput Tapping Enabled ("* ]]; then
+            # a touchpad (only touchpads can tap)
+            [[ $DF_TOUCHPAD_TAP != auto ]] &&
+                set_value "$id" "$props" "libinput Tapping Enabled" "$(flag "$DF_TOUCHPAD_TAP")"
+            [[ $DF_TOUCHPAD_NATURAL_SCROLL != auto ]] &&
+                set_value "$id" "$props" "libinput Natural Scrolling Enabled" "$(flag "$DF_TOUCHPAD_NATURAL_SCROLL")"
+            [[ $DF_TOUCHPAD_ACCELERATION != auto ]] && set_profile "$id" "$props" "$DF_TOUCHPAD_ACCELERATION"
+            [[ $DF_TOUCHPAD_SPEED =~ ^-?[0-9]+\.[0-9]+$ ]] &&
+                set_value "$id" "$props" "libinput Accel Speed" "$DF_TOUCHPAD_SPEED"
+        else
+            [[ $DF_MOUSE_ACCELERATION != auto ]] && set_profile "$id" "$props" "$DF_MOUSE_ACCELERATION"
+            [[ $DF_MOUSE_SPEED =~ ^-?[0-9]+\.[0-9]+$ ]] &&
+                set_value "$id" "$props" "libinput Accel Speed" "$DF_MOUSE_SPEED"
+        fi
+    done 2>/dev/null
+}
+
+watch() {
+    local rt line src
+    # one watcher per display
+    rt=${XDG_RUNTIME_DIR:-}
+    if [[ -n $rt && -d $rt && -O $rt ]]; then
+        exec 9>>"$rt/input-setup${DISPLAY//[^A-Za-z0-9]/_}.lock"
+        flock -n 9 || exit 0
+    fi
+    apply_all
+    command -v udevadm >/dev/null || exit 0
+    exec {src}< <(exec udevadm monitor --udev --subsystem-match=input 2>/dev/null)
+    mon=$!
+    trap 'kill "$mon" 2>/dev/null' EXIT
+    trap 'exit 0' TERM INT HUP
+    while true; do
+        if IFS= read -r -t 60 line <&"$src"; then
+            [[ $line == *" add "* ]] || continue
+            # a device sends several events, and X adds it after udev: wait until it is quiet
+            while IFS= read -r -t 1 line <&"$src"; do :; done
+            sleep 0.5
+            apply_all
+        elif (( $? <= 128 )); then
+            exit 1      # udevadm ended
+        fi
+        # the session ended (X is gone)
+        xinput list --id-only >/dev/null 2>&1 || exit 0
+    done
+}
+
+case "${1:-}" in
+    watch) watch ;;
+    "") apply_all ;;
+    *) echo "usage: input-setup [watch]" >&2; exit 2 ;;
+esac

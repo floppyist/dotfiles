@@ -60,19 +60,6 @@ human_time() {
 
 # ── Packages ──────────────────────────────────────────────────────────────────────
 
-declare -A PKG_HAVE=()
-
-pkg_scan() {
-    PKG_HAVE=()
-    local st pv _
-    (( HAVE_XBPS )) || return 0
-    while read -r st pv _; do
-        [[ $st == ii ]] && PKG_HAVE[${pv%-*}]=1
-    done < <(xbps-query -l 2>/dev/null)
-}
-
-pkg_have() { [[ -n ${PKG_HAVE[$1]-} ]]; }
-
 # Dry run of a transaction (no root): TX_COUNT packages, TX_DL / TX_INST bytes, TX_PKGS names.
 # Packages the repositories do not have are dropped and listed in TX_UNKNOWN.
 xbps_dry() {
@@ -134,17 +121,9 @@ xbps_install() {
 
 detect() {
     local k v d class vendor drv name line l
-    OS_ID="" OS_NAME=Linux
-    if [[ -r /etc/os-release ]]; then
-        while IFS='=' read -r k v; do
-            v=${v#\"}; v=${v%\"}
-            case $k in ID) OS_ID=$v ;; NAME) OS_NAME=$v ;; esac
-        done < /etc/os-release
-    fi
-    HAVE_XBPS=0
-    command -v xbps-install >/dev/null && command -v xbps-query >/dev/null && HAVE_XBPS=1
+    distro_detect
     ARCH=$(xbps-uhelper arch 2>/dev/null) || ARCH=$(uname -m)
-    LIBC=glibc; [[ $ARCH == *-musl ]] && LIBC=musl
+    LIBC=glibc; [[ $ARCH == *-musl || $DISTRO == alpine ]] && LIBC=musl
     USER_NAME=$(id -un)
     HOST_NAME=${HOSTNAME:-$(uname -n)}
     LOGIN_SHELL=""
@@ -177,8 +156,9 @@ detect() {
     done
     GPU_LIST=""
     (( ${#GPU_NAMES[@]} )) && { printf -v GPU_LIST '%s, ' "${GPU_NAMES[@]}"; GPU_LIST=${GPU_LIST%, }; }
+    # the proprietary drivers only where the installer knows their packages (Void)
     NVIDIA_DRIVERS=(nouveau)
-    [[ $LIBC == glibc && $ARCH == x86_64* ]] && NVIDIA_DRIVERS+=(nvidia nvidia580 nvidia470)
+    [[ $DISTRO == void && $LIBC == glibc && $ARCH == x86_64* ]] && NVIDIA_DRIVERS+=(nvidia nvidia580 nvidia470)
     NVIDIA_DRIVER=${NVIDIA_DRIVER:-}
 
     BACKLIGHT="" BATTERY="" BT_ADAPTER="" WIFI_IFS=()
@@ -187,10 +167,7 @@ detect() {
     for d in /sys/class/bluetooth/hci*; do [[ -e $d ]] && { BT_ADAPTER=${d##*/}; break; }; done
     for d in /sys/class/net/*/wireless; do [[ -e $d ]] && { l=${d%/wireless}; WIFI_IFS+=("${l##*/}"); }; done
 
-    DM=""
-    for k in lightdm sddm gdm lxdm slim emptty ly xdm greetd nodm; do
-        [[ -e $RUNSV_DIR/$k ]] && { DM=$k; break; }
-    done
+    detect_dm
     IN_X=0; [[ -n ${DISPLAY-} ]] && IN_X=1
     detect_net
     detect_boot
@@ -243,18 +220,11 @@ detect_other_os() {
     fi
 }
 
-# Network services that NetworkManager replaces (NET_OLD) and whether it is enabled (NM_ON)
-detect_net() {
-    local p
-    NET_OLD=() NM_ON=0 WPA_CONFS=()
-    for p in "$RUNSV_DIR"/dhcpcd "$RUNSV_DIR"/dhcpcd-* "$RUNSV_DIR"/wpa_supplicant "$RUNSV_DIR"/iwd \
-             "$RUNSV_DIR"/connmand; do
-        [[ -e $p || -L $p ]] && NET_OLD+=("${p##*/}")
-    done
-    [[ -e $RUNSV_DIR/NetworkManager || -L $RUNSV_DIR/NetworkManager ]] && NM_ON=1
-    for p in "$SYSROOT"/etc/wpa_supplicant/wpa_supplicant*.conf; do
-        [[ -f $p ]] && WPA_CONFS+=("$p")
-    done
+# Two files have the same content (cmp is not in every base system)
+same_file() {
+    [[ -f $1 && -f $2 ]] || return 1
+    if command -v cmp >/dev/null; then cmp -s -- "$1" "$2"; return; fi
+    [[ $(sha256sum < "$1") == "$(sha256sum < "$2")" ]]
 }
 
 in_group() {
@@ -262,8 +232,6 @@ in_group() {
     for g in $(id -nG "$USER_NAME" 2>/dev/null); do [[ $g == "$1" ]] && return 0; done
     return 1
 }
-
-service_on() { [[ -e $RUNSV_DIR/$1 || -L $RUNSV_DIR/$1 ]]; }
 
 # Both the regular and the bold JetBrainsMono Nerd Font are known to fontconfig
 font_ok() {
@@ -277,7 +245,8 @@ font_ok() {
 ff_profile() {
     local base line sec path def first="" inst="" dflt=""
     FF_PROFILE=""
-    for base in "$CONFIG/mozilla/firefox" "$HOME/.mozilla/firefox"; do
+    # the snap (Ubuntu) keeps its profiles inside ~/snap
+    for base in "$CONFIG/mozilla/firefox" "$HOME/.mozilla/firefox" "$HOME/snap/firefox/common/.mozilla/firefox"; do
         [[ -f $base/profiles.ini ]] || continue
         sec="" path="" def=0
         while IFS= read -r line || [[ -n $line ]]; do

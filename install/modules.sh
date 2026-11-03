@@ -10,18 +10,20 @@ M_TITLE[core]="Desktop"
 M_REQ[core]=1
 M_DESC[core]="The desktop itself: i3, Polybar, Rofi, Dunst, picom, Alacritty, the lock screen and the \
 screensaver, the shell (bash, fzf, tmux), the GTK theme, the mouse cursor and the JetBrainsMono Nerd \
-Font. Turns mouse acceleration off (flat profile). Links every file of this repository into place and generates the theme from dotfiles.conf."
-M_PKGS[core]="xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap
+Font. Links every file of this repository into place and generates the theme from dotfiles.conf \
+(mouse and touchpad settings are in there too). What the distribution does not have in a recent \
+enough version (the lock screen, fzf, ...) comes from its project, version and checksum pinned."
+M_PKGS[core]="xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap xinput
  i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot
  xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome
  python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme
  fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash"
-M_STEPS[core]="font services pointer shell links theme"
+M_STEPS[core]="upstream font services pointer shell links theme"
 
 M_TITLE[system]="System update"
-M_DESC[system]="Updates xbps and every installed package before anything new is installed. Void is a \
-rolling release: new packages are built against the current repository, installing them into an \
-old system is what breaks."
+M_DESC[system]="Updates the package manager and every installed package before anything new is \
+installed: new packages are built against the current repository, installing them into an old \
+system is what breaks (on rolling releases like Void and Arch)."
 M_STEPS[system]="update"
 
 M_TITLE[graphics]="Graphics drivers"
@@ -33,16 +35,17 @@ tearing."
 M_STEPS[graphics]="swcursor"
 
 M_TITLE[audio]="Audio"
-M_DESC[audio]="PipeWire with WirePlumber and its PulseAudio server (i3 starts all three), ALSA \
-programs routed through PipeWire, pulsemixer. The volume keys and capsule and the music \
+M_DESC[audio]="PipeWire with WirePlumber and its PulseAudio server (started with the session \
+unless the system does it), ALSA programs routed through PipeWire, pulsemixer. The volume keys and capsule and the music \
 screensaver need it."
 M_PKGS[audio]="pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer"
 M_STEPS[audio]="alsa"
 
 M_TITLE[network]="Network"
 M_DESC[network]="NetworkManager with the OpenVPN and Cisco/FRITZ!Box plugins and nm-connection-editor: \
-the WiFi, IP and VPN capsules and menus need it. As the very last step it replaces dhcpcd and \
-wpa_supplicant and takes over their WiFi networks."
+the WiFi, IP and VPN capsules and menus need it. As the very last step it is switched on. On Void it \
+replaces dhcpcd and wpa_supplicant and takes over their WiFi networks; elsewhere only when no other \
+service manages the network (otherwise you get a note what to switch off)."
 M_PKGS[network]="NetworkManager libnm NetworkManager-openvpn NetworkManager-vpnc network-manager-applet"
 M_STEPS[network]="network"
 
@@ -79,8 +82,8 @@ M_STEPS[mail]="mail"
 
 M_TITLE[music]="Music"
 M_DESC[music]="mpv and mpvim, the terminal player with album covers (chafa, Pillow, ffmpeg), and \
-playerctl for the music capsule. Links the mpv-mpris plugin into ~/.config/mpv/scripts (Void \
-installs it where mpv does not look), so the capsule shows what mpv plays."
+playerctl for the music capsule. On Void it links the mpv-mpris plugin into ~/.config/mpv/scripts \
+(Void installs it where mpv does not look), so the capsule shows what mpv plays."
 M_PKGS[music]="mpv mpv-mpris playerctl ffmpeg chafa python3-Pillow"
 M_STEPS[music]="mpris"
 
@@ -112,7 +115,7 @@ M_DESC[kernel]="Experimental. kernelforge: a Linux kernel for this machine only.
 running kernel, keeps the modules that are loaded now, builds it from the signed source of kernel.org \
 (you choose the version) and installs it next to the running one: modules, initramfs, boot entry. \
 Nothing that is installed gets replaced. It becomes the default entry of the boot menu (the others stay). \
-Takes 10 to 40 minutes and needs about 8 GB; not part of the complete installation. Plug in the devices you use first: a module that is not loaded is left out."
+Takes 10 to 40 minutes and needs about 8 GB; not part of the complete installation. Plug in the devices you use first: a module that is not loaded is left out. Void Linux only."
 M_PKGS[kernel]="base-devel flex bison bc openssl-devel elfutils-devel zlib-devel pahole perl cpio kmod gnupg xz curl python3 dracut"
 M_STEPS[kernel]="kernel"
 
@@ -169,6 +172,7 @@ mod_pkgs() {
         (( GPU_AMDGPU )) && MP+=(xf86-video-amdgpu)
         (( GPU_RADEON )) && MP+=(xf86-video-ati)
         if (( GPU_NVIDIA )); then
+            [[ $DISTRO == void ]] || NVIDIA_DRIVER=nouveau
             case ${NVIDIA_DRIVER:-nouveau} in
                 nouveau) MP+=(vulkan-loader mesa-vulkan-nouveau) ;;
                 *)       MP+=(void-repo-nonfree linux-headers "$NVIDIA_DRIVER") ;;
@@ -179,6 +183,8 @@ mod_pkgs() {
     # shellcheck disable=SC2206
     local -; set -f
     MP=(${M_PKGS[$1]-})
+    # tools Void has in its base system (procps, util-linux, ...)
+    [[ $1 == core && -n $DISTRO && $DISTRO != void ]] && MP+=(base-tools)
 }
 
 nvidia_label() {
@@ -192,7 +198,12 @@ nvidia_label() {
 
 # Defaults: everything, except what this machine has no use for
 mods_default() {
-    local m
+    local m keep=()
+    # the custom kernel builds and boots with Void's tools (dracut, xbps paths)
+    if [[ $DISTRO != void ]]; then
+        for m in "${MODULES[@]}"; do [[ $m == kernel ]] || keep+=("$m"); done
+        MODULES=("${keep[@]}")
+    fi
     for m in "${MODULES[@]}"; do SEL[$m]=1; M_OFF[$m]=""; done
     [[ -z $BT_ADAPTER ]] && { SEL[bluetooth]=0; M_OFF[bluetooth]="no adapter"; }
     [[ -z $BACKLIGHT ]]  && { SEL[laptop]=0;    M_OFF[laptop]="no backlight"; }
@@ -215,11 +226,21 @@ mods_default() {
 
 # Per module: missing packages and whether a step has something to do (for the module list)
 mods_scan() {
-    local m p n st
+    local m p q n st
     for m in "${MODULES[@]}"; do
         mod_pkgs "$m"
         n=0
-        (( HAVE_XBPS )) && for p in "${MP[@]}"; do pkg_have "$p" || (( n++ )); done
+        if (( HAVE_PM )); then
+            for p in "${MP[@]}"; do
+                pkg_map "$p"
+                for q in "${_PM[@]}"; do
+                    case $q in
+                        @*) up_have "${q#@*:}" || (( n++ )) ;;
+                        *)  pkg_have "$q" || (( n++ )) ;;
+                    esac
+                done
+            done
+        fi
         M_MISSING[$m]=$n
         M_WORK[$m]=0
         for st in ${M_STEPS[$m]-}; do
@@ -230,21 +251,34 @@ mods_scan() {
 
 # ── The plan of the selection ─────────────────────────────────────────────────────
 
-# Packages of the selected modules -> SP (all), SM (missing), in module order
+# Packages of the selected modules, with this distribution's names -> SP (all), SM (missing, with
+# the build dependencies of SU), SU (upstream programs: install/upstream.sh), in module order
 sel_pkgs() {
-    local m p
+    local m p q
     local -A seen=()
-    SP=() SM=()
-    (( HAVE_XBPS )) || return 0
+    SP=() SM=() SU=()
+    (( HAVE_PM )) || return 0
     for m in "${MODULES[@]}"; do
         (( ${SEL[$m]:-0} )) || continue
+        # the kernel module builds with Void's tools only
+        [[ $m == kernel && $DISTRO != void ]] && continue
         mod_pkgs "$m"
         for p in "${MP[@]}"; do
-            [[ -n ${seen[$p]-} ]] && continue
-            seen[$p]=1
-            SP+=("$p")
-            pkg_have "$p" || SM+=("$p")
+            pkg_map "$p"
+            for q in "${_PM[@]}"; do
+                [[ -n ${seen[$q]-} ]] && continue
+                seen[$q]=1
+                if [[ $q == @* ]]; then SU+=("${q#@*:}"); continue; fi
+                SP+=("$q")
+                pkg_have "$q" || SM+=("$q")
+            done
         done
+    done
+    up_deps "${SU[@]}"
+    for q in "${_UD[@]}"; do
+        [[ -n ${seen[$q]-} ]] && continue
+        seen[$q]=1
+        SM+=("$q")
     done
 }
 
@@ -254,7 +288,11 @@ sel_steps() {
     SS=()
     for st in "${STEP_ORDER[@]}"; do
         if [[ $st == packages ]]; then
-            (( HAVE_XBPS && ${#SM[@]} )) && SS+=(packages)
+            (( HAVE_PM )) && { (( ${#SM[@]} )) || apk_community_off; } && SS+=(packages)
+            continue
+        fi
+        if [[ $st == upstream ]]; then
+            (( HAVE_PM )) && plan_step upstream && SS+=(upstream)
             continue
         fi
         [[ $st == othersys && -z $DUAL_TARGET ]] && continue
@@ -263,8 +301,8 @@ sel_steps() {
             [[ " ${M_STEPS[$m]-} " == *" $st "* ]] && { SS+=("$st"); break; }
         done
     done
-    # without xbps (not Void) only the steps in the home directory are possible
-    if (( ! HAVE_XBPS )); then
+    # without a known package manager only the steps in the home directory are possible
+    if (( ! HAVE_PM )); then
         local keep=()
         for st in "${SS[@]}"; do (( ${STEP_ROOT[$st]:-0} )) || keep+=("$st"); done
         SS=("${keep[@]}")

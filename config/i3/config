@@ -19,16 +19,17 @@ default_border pixel 0
 
 # ── Autostart ──────────────────────────────────────────────────────────────────
 # Session setup (xrdb, keyboard, cursor) lives in ~/.xinitrc
-exec --no-startup-id /usr/libexec/polkit-gnome-authentication-agent-1
+# polkit agent and PipeWire, unless the system starts them (scripts/session-start)
+exec --no-startup-id ~/.local/bin/session-start
 exec --no-startup-id dunst
-exec --no-startup-id pipewire
-exec --no-startup-id pipewire-pulse
-exec --no-startup-id wireplumber
 exec --no-startup-id xbanish
 # Monitor hotplug: the saved layout for the connected monitors (or extend), then the scale
 exec --no-startup-id ~/.local/bin/displays watch
-# exec_always: i3 restart (Alt+Shift+r) brings back a crashed compositor; a second instance exits
-exec_always --no-startup-id picom -b
+# Mouse and touchpad settings from dotfiles.conf, also for devices plugged in later
+exec --no-startup-id ~/.local/bin/input-setup watch
+# exec_always: i3 restart (Alt+Shift+r) brings back a crashed compositor; a running one stays
+# (dotfiles.conf `compositor`: the backend, or off)
+exec_always --no-startup-id ~/.local/bin/compositor
 exec_always --no-startup-id ~/.config/polybar/launch.sh
 
 # ── Screensaver and lock ───────────────────────────────────────────────────────
@@ -92,8 +93,7 @@ bindsym $mod+Shift+5 move container to workspace number $ws5
 bindsym Mod4+l exec --no-startup-id ~/.local/bin/lock.sh
 bindsym Mod4+p exec --no-startup-id ~/.local/bin/display-select.sh
 bindsym Mod4+Shift+p exec --no-startup-id ~/.local/bin/displays
-# The function key that sends XF86Display is used as the Bluetooth key on this machine
-bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
+# XF86Display: dotfiles.conf `display_key` (templates/i3.conf)
 bindsym Mod4+b exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh
 bindsym Mod4+v exec --no-startup-id ~/.local/bin/vpn
 

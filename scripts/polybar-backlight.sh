@@ -3,15 +3,25 @@
 # Usage: polybar-backlight.sh [up|down]   (no argument: print the current percentage)
 set -u
 
-# First available backlight device (e.g. amdgpu_bl0, intel_backlight)
-shopt -s nullglob
-BACKLIGHTS=(/sys/class/backlight/*)
-SYSFS="${BACKLIGHTS[0]:-}"
-[[ -d "$SYSFS" ]] || { echo "n/a"; exit 0; }
+# The device dotfiles.conf `backlight` picked (`dotfiles apply`: firmware, then platform, then
+# raw interface). Before the first apply: the same choice made here.
+DF_BACKLIGHT_DEVICE=""
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+if [[ -z $DF_BACKLIGHT_DEVICE && ${DF_BACKLIGHT:-auto} == auto ]]; then
+    for want in firmware platform raw; do
+        for d in /sys/class/backlight/*; do
+            t=""
+            read -r t 2>/dev/null < "$d/type" && [[ $t == "$want" ]] && { DF_BACKLIGHT_DEVICE=${d##*/}; break 2; }
+        done
+    done
+fi
+SYSFS=/sys/class/backlight/$DF_BACKLIGHT_DEVICE
+[[ -n $DF_BACKLIGHT_DEVICE && $DF_BACKLIGHT_DEVICE != */* && -d $SYSFS ]] || { echo ""; exit 0; }
 
 read -r CURR < "$SYSFS/brightness"
 read -r MAX < "$SYSFS/max_brightness"
-(( MAX > 0 )) || { echo "n/a"; exit 0; }
+[[ $CURR =~ ^[0-9]+$ && $MAX =~ ^[0-9]+$ ]] && (( MAX > 0 )) || { echo ""; exit 0; }
 
 PCT=$(( (CURR * 100 + MAX / 2) / MAX ))
 

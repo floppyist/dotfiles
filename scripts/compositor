@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Starts picom with the backend from dotfiles.conf `compositor`:
+#   auto     OpenGL (glx); xrender when that fails (no OpenGL: virtual machines, old GPUs)
+#   glx, egl, xrender   that one
+#   off      no compositor (no transparency, no vsync)
+# i3 runs this with exec_always: a running picom is left alone, so `i3 restart` only brings
+# back a crashed one. --restart (dotfiles apply after a change) stops ours first.
+# Usage: compositor [--restart]
+set -u
+
+DF_COMPOSITOR=auto
+# shellcheck source=/dev/null
+. "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+
+if [[ ${1:-} == --restart ]]; then
+    pkill -u "$UID" -x picom
+    for _ in {1..30}; do
+        pgrep -u "$UID" -x picom >/dev/null || break
+        sleep 0.1
+    done
+fi
+
+[[ $DF_COMPOSITOR == off ]] && exit 0
+command -v picom >/dev/null || exit 0
+pgrep -u "$UID" -x picom >/dev/null && exit 0
+
+# -b: picom forks once the backend is up, so a backend that cannot start is the exit status
+case $DF_COMPOSITOR in
+    glx|egl|xrender) exec picom -b --backend "$DF_COMPOSITOR" ;;
+    *) picom -b --backend glx 2>/dev/null || exec picom -b --backend xrender ;;
+esac

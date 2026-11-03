@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Background services of the desktop session that the system does not start by itself.
+# i3 runs this once (exec). Each one only when it is installed and not running yet:
+#   polkit agent   the password dialog for system changes (NetworkManager, ...). Each
+#                  distribution puts it somewhere else.
+#   PipeWire       pipewire, pipewire-pulse, wireplumber. Distributions with systemd start them
+#                  as user services (socket activation): then nothing is started here.
+set -u
+
+running() { pgrep -u "$UID" -x "$1" >/dev/null; }
+
+# ── polkit agent ────────────────────────────────────────────────────────────────
+# (Debian and Fedora have no polkit-gnome: MATE's agent, the same GTK dialog)
+for agent in /usr/libexec/polkit-gnome-authentication-agent-1 \
+             /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1 \
+             /usr/libexec/polkit-gnome/polkit-gnome-authentication-agent-1 \
+             /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1 \
+             /usr/libexec/polkit-mate-authentication-agent-1; do
+    [[ -x $agent ]] || continue
+    # the process name is cut to 15 characters
+    name=${agent##*/}
+    running "${name:0:15}" || setsid -f "$agent" >/dev/null 2>&1
+    break
+done
+
+# ── PipeWire ────────────────────────────────────────────────────────────────────
+systemd_user() {
+    command -v systemctl >/dev/null && [[ -d /run/systemd/system ]] &&
+        systemctl --user is-enabled --quiet "$1" 2>/dev/null
+}
+
+if command -v pipewire >/dev/null && ! systemd_user pipewire.socket && ! systemd_user pipewire.service; then
+    if ! running pipewire; then
+        setsid -f pipewire >/dev/null 2>&1
+        # the others connect to its socket; some setups let pipewire start them itself
+        for _ in {1..20}; do
+            [[ -S ${XDG_RUNTIME_DIR:-/nonexistent}/pipewire-0 ]] && break
+            sleep 0.1
+        done
+        sleep 0.5
+    fi
+    running pipewire-pulse || ! command -v pipewire-pulse >/dev/null || setsid -f pipewire-pulse >/dev/null 2>&1
+    running wireplumber || ! command -v wireplumber >/dev/null || setsid -f wireplumber >/dev/null 2>&1
+fi
+exit 0

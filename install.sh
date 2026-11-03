@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# install.sh  ·  sets up this desktop on Void Linux, from a fresh i3 to everything in place.
+# install.sh  ·  sets up this desktop on Void Linux, Arch, Debian, Ubuntu, Fedora or Alpine, from a
+#               fresh system to everything in place.
 #
 #   ./install.sh                 the installer: complete installation, single modules or links
 #   ./install.sh all             complete installation without the menus
@@ -11,7 +12,7 @@
 #
 #   -y, --yes                    do not ask before starting (all, modules)
 #   --skip LIST                  leave these modules out (all)
-#   --nvidia DRIVER              nouveau (default), nvidia, nvidia580 or nvidia470
+#   --nvidia DRIVER              nouveau (default), nvidia, nvidia580 or nvidia470 (Void; elsewhere nouveau)
 #   --fix LIST                   hardware fixes (comma separated, see `list`): turns the module `fixes` on and
 #                                chooses exactly these (default: the ones this machine needs)
 #   --other-os SYSTEM            sets up a second system (arch, debian, ubuntu, fedora, alpine, windows):
@@ -19,12 +20,13 @@
 #   --disk DEVICE                the disk for it (default: the only one with enough free space)
 #   --windows-iso FILE           the Windows ISO for --other-os windows
 #   --kernel-version VERSION     the version of the `kernel` module, like 6.18.60 (default: the newest
-#                                of the running series); the module is never part of `all`
+#                                of the running series); the module is never part of `all` (Void only)
 #
 # Without a terminal and without arguments it runs `links`, like earlier versions.
 # Run it as your user: it sets up your home directory and asks for sudo itself. Every step is
 # idempotent, so it can run again at any time (after git pull, after adding a module).
-# The parts live in install/: lib.sh (helpers), links.sh, modules.sh, steps.sh, tui.sh.
+# The parts live in install/: lib.sh (helpers), distro.sh (package managers, services), pkgmap.sh
+# (package names), upstream.sh (pinned upstream programs), links.sh, modules.sh, steps.sh, tui.sh.
 set -o pipefail
 shopt -s extglob
 
@@ -32,6 +34,12 @@ DOTFILES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=install/lib.sh
 . "$DOTFILES/install/lib.sh"
+# shellcheck source=install/distro.sh
+. "$DOTFILES/install/distro.sh"
+# shellcheck source=install/pkgmap.sh
+. "$DOTFILES/install/pkgmap.sh"
+# shellcheck source=install/upstream.sh
+. "$DOTFILES/install/upstream.sh"
 # shellcheck source=install/links.sh
 . "$DOTFILES/install/links.sh"
 # shellcheck source=install/modules.sh
@@ -71,18 +79,14 @@ cleanup() {
 
 # What this machine has and what each module would do
 scan_machine() {
-    local pv act _
     detect
     pkg_scan
-    UPDATES=0
-    if (( HAVE_XBPS )); then
-        while read -r pv act _; do [[ $act == update ]] && (( UPDATES++ )); done < <(xbps-install -nu 2>/dev/null)
-    fi
+    pm_updates
     mods_default
     mods_scan
     TOTAL_DL=0
     sel_pkgs
-    if (( HAVE_XBPS && ${#SM[@]} )); then xbps_dry "${SM[@]}"; TOTAL_DL=$TX_DL; fi
+    if (( HAVE_PM && ${#SM[@]} )); then pm_dry "${SM[@]}"; TOTAL_DL=$TX_DL; fi
 }
 
 log_header() {
@@ -94,7 +98,7 @@ log_header() {
     {
         printf 'dotfiles install.sh  %(%F %T)T\n' -1
         printf 'repository  %s (%s)\n' "$DOTFILES" "$(git -C "$DOTFILES" -c core.fsmonitor=false rev-parse --short HEAD 2>/dev/null)"
-        printf 'system      %s %s, user %s, shell %s\n' "$OS_NAME" "$ARCH" "$USER_NAME" "$LOGIN_SHELL"
+        printf 'system      %s %s (%s, %s, %s), user %s, shell %s\n' "$OS_NAME" "${OS_VERSION:-}" "$ARCH" "${PM:-no package manager}" "${INIT:-?}" "$USER_NAME" "$LOGIN_SHELL"
         printf 'graphics    %s%s\n' "${GPU_LIST:-none}" "$( (( GPU_NVIDIA )) && echo " (driver $NVIDIA_DRIVER)")"
         printf 'modules     %s\n' "${sel[*]}"
         (( ${SEL[kernel]:-0} )) && printf 'kernel      %s\n' "${KERNEL_VERSION:-newest of the running series}"

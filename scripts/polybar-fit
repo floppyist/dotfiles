@@ -5,7 +5,7 @@ Polybar never shrinks modules: when the right block is wider than the free space
 cut off on the right, so the clock disappears first. This daemon runs as an empty polybar
 module, estimates the width of both blocks and hides module groups until everything fits:
 
-    1. cpu memory temp        2. pulseaudio backlight        3. music
+    1. cpu memory temp        2. volume backlight        3. music
 
 They come back as soon as there is room again. It also hides the gap in front of an empty
 capsule (tray without icons, no battery, all modules of a capsule hidden), so no double
@@ -46,18 +46,18 @@ import unicodedata
 
 # ── layout knowledge (mirrors config.ini) ───────────────────────────────────
 
-# Fixed modules: width in font-0 cells, format padding included. Volume and brightness are
-# often at 100 % ("󰕾  100%" = 7 cells + padding 1 + 1); cpu, memory and temperature are
+# Fixed modules: width in font-0 cells, format padding included. Brightness is often at
+# 100 % ("󰃠  100%" = 7 cells + padding 1 + 1); cpu, memory and temperature are
 # counted with two digits ("  42%", "󱃃 45°C"): a rare 100 % cpu is one cell more, which
 # only eats into the clock's right padding (2 cells), never into the time.
 FIXED = {
-    "pulseaudio": 9, "backlight": 9, "cpu": 8, "memory": 8, "temp": 8,
+    "backlight": 9, "cpu": 8, "memory": 8, "temp": 8,
     "date": 9,          # "HH:MM" + padding 2 + 2
 }
 # Script modules: (font index of the text, padding cells in font 0). Width from the slot file.
 SLOTS = {
     "music": (1, 2), "wlan": (0, 2), "ip": (0, 2), "vpn": (0, 2),
-    "bluetooth": (0, 2), "battery": (0, 0),
+    "bluetooth": (0, 2), "battery": (0, 0), "volume": (0, 2),
 }
 TRAY_PADDING_CELLS = 2      # [module/tray] format-padding = 1
 TRAY_SIZE_PCT = 50          # tray-size = 50%
@@ -67,8 +67,8 @@ I3_PADDING_CELLS = 4        # label-*-padding = 2
 I3_MODE_PREFIX = "󰩨 "        # label-mode
 
 # Hidden in this order until the bar fits
-GROUPS = [("cpu", "memory", "temp"), ("pulseaudio", "backlight"), ("music",)]
-DEFAULT_ORDER = ("fit music gap-tray tray gap-net wlan ip vpn bluetooth gap-audio pulseaudio "
+GROUPS = [("cpu", "memory", "temp"), ("volume", "backlight"), ("music",)]
+DEFAULT_ORDER = ("fit music gap-tray tray gap-net wlan ip vpn bluetooth gap-audio volume "
                  "backlight gap-sys cpu memory temp gap-bat battery gap-date date date-long").split()
 
 BLOCK_GAP_PX = 20           # polybar renderer: space between the left and the right block

@@ -4,16 +4,20 @@
 usage: dotfiles apply [--no-reload] [--layout]
                                       generate the theme files from dotfiles.conf, reload the desktop
                                       (--layout: the monitors changed, re-place bar and wallpaper)
-       dotfiles check                 only validate dotfiles.conf
+       dotfiles check                 only validate the settings
        dotfiles get KEY               print one resolved value (e.g. `dotfiles get accent`)
        dotfiles list                  print all resolved values
-       dotfiles edit                  open dotfiles.conf in $EDITOR, then apply
-       dotfiles path                  print the path of dotfiles.conf
+       dotfiles edit                  open your settings in $EDITOR (created if missing), then apply
+       dotfiles set KEY VALUE         change one of your settings (no apply)
+       dotfiles path                  print the path of your settings
 
-dotfiles.conf lives in the repository root. `apply` renders templates/* into
-~/.config/dotfiles/, which the configs of i3, polybar, rofi, dunst, alacritty, tmux,
-neovim, neomutt, GTK, fzf and Firefox include. Shell scripts source ~/.config/dotfiles/theme.sh.
-The mouse cursor theme is drawn into ~/.icons/dotfiles (scripts/dotfiles-cursors).
+Two files: dotfiles.conf in the repository root holds the defaults and documents every key;
+your own settings live in ~/.config/dotfiles.conf (only the keys you change; it wins).
+`apply` renders templates/* into ~/.config/dotfiles/, which the configs of i3, polybar, rofi,
+dunst, alacritty, tmux, neovim, neomutt, GTK, fzf and Firefox include. Shell scripts source
+~/.config/dotfiles/theme.sh. The mouse cursor theme is drawn into ~/.icons/dotfiles
+(scripts/dotfiles-cursors). Hardware (temperature sensor, backlight) is looked up on every
+apply; .xinitrc runs one at every login.
 
 scale = auto takes the factor from the primary monitor (`displays scale`: its density / auto_dpi;
 `displays` scales the others so a window has the same physical size everywhere); without X the
@@ -30,11 +34,13 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-CONF = os.environ.get("DOTFILES_CONF") or os.path.join(REPO, "dotfiles.conf")
-TEMPLATES = os.path.join(REPO, "templates")
 HOME = os.path.expanduser("~")
 XDG_CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+DEFAULTS = os.path.join(REPO, "dotfiles.conf")
+CONF = os.environ.get("DOTFILES_CONF") or os.path.join(XDG_CONFIG, "dotfiles.conf")
+TEMPLATES = os.path.join(REPO, "templates")
 OUT = os.path.join(XDG_CONFIG, "dotfiles")
+SYS = os.environ.get("DOTFILES_SYSFS") or "/sys"     # tests: a fake /sys
 
 # gruvbox: (normal, bright). The normal colors are ANSI 1..6 of the terminal palette.
 GRUVBOX = {
@@ -52,6 +58,17 @@ CURSOR_STYLES = ["light", "dark", "accent"]
 CURSOR_THEME = "dotfiles"      # the name in .Xresources, .xinitrc and gtk-3.0/settings.ini
 CURSOR_DIR = os.path.join(HOME, ".icons", CURSOR_THEME)   # ~/.icons: xcb-cursor (i3) does not
                                                           # search ~/.local/share/icons
+YES_NO = ["yes", "no"]
+
+# The right half of the bar (polybar modules-right). Capsules start with a gap module;
+# `bar_hide` and missing hardware take modules out, a capsule left empty loses its gap.
+BAR_RIGHT = ("fit music gap-tray tray gap-net wlan ip vpn bluetooth gap-audio volume backlight "
+             "gap-sys cpu memory temp gap-bat battery gap-date date date-long").split()
+BAR_OPTIONAL = ["music", "tray", "wlan", "ip", "vpn", "bluetooth", "volume", "backlight", "cpu",
+                "memory", "temp", "battery"]
+# temperature_sensor = auto: the first of these hwmon drivers / thermal zone types
+TEMP_SENSORS = ["k10temp", "zenpower", "coretemp", "cpu_thermal", "cpu-thermal", "soc_thermal",
+                "x86_pkg_temp", "acpitz"]
 
 # key: (type, default, min, max). Values end up in config files that can run commands
 # (i3 exec, polybar actions, tmux, shell), so every type has a strict pattern.
@@ -82,8 +99,20 @@ SCHEMA = {
     "cursor_style": ("choice", "light", CURSOR_STYLES),
     "cursor_size": ("int", "32", 16, 128),
     "terminal": ("choice", "alacritty", TERMINALS),
-    "keyboard_layout": ("xkb", "de"),
-    "wallpaper": ("path", "~/images/wallpaper"),
+    "keyboard_layout": ("xkb", "auto"),
+    "wallpaper": ("path?", ""),
+    "screenshot_dir": ("path", "auto"),
+    "display_key": ("choice", "display", ["display", "bluetooth", "none"]),
+    "compositor": ("choice", "auto", ["auto", "glx", "egl", "xrender", "off"]),
+    "bar_hide": ("modules", ""),
+    "temperature_sensor": ("device", "auto"),
+    "backlight": ("device", "auto"),
+    "mouse_acceleration": ("choice", "flat", ["auto", "flat", "adaptive"]),
+    "mouse_speed": ("signed", "0", -1.0, 1.0),
+    "touchpad_tap": ("choice", "yes", ["auto"] + YES_NO),
+    "touchpad_natural_scroll": ("choice", "auto", ["auto"] + YES_NO),
+    "touchpad_acceleration": ("choice", "auto", ["auto", "flat", "adaptive"]),
+    "touchpad_speed": ("signed", "auto", -1.0, 1.0),
     "screensaver_after": ("int", "60", 10, 86400),
     "lock_after": ("int", "300", 0, 86400),
     "display_off_after": ("int", "300", 0, 86400),
@@ -92,8 +121,9 @@ SCHEMA = {
 PATTERNS = {
     "color": r"#[0-9a-fA-F]{6}",
     "font": r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}",
-    "xkb": r"[a-z]{2,3}(\([a-z0-9_]+\))?(,[a-z]{2,3}(\([a-z0-9_]+\))?){0,3}",
+    "xkb": r"auto|[a-z]{2,3}(\([a-z0-9_]+\))?(,[a-z]{2,3}(\([a-z0-9_]+\))?){0,3}",
     "path": r"~?[A-Za-z0-9/._ +-]{1,255}",
+    "device": r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}",
 }
 
 
@@ -103,30 +133,46 @@ class ConfError(Exception):
 
 # ── parsing and validation ─────────────────────────────────────────────────────
 
-def parse(path):
-    raw, errors = {}, []
+def read_conf(path, raw, errors, optional=False):
+    """key = value lines of one file into raw[key] = (value, "file:line")."""
     try:
         lines = open(path, encoding="utf-8").read().splitlines()
+    except FileNotFoundError:
+        if optional:
+            return
+        errors.append("cannot read %s: not found" % path)
+        return
     except OSError as e:
-        raise ConfError("cannot read %s: %s" % (path, e.strerror))
+        errors.append("cannot read %s: %s" % (path, e.strerror))
+        return
+    seen = set()
+    name = path.replace(HOME, "~", 1) if path.startswith(HOME + os.sep) else path
     for n, line in enumerate(lines, 1):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
+        where = "%s:%d" % (name, n)
         if "=" not in s:
-            errors.append("line %d: expected 'key = value'" % n)
+            errors.append("%s: expected 'key = value'" % where)
             continue
         k, v = (x.strip() for x in s.split("=", 1))
         if k not in SCHEMA:
-            errors.append("line %d: unknown key '%s'" % (n, k))
-        elif k in raw:
-            errors.append("line %d: '%s' is set twice" % (n, k))
+            errors.append("%s: unknown key '%s'" % (where, k))
+        elif k in seen:
+            errors.append("%s: '%s' is set twice" % (where, k))
         else:
-            raw[k] = (v, n)
+            seen.add(k)
+            raw[k] = (v, where)
+
+
+def parse(path=None):
+    """The defaults (repository dotfiles.conf), then the user's file on top."""
+    raw, errors = {}, []
+    read_conf(DEFAULTS, raw, errors, optional=True)
+    read_conf(path or CONF, raw, errors, optional=True)
     values = {}
     for k, spec in SCHEMA.items():
-        v, n = raw.get(k, (spec[1], 0))
-        where = "line %d" % n if n else "default"
+        v, where = raw.get(k, (spec[1], "default"))
         try:
             values[k] = check(k, v, spec)
         except ValueError as e:
@@ -150,6 +196,22 @@ def check(key, v, spec):
         if v == "auto":
             return v
         typ = "float"
+    if typ == "path?":
+        if v == "":
+            return ""
+        typ = "path"
+    if typ == "signed":
+        if v == "auto":
+            return v
+        if not re.fullmatch(r"-?[0-9]*\.?[0-9]+", v) or not spec[2] <= float(v) <= spec[3]:
+            raise ValueError("'%s' is not auto or a number from %g to %g" % (v, spec[2], spec[3]))
+        return "%.2f" % (float(v) + 0.0)
+    if typ == "modules":
+        words = v.split()
+        bad = [w for w in words if w not in BAR_OPTIONAL]
+        if bad:
+            raise ValueError("'%s' is not one of: %s" % (bad[0], " ".join(BAR_OPTIONAL)))
+        return " ".join(dict.fromkeys(words))
     if typ == "int":
         if not re.fullmatch(r"[0-9]{1,6}", v) or not spec[2] <= int(v) <= spec[3]:
             raise ValueError("'%s' is not a number from %d to %d" % (v, spec[2], spec[3]))
@@ -169,7 +231,8 @@ def check(key, v, spec):
         return v
     if not re.fullmatch(PATTERNS[typ], v):
         hint = {"color": "#rrggbb", "accent": "a gruvbox name or #rrggbb", "font": "letters, digits, space . _ -",
-                "xkb": "e.g. de, us, de(nodeadkeys), us,de", "path": "letters, digits, space / . _ + -"}
+                "xkb": "auto or e.g. de, us, de(nodeadkeys), us,de", "path": "letters, digits, space / . _ + -",
+                "device": "auto, none or a device name (letters, digits, _ . : -)"}
         raise ValueError("'%s' is invalid (expected %s)" % (v, hint.get(typ, typ)))
     return v.lower() if typ == "color" else v
 
@@ -260,6 +323,104 @@ def firefox_dppx(extra, session_gdk):
     return "%.2f" % (extra * gdk)
 
 
+# ── hardware and paths (looked up on every apply) ──────────────────────────────
+
+SYSPATH_RE = re.compile(r"/[A-Za-z0-9/._:+-]{1,250}")
+
+
+def read_line(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
+def numbered(path):
+    m = re.search(r"([0-9]+)$", path)
+    return (int(m.group(1)) if m else 0, path)
+
+
+def temp_sensor(choice):
+    """The CPU temperature file (millidegrees) for polybar's hwmon-path, "" without one.
+    auto: the first of TEMP_SENSORS (hwmon driver names, then thermal zone types); else the
+    hwmon name or zone type given in dotfiles.conf. The path holds the hwmon number, which can
+    change between boots: .xinitrc applies at every login."""
+    if choice == "none":
+        return ""
+    found = {}
+    for d in sorted(glob.glob(os.path.join(SYS, "class", "hwmon", "hwmon*")), key=numbered):
+        name, f = read_line(os.path.join(d, "name")), os.path.join(d, "temp1_input")
+        if name and name not in found and os.path.exists(f):
+            found[name] = f
+    for d in sorted(glob.glob(os.path.join(SYS, "class", "thermal", "thermal_zone*")), key=numbered):
+        typ, f = read_line(os.path.join(d, "type")), os.path.join(d, "temp")
+        if typ and typ not in found and os.path.exists(f):
+            found[typ] = f
+    for n in TEMP_SENSORS if choice == "auto" else [choice]:
+        if n in found:
+            p = os.path.realpath(found[n])
+            return p if SYSPATH_RE.fullmatch(p) else ""
+    return ""
+
+
+def backlight_device(choice):
+    """The backlight to drive (name in /sys/class/backlight), "" without one. auto prefers the
+    firmware interface, then platform, then raw (the order desktops use: on hybrid graphics the
+    raw one of the other GPU often does nothing)."""
+    if choice == "none":
+        return ""
+    devs = {os.path.basename(d): read_line(os.path.join(d, "type"))
+            for d in glob.glob(os.path.join(SYS, "class", "backlight", "*"))}
+    if choice != "auto":
+        return choice if choice in devs else ""
+    rank = {"firmware": 0, "platform": 1, "raw": 2}
+    return min(devs, key=lambda n: (rank.get(devs[n], 3), n)) if devs else ""
+
+
+def pictures_dir():
+    """XDG_PICTURES_DIR from ~/.config/user-dirs.dirs (localized names), else ~/Pictures."""
+    try:
+        for line in open(os.path.join(XDG_CONFIG, "user-dirs.dirs"), encoding="utf-8"):
+            m = re.match(r'\s*XDG_PICTURES_DIR="(.+)"\s*$', line)
+            if m:
+                p = m.group(1).replace("$HOME", HOME)
+                if p.startswith("/") and os.path.normpath(p) != HOME:
+                    return p
+    except OSError:
+        pass
+    return os.path.join(HOME, "Pictures")
+
+
+def bar_modules(c, temp, backlight):
+    """polybar modules-right without the hidden modules and the gaps of empty capsules."""
+    drop = set(c["bar_hide"].split())
+    if not temp:
+        drop.add("temp")
+    if not backlight:
+        drop.add("backlight")
+    out, gap, mods = [], None, []
+
+    def flush():
+        if mods:
+            out.extend(([gap] if gap else []) + mods)
+    for m in BAR_RIGHT:
+        if m.startswith("gap"):
+            flush()
+            gap, mods = m, []
+        elif m not in drop:
+            mods.append(m)
+    flush()
+    return " ".join(out)
+
+
+DISPLAY_KEY = {
+    "display": "bindsym XF86Display exec --no-startup-id ~/.local/bin/display-select.sh",
+    "bluetooth": "bindsym XF86Display exec --no-startup-id ~/.local/bin/bluetooth-toggle.sh",
+    "none": "# XF86Display is not bound (display_key = none)",
+}
+
+
 def resolve(c):
     v = dict(c)
     s, why = effective_scale(c)
@@ -315,9 +476,20 @@ def resolve(c):
     # xset s <saver> <cycle>: xss-lock starts the saver after <saver> s and locks after <cycle> more
     lock, saver = int(c["lock_after"]), int(c["screensaver_after"])
     v["lock_cycle"] = str(max(lock - saver, 1)) if lock else "0"
-    wp = os.path.expanduser(c["wallpaper"])
+    # no wallpaper (or the file is missing): the background color
+    wp = os.path.expanduser(c["wallpaper"]) if c["wallpaper"] else ""
     v["wallpaper"] = wp
-    v["wallpaper_sh"] = shlex.quote(wp)
+    if wp and os.path.isfile(wp):
+        v["wallpaper_cmd"] = "feh --no-fehbg --bg-fill " + shlex.quote(wp)
+    else:
+        v["wallpaper_cmd"] = "xsetroot -solid " + shlex.quote(c["bg"])
+    sd = c["screenshot_dir"]
+    v["screenshot_dir"] = (os.path.join(pictures_dir(), "screenshots") if sd == "auto"
+                           else os.path.expanduser(sd))
+    v["temperature_path"] = temp_sensor(c["temperature_sensor"])
+    v["backlight_device"] = backlight_device(c["backlight"])
+    v["bar_modules_right"] = bar_modules(c, v["temperature_path"], v["backlight_device"])
+    v["display_key_binding"] = DISPLAY_KEY[c["display_key"]]
     return v
 
 
@@ -375,12 +547,15 @@ def symlink(target, link):
 
 
 def firefox_profiles():
-    """Profiles whose chrome/userChrome.css is linked to this repository."""
+    """Profiles whose chrome/userChrome.css is linked to this repository, or that hold copies
+    (the snap of Ubuntu may not follow links into hidden directories: marker .dotfiles-copy)."""
     found = []
-    for base in (os.path.join(HOME, ".mozilla", "firefox"), os.path.join(XDG_CONFIG, "mozilla", "firefox")):
+    for base in (os.path.join(HOME, ".mozilla", "firefox"), os.path.join(XDG_CONFIG, "mozilla", "firefox"),
+                 os.path.join(HOME, "snap", "firefox", "common", ".mozilla", "firefox")):
         for chrome in glob.glob(os.path.join(base, "*", "chrome")):
             uc = os.path.join(chrome, "userChrome.css")
-            if os.path.realpath(uc).startswith(os.path.join(REPO, "firefox") + os.sep):
+            if os.path.realpath(uc).startswith(os.path.join(REPO, "firefox") + os.sep) or \
+                    os.path.exists(os.path.join(chrome, ".dotfiles-copy")):
                 found.append(chrome)
     return found
 
@@ -407,9 +582,20 @@ def generate(v):
             changed.add("dunst.conf")
     # Firefox resolves @import "dotfiles.css" relative to the profile's chrome directory
     for chrome in firefox_profiles():
-        n = symlink(os.path.join(OUT, "firefox.css"), os.path.join(chrome, "dotfiles.css"))
-        if n:
-            notes.append(n)
+        if os.path.exists(os.path.join(chrome, ".dotfiles-copy")):
+            css = os.path.join(chrome, "dotfiles.css")
+            if os.path.islink(css):
+                os.unlink(css)
+            copied = write(css, open(os.path.join(OUT, "firefox.css"), encoding="utf-8").read())
+            for name in ("userChrome.css", "userContent.css"):
+                src = os.path.join(REPO, "firefox", name)
+                copied |= write(os.path.join(chrome, name), open(src, encoding="utf-8").read())
+            if copied:
+                changed.add("firefox.css")
+        else:
+            n = symlink(os.path.join(OUT, "firefox.css"), os.path.join(chrome, "dotfiles.css"))
+            if n:
+                notes.append(n)
         if firefox_scale(os.path.join(os.path.dirname(chrome), "user.js"), v["firefox_dppx"]):
             changed.add("firefox scale")
     built, note = cursors(v)
@@ -529,7 +715,7 @@ def reload(changed, old, v, layout=False):
         run(["xset", "s", v["screensaver_after"], v["lock_cycle"]])
         run(["xset", "dpms", "0", "0", v["display_off_after"]])
         done.append("idle times")
-    if x11 and old.get("keyboard_layout") not in (None, v["keyboard_layout"]):
+    if x11 and v["keyboard_layout"] != "auto" and old.get("keyboard_layout") not in (None, v["keyboard_layout"]):
         layouts, variants = [], []
         for part in v["keyboard_layout"].split(","):
             m = re.fullmatch(r"([a-z]+)(?:\(([a-z0-9_]+)\))?", part)
@@ -538,10 +724,18 @@ def reload(changed, old, v, layout=False):
         cmd = ["setxkbmap", ",".join(layouts)] + (["-variant", ",".join(variants)] if any(variants) else [])
         if run(cmd):
             done.append("keyboard")
-    wallpaper_moved = layout or old.get("wallpaper") not in (None, v["wallpaper"])
-    if x11 and wallpaper_moved and not i3_restarted and os.path.exists(v["wallpaper"]):
-        if run(["feh", "--no-fehbg", "--bg-fill", v["wallpaper"]]):
+    wallpaper_moved = layout or old.get("wallpaper_cmd") not in (None, v["wallpaper_cmd"])
+    if x11 and wallpaper_moved and not i3_restarted:
+        if run(["sh", "-c", v["wallpaper_cmd"]]):
             done.append("wallpaper")
+    input_keys = ("mouse_acceleration", "mouse_speed", "touchpad_tap", "touchpad_natural_scroll",
+                  "touchpad_acceleration", "touchpad_speed")
+    if x11 and old and any(old.get(k) != v[k] for k in input_keys):
+        if run([os.path.join(REPO, "scripts", "input-setup")]):
+            done.append("mouse and touchpad")
+    if x11 and old.get("compositor") not in (None, v["compositor"]):
+        if run([os.path.join(REPO, "scripts", "compositor"), "--restart"]):
+            done.append("compositor")
     if x11 and ("cursors" in changed or xrdb_value("Xcursor.size") != v["cursor_size_px"]):
         # the root window (desktop) right away; programs load cursors when they start
         xrdb_merge("Xcursor.theme: %s\nXcursor.size: %s\n" % (CURSOR_THEME, v["cursor_size_px"]))
@@ -596,6 +790,42 @@ def apply(no_reload, layout=False):
     return 0
 
 
+USER_HEADER = """\
+# Your dotfiles settings. Only the keys you want different from the defaults; they win over
+# %s, which documents every key.
+# After editing run `dotfiles apply` (`dotfiles edit` does it for you).
+
+"""
+
+
+def ensure_user_conf():
+    if not os.path.exists(CONF):
+        os.makedirs(os.path.dirname(CONF), exist_ok=True)
+        with open(CONF, "w", encoding="utf-8") as f:
+            f.write(USER_HEADER % DEFAULTS.replace(HOME, "~", 1))
+
+
+def set_value(key, value):
+    """Write `key = value` into the user's file (replaces the key's line, keeps the rest)."""
+    if key not in SCHEMA:
+        raise ConfError("unknown key '%s'" % key)
+    try:
+        check(key, value, SCHEMA[key])
+    except ValueError as e:
+        raise ConfError("%s: %s" % (key, e))
+    ensure_user_conf()
+    lines = open(CONF, encoding="utf-8").read().splitlines()
+    line = "%s = %s" % (key, value)
+    hits = [i for i, l in enumerate(lines) if re.match(r"\s*%s\s*=" % re.escape(key), l)]
+    if hits:
+        lines[hits[0]] = line
+        lines = [l for i, l in enumerate(lines) if i not in hits[1:]]
+    else:
+        lines.append(line)
+    write(CONF, "\n".join(lines) + "\n")
+    load()      # the whole result must still be valid
+
+
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "help"
     try:
@@ -603,7 +833,11 @@ def main(argv):
             return apply("--no-reload" in argv[2:], "--layout" in argv[2:])
         if cmd == "check":
             load()
-            print("dotfiles: %s is valid" % CONF)
+            print("dotfiles: the settings are valid (%s over %s)" % (CONF, DEFAULTS))
+            return 0
+        if cmd == "set" and len(argv) == 4:
+            set_value(argv[2], argv[3])
+            print("dotfiles: %s = %s in %s" % (argv[2], argv[3], CONF))
             return 0
         if cmd == "get" and len(argv) == 3:
             v = load()
@@ -620,11 +854,13 @@ def main(argv):
             print(CONF)
             return 0
         if cmd == "edit":
+            ensure_user_conf()
             editor = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nvim")
             subprocess.call(editor + [CONF])
             return apply(False)
     except ConfError as e:
-        print("dotfiles: %s:\n%s" % (CONF, "\n".join("  " + l for l in str(e).splitlines())), file=sys.stderr)
+        print("dotfiles: invalid settings:\n%s" % "\n".join("  " + l for l in str(e).splitlines()),
+              file=sys.stderr)
         return 1
     print(__doc__.strip())
     return 0 if cmd in ("help", "-h", "--help") else 2

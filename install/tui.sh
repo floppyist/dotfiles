@@ -495,10 +495,13 @@ sudo asks for your password once."
                 fi
             done
             d_blank
-            if (( ! HAVE_XBPS )); then
-                d_text "${F[warn]}" "No xbps: this is not Void Linux. Packages and services are left out, \
-only the steps in your home directory run."
-            elif (( TOTAL_DL )); then
+            if (( ! HAVE_PM )); then
+                d_text "${F[warn]}" "${OS_NAME:-This system} is not supported (Void, Arch, Debian, Ubuntu, \
+Fedora, Alpine). Packages and services are left out, only the steps in your home directory run."
+            elif [[ -n $DISTRO_WARN ]]; then
+                d_text "${F[warn]}" "$DISTRO_WARN"
+            fi
+            if (( HAVE_PM && TOTAL_DL )); then
                 human_size "$TOTAL_DL"
                 d_kv "Download" "about $_HS (all modules)" "${F[fg]}"
             fi ;;
@@ -1049,7 +1052,7 @@ plan_compute() {
     sel_pkgs
     sel_steps
     TX_COUNT=0 TX_DL=0 TX_INST=0 TX_UNKNOWN=()
-    (( HAVE_XBPS && ${#SM[@]} )) && xbps_dry "${SM[@]}"
+    (( HAVE_PM && ${#SM[@]} )) && pm_dry "${SM[@]}"
 }
 
 build_plan() {
@@ -1059,10 +1062,15 @@ build_plan() {
     if (( ${#SM[@]} )); then
         d_blank
         d_head "Packages"
-        if (( TX_COUNT )); then
+        if (( TX_COUNT && TX_DL && TX_INST )); then
             human_size "$TX_DL"; local dl=$_HS
             human_size "$TX_INST"
             d_kv "" "${#SM[@]} new, $TX_COUNT with dependencies, $dl download, $_HS on disk" "${F[fg]}" 2
+        elif (( TX_COUNT && TX_DL )); then
+            human_size "$TX_DL"
+            d_kv "" "${#SM[@]} new, $TX_COUNT with dependencies, $_HS download" "${F[fg]}" 2
+        elif (( TX_COUNT )); then
+            d_kv "" "${#SM[@]} new, $TX_COUNT with dependencies" "${F[fg]}" 2
         else
             d_kv "" "${#SM[@]} new" "${F[fg]}" 2
         fi
@@ -1165,16 +1173,22 @@ once and keeps the permission until the installer ends. The installer never sees
 
 build_sudo_failed() {
     d_reset
+    sudo_group
     d_text "${F[fg]}" "Either the password was wrong, or your user may not use sudo."
     d_blank
-    d_text "${F[subtle]}" "To allow it, run as root (su -): usermod -aG wheel $USER_NAME, then visudo and \
+    if [[ $_SG == sudo ]]; then
+        d_text "${F[subtle]}" "To allow it, run as root (su -): usermod -aG sudo $USER_NAME. Log in again afterwards."
+    else
+        d_text "${F[subtle]}" "To allow it, run as root (su -): usermod -aG wheel $USER_NAME, then visudo and \
 remove the # in front of %wheel ALL=(ALL:ALL) ALL. Log in again afterwards."
+    fi
 }
 
 build_nosudo() {
     d_reset
+    pm_hint sudo
     d_text "${F[fg]}" "The installer needs sudo for packages, services and /etc. Install it as root: \
-xbps-install sudo, and allow your user (see above)."
+$_PH, and allow your user (see above)."
 }
 
 sudo_keepalive() {

@@ -28,6 +28,12 @@ connected_devices() {
 
 # Polybar. Two spaces after the glyph: Nerd Font icons are drawn wider than one cell.
 bt_status() {
+    # no adapter (or no BlueZ): no capsule
+    local hci=(/sys/class/bluetooth/hci*)
+    if [[ ! -e ${hci[0]} ]] || ! command -v bluetoothctl >/dev/null; then
+        echo ""
+        return
+    fi
     if ! powered; then
         echo "%{F$DF_MUTED}$ICON_OFF%{F-}"
         return

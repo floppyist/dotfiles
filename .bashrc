@@ -10,19 +10,20 @@ path_prepend() {
     esac
 }
 path_prepend "$HOME/.local/bin"
-path_prepend "$HOME/.opencode/bin"
 export PATH
 
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
 
-export CALCULUS_STATE=~/.cache/calculus
-export PI_CODING_AGENT_DIR="$HOME/.local/share/pi"
-export PI_TELEMETRY=0
 # Editor for git, crontab, ... and for `v` in the shell's normal mode (edit the line in vim)
 export EDITOR="${EDITOR:-nvim}" VISUAL="${VISUAL:-${EDITOR:-nvim}}"
 # fzf colors and layout from dotfiles.conf (generated; fzf reads the file on every start)
 [[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/fzfrc" ]] &&
     export FZF_DEFAULT_OPTS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/fzfrc"
+
+# Your own additions (PATH entries, variables, aliases of this machine), not part of the
+# repository: ~/.config/bash/local.bash
+# shellcheck source=/dev/null
+[[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/bash/local.bash" ]] && . "${XDG_CONFIG_HOME:-$HOME/.config}/bash/local.bash"
 
 # Everything below is for interactive shells only
 [[ $- == *i* ]] || return
@@ -254,7 +255,6 @@ alias vim='nvim'
 alias mutt='neomutt'
 alias mpv='mpvim'
 alias mixer='pulsemixer'
-alias calc='calculus'
 alias cb='xclip -selection clipboard'
 
 # ── Tools ────────────────────────────────────────────────────────────────────
@@ -271,8 +271,14 @@ FZF_CTRL_R_OPTS=$(_fzf_prompt history)
 FZF_CTRL_T_OPTS=$(_fzf_prompt files)
 FZF_ALT_C_OPTS=$(_fzf_prompt cd)
 unset -f _fzf_prompt
-# shellcheck source=/dev/null
-[[ -f /usr/share/fzf/key-bindings.bash ]] && . /usr/share/fzf/key-bindings.bash
+# Each distribution keeps them somewhere else; fzf 0.48 and newer prints them itself
+for _f in /usr/share/fzf/key-bindings.bash /usr/share/fzf/shell/key-bindings.bash \
+          /usr/share/doc/fzf/examples/key-bindings.bash; do
+    # shellcheck source=/dev/null
+    [[ -f $_f ]] && { . "$_f"; break; }
+done
+[[ -f $_f ]] || { command -v fzf >/dev/null && eval "$(fzf --bash 2>/dev/null)"; }
+unset _f
 
 # Alt+c: fzf's own binding types `__fzf_cd__` into the command line and runs it from there,
 # so that text stays visible above fzf. Here it is a bind -x widget like Ctrl+r and Ctrl+t
