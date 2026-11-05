@@ -5,7 +5,11 @@
 #                  distribution puts it somewhere else.
 #   PipeWire       pipewire, pipewire-pulse, wireplumber. Distributions with systemd start them
 #                  as user services (socket activation): then nothing is started here.
+# And the built-in panel back on if it was switched off (brightness 0 %) in the last session.
 set -u
+
+HERE=$(dirname "$(readlink -f "$0")")
+"$HERE/polybar-backlight.sh" --restore >/dev/null 2>&1
 
 running() { pgrep -u "$UID" -x "$1" >/dev/null; }
 

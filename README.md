@@ -101,7 +101,7 @@ touchpads) is detected, and every guess can be overridden there.
 | <kbd>Super</kbd> <kbd>b</kbd> (or the display function key) | Bluetooth on/off |
 | <kbd>Super</kbd> <kbd>v</kbd> | VPN menu |
 | <kbd>Print</kbd> / <kbd>Shift</kbd> <kbd>Print</kbd> | Screenshot / region screenshot (also copied to the clipboard) |
-| Volume and brightness keys | Change the value, shows an on-screen bar |
+| Volume and brightness keys | 5 % per press, with an on-screen bar. Brightness glides; holding the key ramps smoothly and speeds up (laptop firmware repeats these keys only 4 times a second). Below 5 % the built-in panel goes dark (0 %) while another monitor is on, e.g. when mirroring; up, unplugging the other monitor or logging in again brings it back |
 
 **Region screenshot** (<kbd>Shift</kbd> <kbd>Print</kbd>): the screen freezes and dims, a bar at the top shows the
 keys. Drag to take a region (its size is shown next to it), click to take the window under the pointer, <kbd>Return</kbd>
@@ -150,8 +150,8 @@ there is room again. An empty capsule (the tray without icons) takes no gap.
 | Module | Updated by |
 | --- | --- |
 | Workspaces | Polybar itself (i3 IPC) |
-| Volume | `polybar-watch` with `pactl subscribe` (output and server events; PipeWire or PulseAudio) |
-| Brightness | the brightness keys (IPC hook) |
+| Volume | the keys and the mouse wheel push the new value straight into the capsule; changes made elsewhere arrive through `polybar-watch` with `pactl subscribe` (output and server events; PipeWire or PulseAudio) |
+| Brightness | the brightness keys and the mouse wheel (`polybar-msg ... send`, following the glide) |
 | Music | `playerctl --follow`: once per second while playing, nothing while paused |
 | WiFi, IP, VPN, Bluetooth, battery | `polybar-watch` with `nmcli monitor`, `ip monitor`, `gdbus monitor` (bluez), `udevadm monitor` (charger, battery); plus a slow fallback refresh |
 | CPU, memory, temperature, clock | sampled inside Polybar (reads `/proc`, starts no programs) |
@@ -555,6 +555,7 @@ repository.
 ## Troubleshooting
 
 - **WiFi or VPN: "not authorized":** adding a profile needs a polkit agent for the password dialog. `session-start` starts `polkit-gnome` (Debian, Fedora: `mate-polkit`); check that it is installed and running.
+- **Brightness does not change or sticks at one value:** the keys write `/sys/class/backlight/<device>/brightness`, which needs the group `video` (the installer adds you: log in again once), else `brightnessctl`. `dotfiles get backlight_device` names the device in use; when the machine has two (e.g. `acpi_video0` and `amdgpu_bl0`) and only the other one works, set `backlight = <name>` in your dotfiles.conf and run `dotfiles apply`.
 - **No volume capsule:** it hides without a sound output. `pactl info` must reach a server (PipeWire's `pipewire-pulse` or PulseAudio) and `pactl get-default-sink` name an output.
 - **WiFi: a network keeps failing with a saved profile:** the menu asks for the password again when NetworkManager rejects the saved one. For other errors, `nmcli connection delete id "<name>"` and connect again.
 - **The music capsule ignores mpv:** mpv needs the MPRIS plugin: `mkdir -p ~/.config/mpv/scripts && ln -s /usr/lib/mpv-mpris/mpris.so ~/.config/mpv/scripts/` (the installer's Music module does that), then restart mpv. `playerctl -l` lists the players it sees.

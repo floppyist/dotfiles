@@ -742,6 +742,9 @@ def reload(changed, old, v, layout=False):
         env = dict(os.environ, XCURSOR_THEME=CURSOR_THEME, XCURSOR_SIZE=v["cursor_size_px"])
         if run(["xsetroot", "-cursor_name", "left_ptr"], env=env):
             done.append("cursor")
+    if x11 and layout:
+        # a built-in panel switched off for a mirrored monitor comes back when it is alone again
+        run([os.path.join(REPO, "scripts", "polybar-backlight.sh"), "--check"])
     if ("polybar.ini" in changed or layout) and not i3_restarted and running("polybar"):
         launch = os.path.join(XDG_CONFIG, "polybar", "launch.sh")
         if run([launch]):

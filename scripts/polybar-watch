@@ -1,28 +1,41 @@
 #!/usr/bin/env bash
 # Event-driven status for polybar modules (tail = true).
 #
-# Usage: polybar-watch [--slot NAME] SECONDS STATUS-CMD [ARGS...] -- EVENT-CMD [ARGS...]
+# Usage: polybar-watch [--slot NAME] [--push NAME] SECONDS STATUS-CMD [ARGS...] -- EVENT-CMD [ARGS...]
 #
-# Prints the output of STATUS-CMD at start, after every burst of lines from EVENT-CMD
-# (e.g. `nmcli monitor`, `udevadm monitor`) and at least every SECONDS as a fallback.
-# Nothing runs while nothing happens, and unchanged output is not printed again, so
-# polybar does not redraw. Example:
+# Prints the output of STATUS-CMD at start, when EVENT-CMD (e.g. `nmcli monitor`, `udevadm
+# monitor`) prints a line, and at least every SECONDS as a fallback. The first line of a burst
+# shows at once; while the burst goes on at most every 0.1 s, and once more after it. Nothing
+# runs while nothing happens, and unchanged output is not printed again, so polybar does not
+# redraw. Example:
 #   exec = polybar-watch 30 polybar-wlan.sh --status -- nmcli monitor
 #
 # --slot NAME: also write every new output to $XDG_RUNTIME_DIR/polybar-fit/<polybar pid>/NAME,
 # where polybar-fit measures it (it hides modules when the bar would overflow).
+# --push NAME: a FIFO $XDG_RUNTIME_DIR/polybar-push/NAME takes "@@show TEXT" lines: TEXT is shown
+# at once, without running STATUS-CMD (volume.sh knows the new volume before the sound server
+# reports it). The events come through the same FIFO. Only the user can write there (0700).
+#
+# An event source that ends (its daemon is not running yet, or restarted) is started again
+# after 1 s, every second for the first 10 s (a sound server that comes up after the bar at
+# login), then less and less often, up to every 30 s.
 set -u
 
-slot_file=""
-if [[ "${1:-}" == "--slot" ]]; then
-    [[ "${2:-}" =~ ^[a-z0-9-]{1,32}$ ]] || { echo "polybar-watch: bad slot name" >&2; exit 2; }
+slot_file="" push_fifo=""
+private_rt() { [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]]; }
+while [[ "${1:-}" == --slot || "${1:-}" == --push ]]; do
+    [[ "${2:-}" =~ ^[a-z0-9-]{1,32}$ ]] || { echo "polybar-watch: bad $1 name" >&2; exit 2; }
     # only a private runtime directory (no fallback to /tmp: other users, symlinks)
-    if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "$XDG_RUNTIME_DIR" && -O "$XDG_RUNTIME_DIR" ]]; then
-        slot_dir="$XDG_RUNTIME_DIR/polybar-fit/$PPID"
-        mkdir -p -m 700 "$XDG_RUNTIME_DIR/polybar-fit" "$slot_dir" 2>/dev/null && slot_file="$slot_dir/$2"
+    if private_rt; then
+        if [[ $1 == --slot ]]; then
+            slot_dir="$XDG_RUNTIME_DIR/polybar-fit/$PPID"
+            mkdir -p -m 700 "$XDG_RUNTIME_DIR/polybar-fit" "$slot_dir" 2>/dev/null && slot_file="$slot_dir/$2"
+        else
+            mkdir -p -m 700 "$XDG_RUNTIME_DIR/polybar-push" 2>/dev/null && push_fifo="$XDG_RUNTIME_DIR/polybar-push/$2"
+        fi
     fi
     shift 2
-fi
+done
 
 every=${1:-}
 [[ "$every" =~ ^[0-9]+$ ]] && (( every > 0 )) || { echo "usage: polybar-watch SECONDS STATUS-CMD -- EVENT-CMD" >&2; exit 2; }
@@ -40,7 +53,12 @@ pid=""
 last=""
 # polybar closed the pipe (restart) or stops us: leave, the EXIT trap stops the event source
 trap 'exit 0' PIPE TERM INT HUP
-trap '[[ -n "$pid" ]] && kill "$pid" 2>/dev/null' EXIT
+cleanup() {
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+    # the FIFO only while it is still ours (a new bar may have made its own already)
+    [[ -n "$push_fifo" && -n "${src-}" && "$push_fifo" -ef "/proc/$$/fd/$src" ]] && rm -f "$push_fifo"
+}
+trap cleanup EXIT
 
 # Polybar runs `exec` through `sh -c`; without `exec` in the module line, its SIGTERM only
 # reaches that shell. Unchanged output is never written, so a broken pipe would not be
@@ -54,32 +72,125 @@ orphaned() {
     [[ "$2" != "$parent" ]]
 }
 
+tries=0 started=0 restart_at=0
 start_events() {
-    exec {src}< <(exec "${events[@]}" 2>/dev/null)
-    pid=$!
+    now_us
+    started=$NOW restart_at=0
+    if [[ -n "$push_fifo" ]]; then
+        # read and write end in this process: the FIFO never reports end of file, and a
+        # writer never blocks while we run
+        if [[ -z "${src-}" ]]; then
+            rm -f "$push_fifo"
+            mkfifo -m 600 "$push_fifo" || { push_fifo=""; start_events; return; }
+            exec {src}<>"$push_fifo"
+        fi
+        # The event source writes into it as well: an empty line per event (its text could
+        # look like a push), and @@eof when it ends
+        (
+            trap 'kill "${epid-}" 2>/dev/null; exit 0' TERM
+            exec {ev}< <(exec "${events[@]}" 2>/dev/null)
+            epid=$!
+            while IFS= read -r _ <&"$ev"; do printf '\n'; done
+            printf '@@eof\n'
+        ) >"$push_fifo" 2>/dev/null &
+        pid=$!
+    else
+        exec {src}< <(exec "${events[@]}" 2>/dev/null)
+        pid=$!
+    fi
 }
 
-emit() {
-    local out
-    out=$("${status[@]}" 2>/dev/null)
-    [[ "$out" == "$last" ]] && return
-    last=$out
-    printf '%s\n' "$out"
-    [[ -n "$slot_file" ]] && { printf '%s\n' "$out" > "$slot_file"; } 2>/dev/null
+# The event source ended: start it again after a pause (1 s for the first ten tries, then
+# doubling up to 30 s; back to 1 s after it ran for a minute)
+events_ended() {
+    local wait_s
+    kill "$pid" 2>/dev/null
+    pid=""
+    now_us
+    (( NOW - started > 60000000 )) && tries=0
+    wait_s=1
+    (( tries >= 10 )) && wait_s=$(( 1 << (tries - 9) ))
+    (( wait_s > 30 )) && wait_s=30
+    (( tries++ ))
+    if [[ -n "$push_fifo" ]]; then
+        # (pushes still show meanwhile: the loop waits on the FIFO until then)
+        restart_at=$(( NOW + wait_s * 1000000 ))
+    else
+        exec {src}<&-
+        sleep "$wait_s"
+        start_events
+    fi
 }
+
+show() {
+    [[ "$1" == "$last" ]] && return
+    last=$1
+    printf '%s\n' "$1"
+    [[ -n "$slot_file" ]] && { printf '%s\n' "$1" > "$slot_file"; } 2>/dev/null
+}
+
+emit() { show "$("${status[@]}" 2>/dev/null)"; }
+
+# microseconds since the epoch
+now_us() { local t=${EPOCHREALTIME/[.,]/}; printf -v NOW '%d' "$((10#$t))"; }
 
 start_events
 emit
+pushed=0 pending=0 shown=0
 while true; do
-    if read -r -t "$every" _ <&"$src"; then
-        # coalesce a burst (at most ~3 s, so a chatty source cannot starve the update)
-        for _ in {1..10}; do read -r -t 0.3 _ <&"$src" || break; done
+    timeout=$every
+    if (( restart_at )); then
+        now_us
+        if (( NOW >= restart_at )); then
+            start_events
+            orphaned && exit 0
+            emit
+            continue
+        fi
+        (( restart_at - NOW < every * 1000000 )) &&
+            printf -v timeout '%d.%06d' $(( (restart_at - NOW) / 1000000 )) $(( (restart_at - NOW) % 1000000 ))
+    fi
+    if IFS= read -r -t "$timeout" line <&"$src"; then
+        orphaned && exit 0
+        now_us
+        if [[ -n "$push_fifo" && "$line" == "@@eof" ]]; then
+            events_ended
+            pending=1
+        elif [[ -n "$push_fifo" && "$line" == "@@show "* ]]; then
+            show "${line#@@show }"
+            pushed=$NOW pending=1
+        elif (( NOW - pushed < 500000 )); then
+            # the event of a change that was pushed a moment ago: check it after the burst
+            pending=1
+        else
+            emit
+            pending=0
+        fi
+        shown=$NOW
+        while IFS= read -r -t 0.3 line <&"$src"; do
+            now_us
+            if [[ -n "$push_fifo" && "$line" == "@@eof" ]]; then
+                events_ended
+                pending=1
+                continue
+            fi
+            if [[ -n "$push_fifo" && "$line" == "@@show "* ]]; then
+                show "${line#@@show }"
+                pushed=$NOW shown=$NOW pending=1
+                continue
+            fi
+            pending=1
+            # (no status runs while pushes come in: they would only delay the next one)
+            if (( NOW - pushed >= 500000 && NOW - shown >= 100000 )); then
+                orphaned && exit 0
+                emit
+                shown=$NOW pending=0
+            fi
+        done
+        (( pending )) || continue
     elif (( $? <= 128 )); then
-        # end of file: the event source died (e.g. daemon restart); restart it after a pause
-        exec {src}<&-
-        kill "$pid" 2>/dev/null
-        sleep 5
-        start_events
+        # end of file (no FIFO): the event source ended
+        events_ended
     fi
     orphaned && exit 0
     emit

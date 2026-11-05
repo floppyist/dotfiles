@@ -3,34 +3,22 @@
 # or output (the capsule hides itself). pactl talks to PulseAudio and to PipeWire's pulse server.
 # Usage: polybar-volume.sh --status   one status line
 #        polybar-volume.sh --events   one line per sink/server change (polybar-watch event source)
+# volume.sh pushes the new text to the capsule itself (polybar-watch --push volume), so a key
+# shows at once; the events catch changes made elsewhere (pulsemixer, other programs).
 set -u
 
 DF_BLUE_HI="#83a598" DF_MUTED="#7c6f64"
 # shellcheck source=/dev/null
 . "${XDG_CONFIG_HOME:-$HOME/.config}/dotfiles/theme.sh" 2>/dev/null
+# volume_text, volume_read
+# shellcheck source=lib/volume.sh
+. "$(dirname "$(readlink -f "$0")")/lib/volume.sh" || exit 1
 
 # pactl translates its output
 export LC_ALL=C
 
 status() {
-    local vol mute pct max=-1
-    vol=$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null) || { echo ""; return; }
-    mute=$(pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null) || { echo ""; return; }
-    # "Volume: front-left: 32770 /  50% / -18.06 dB,   front-right: ...": the loudest channel
-    for pct in $(grep -o '[0-9]\+%' <<< "$vol"); do
-        pct=${pct%\%}
-        (( 10#$pct > max )) && max=$(( 10#$pct ))
-    done
-    (( max >= 0 )) || { echo ""; return; }
-    if [[ $mute == *yes* ]]; then
-        echo "%{F$DF_MUTED}󰝟  mute%{F-}"
-    elif (( max >= 66 )); then
-        echo "%{F$DF_BLUE_HI}󰕾  %{F-}$max%"
-    elif (( max >= 33 )); then
-        echo "%{F$DF_BLUE_HI}󰖀  %{F-}$max%"
-    else
-        echo "%{F$DF_BLUE_HI}󰕿  %{F-}$max%"
-    fi
+    if volume_read; then volume_text "$VOL" "$MUTE"; else echo ""; fi
 }
 
 events() {
