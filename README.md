@@ -101,12 +101,13 @@ touchpads) is detected, and every guess can be overridden there.
 | <kbd>Super</kbd> <kbd>b</kbd> (or the display function key) | Bluetooth on/off |
 | <kbd>Super</kbd> <kbd>v</kbd> | VPN menu |
 | <kbd>Print</kbd> / <kbd>Shift</kbd> <kbd>Print</kbd> | Screenshot / region screenshot (also copied to the clipboard) |
-| Volume and brightness keys | 5 % per press, with an on-screen bar. Brightness glides; holding the key ramps smoothly and speeds up (laptop firmware repeats these keys only 4 times a second). Below 5 % the built-in panel goes dark (0 %) while another monitor is on, e.g. when mirroring; up, unplugging the other monitor or logging in again brings it back |
+| Volume keys, microphone key | 5 % per press (never above 100 %), with an on-screen bar; the microphone key mutes or unmutes the microphone |
+| Brightness keys | 5 % per press (at least one step of the device), with an on-screen bar. The brightness glides to the new value; holding the key ramps smoothly and speeds up (5, 10, 15 … 25 % per repeat: laptop firmware repeats these keys only four times a second). Below 5 % the built-in panel goes dark (0 %) while another monitor is on, e.g. when mirroring; with the panel alone it stops at 5 %. Up, unplugging the other monitor or logging in again brings it back |
 
 **Region screenshot** (<kbd>Shift</kbd> <kbd>Print</kbd>): the screen freezes and dims, a bar at the top shows the
 keys. Drag to take a region (its size is shown next to it), click to take the window under the pointer, <kbd>Return</kbd>
 for the whole monitor, <kbd>Esc</kbd> or a right click to cancel. Lines through the pointer show where it is. Without
-input it cancels itself after 30 s.
+input it cancels itself after 30 s (sooner when `screensaver_after` is short, so it never blocks the lock).
 
 Terminal tools started from Rofi (audio mixer, htop, neomutt) open as a centered floating window
 (`terminal.sh --float`, with the terminal from `dotfiles.conf`).
@@ -134,7 +135,7 @@ and the duration of commands that took 2 s or longer. The second line is the inp
 Click the WiFi, VPN or Bluetooth capsule for its menu; right-click VPN or Bluetooth to toggle it (VPN: the last
 used profile). Click the IP address to copy it, the music to play/pause (right-click: next), the clock for the
 full date; click the volume to mute it, right-click it for `pulsemixer`. The mouse wheel on the volume or the
-brightness changes it (5 % steps, with the on-screen bar).
+brightness changes it (5 % per notch, with the on-screen bar).
 
 Capsules without their hardware hide themselves: no WiFi adapter, Bluetooth adapter, backlight, battery, sound
 output or temperature sensor, no capsule. `bar_hide` in `dotfiles.conf` leaves out others; `temperature_sensor` and
@@ -150,7 +151,7 @@ there is room again. An empty capsule (the tray without icons) takes no gap.
 | Module | Updated by |
 | --- | --- |
 | Workspaces | Polybar itself (i3 IPC) |
-| Volume | the keys and the mouse wheel push the new value straight into the capsule; changes made elsewhere arrive through `polybar-watch` with `pactl subscribe` (output and server events; PipeWire or PulseAudio) |
+| Volume | the keys and the mouse wheel push the new value straight into the capsule; changes made elsewhere arrive through `polybar-watch` with `pactl subscribe` (output and server events; PipeWire or PulseAudio). A sound server that starts after the bar (at login) is picked up within a second or two |
 | Brightness | the brightness keys and the mouse wheel (`polybar-msg ... send`, following the glide) |
 | Music | `playerctl --follow`: once per second while playing, nothing while paused |
 | WiFi, IP, VPN, Bluetooth, battery | `polybar-watch` with `nmcli monitor`, `ip monitor`, `gdbus monitor` (bluez), `udevadm monitor` (charger, battery); plus a slow fallback refresh |
@@ -307,7 +308,7 @@ a pinned version and SHA-256 ([`install/upstream.sh`](install/upstream.sh)):
 
 | Module | Packages | It also |
 | --- | --- | --- |
-| **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap xinput i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` (elsewhere also `procps`, `util-linux`, `iproute2`, ...; Debian and Fedora get `mate-polkit`, they have no `polkit-gnome`) | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind` (Alpine also `udev`), writes your console keymap into `~/.config/dotfiles.conf` as `keyboard_layout` when X has none, links the files, generates the theme |
+| **Desktop** (always) | `xorg-minimal xinit xauth xrdb xsetroot xset xrandr setxkbmap xinput i3 picom polybar rofi dunst libnotify alacritty feh xclip xbanish scrot xss-lock i3lock-color libXScrnSaver dbus elogind polkit polkit-gnome python3 python3-gobject python3-cairo python3-numpy gtk+3 adwaita-icon-theme fontconfig dejavu-fonts-ttf desktop-file-utils git curl xz fzf tmux ncurses bash` (elsewhere also `procps`, `util-linux`, `iproute2`, ...; Debian and Fedora get `mate-polkit`, they have no `polkit-gnome`) | downloads JetBrainsMono Nerd Font, enables `dbus` and `elogind` (Alpine also `udev`), removes the Xorg mouse config of an earlier version (mouse and touchpad settings are set per user now), writes your console keymap into `~/.config/dotfiles.conf` as `keyboard_layout` when X has none, links the files, generates the theme |
 | **System update** | | updates the package manager and the whole system first |
 | **Graphics drivers** | `mesa-dri`, plus for Intel `vulkan-loader mesa-vulkan-intel intel-video-accel`, for AMD `vulkan-loader mesa-vulkan-radeon mesa-vaapi xf86-video-amdgpu` (`xf86-video-ati` instead on the kernel driver radeon), for NVIDIA `mesa-vulkan-nouveau` or a proprietary driver (`nvidia`, `nvidia580`, `nvidia470`, with `void-repo-nonfree linux-headers`) | finds the GPUs itself (AMD's Xorg driver: TearFree, see [Monitors and scale](#monitors-and-scale)); removes the software pointer an earlier version installed |
 | **Audio** | `pipewire wireplumber alsa-pipewire pulseaudio-utils pulsemixer` | routes ALSA programs through PipeWire (Void; elsewhere its package does) |
